@@ -1,5 +1,24 @@
 # Detailed Plan: `tcc_*` UX + API + Build Integration for DuckDB Community Extension
 
+## Current State (Implemented)
+
+- Extension name and artifacts are lowercase `ducktinycc` for loader/CI compatibility.
+- `tcc_module` is implemented as the public SQL table function.
+- TinyCC is built from vendored source via CMake `ExternalProject_Add` and linked statically (`libtcc.a`).
+- Runtime default path is auto-wired to the built TinyCC artifact directory.
+- Real execution paths:
+  - `mode='compile'`: real `tcc_new -> tcc_compile_string -> tcc_relocate -> tcc_get_symbol` flow
+  - `mode='register'`: compiles a **fresh TinyCC state per compilation unit** and stores artifact in connection session registry
+  - `mode='call'`: can execute one-shot (`source`+`symbol`) or execute later from registered artifact (`sql_name`)
+  - `mode='unregister'`: removes and frees registered artifact/state
+- Tests:
+  - `make test_debug`: passing
+  - `make test_release`: passing
+- README:
+  - function table first
+  - pure SQL examples (no R execution chunks)
+  - includes register-then-later-call examples and series/array style calls
+
 ## Summary
 Build a DuckDB C extension that embeds TinyCC as a static dependency (`libtcc.a`) and exposes a **single public SQL entrypoint** `tcc_module(...)` (table function), with all operations controlled by `mode`.
 This follows the constraints:
@@ -135,4 +154,3 @@ Still add explicit diagnostics for:
 - Session and artifact registries are per connection; no cross-connection sharing in v1.
 - API naming is strictly `tcc_*` prefixed.
 - Single public SQL function remains `tcc_module` with mode-driven behavior.
-

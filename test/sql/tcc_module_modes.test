@@ -1,8 +1,8 @@
 # name: test/sql/tcc_module_modes.test
 # description: mode coverage for tcc_module
-# group: [capi_quack]
+# group: [ducktinycc]
 
-require capi_quack
+require ducktinycc
 
 query TTTT
 SELECT ok, mode, code, detail
@@ -22,11 +22,11 @@ FROM tcc_module(mode := 'config_reset');
 ----
 true	config_reset	OK
 
-query TTTT
-SELECT ok, mode, code, detail
+query TTT
+SELECT ok, mode, code
 FROM tcc_module(mode := 'config_get');
 ----
-true	config_get	OK	(unset)
+true	config_get	OK
 
 query TTT
 SELECT ok, mode, code
@@ -38,16 +38,37 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(mode := 'register');
 ----
-false	register	E_NOT_IMPLEMENTED
+false	register	E_MISSING_ARGS
 
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(mode := 'unregister');
 ----
-false	unregister	E_NOT_IMPLEMENTED
+false	unregister	E_MISSING_ARGS
 
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(mode := 'nonsense');
 ----
 false	nonsense	E_BAD_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'register',
+  source := 'long long tcc_add1(long long x){ return x + 1; }',
+  symbol := 'tcc_add1',
+  sql_name := 'tcc_add1'
+);
+----
+true	register	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'call',
+  sql_name := 'tcc_add1',
+  arg_bigint := '41'
+);
+----
+true	call	OK

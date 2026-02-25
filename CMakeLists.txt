@@ -7,16 +7,6 @@ option(DUCKDB_WASM_EXTENSION "Whether compiling for Wasm target" OFF)
 if(NOT DEFINED EXTENSION_NAME)
     message(FATAL_ERROR "DuckDB extension name is required")
 endif()
-if (DEFINED TARGET_DUCKDB_VERSION_MAJOR)
-    add_definitions(-DDUCKDB_EXTENSION_API_VERSION_MAJOR=${TARGET_DUCKDB_VERSION_MAJOR})
-endif()
-if (DEFINED TARGET_DUCKDB_VERSION_MINOR)
-    add_definitions(-DDUCKDB_EXTENSION_API_VERSION_MINOR=${TARGET_DUCKDB_VERSION_MINOR})
-endif()
-if (DEFINED TARGET_DUCKDB_VERSION_PATCH)
-    add_definitions(-DDUCKDB_EXTENSION_API_VERSION_PATCH=${TARGET_DUCKDB_VERSION_PATCH})
-endif()
-
 add_definitions(-DDUCKDB_EXTENSION_NAME=${EXTENSION_NAME})
 
 if (DEFINED DUCKDB_EXTENSION_API_VERSION_UNSTABLE)
@@ -52,3 +42,39 @@ target_include_directories(${EXTENSION_NAME} PRIVATE src/include)
 
 # Include DuckDB C API headers
 target_include_directories(${EXTENSION_NAME} PRIVATE duckdb_capi)
+target_include_directories(${EXTENSION_NAME} PRIVATE third_party/tinycc)
+
+if (NOT DUCKDB_WASM_EXTENSION)
+    include(ExternalProject)
+    find_program(MAKE_COMMAND NAMES gmake make REQUIRED)
+
+    set(TINYCC_SRC_DIR "${CMAKE_SOURCE_DIR}/third_party/tinycc")
+    set(TINYCC_BUILD_DIR "${CMAKE_BINARY_DIR}/tinycc_build")
+
+    ExternalProject_Add(tinycc_build
+        SOURCE_DIR        "${TINYCC_SRC_DIR}"
+        BINARY_DIR        "${TINYCC_BUILD_DIR}"
+        BUILD_IN_SOURCE   FALSE
+        CONFIGURE_COMMAND "${TINYCC_SRC_DIR}/configure" --source-path=${TINYCC_SRC_DIR} --extra-cflags=-fPIC
+        BUILD_COMMAND     ${MAKE_COMMAND} -j libtcc.a libtcc1.a
+        INSTALL_COMMAND   ""
+        BUILD_BYPRODUCTS  "${TINYCC_BUILD_DIR}/libtcc.a" "${TINYCC_BUILD_DIR}/libtcc1.a"
+        LOG_CONFIGURE     TRUE
+        LOG_BUILD         TRUE
+    )
+
+    add_library(tccstatic STATIC IMPORTED GLOBAL)
+    set_target_properties(tccstatic PROPERTIES
+        IMPORTED_LOCATION "${TINYCC_BUILD_DIR}/libtcc.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${TINYCC_SRC_DIR}"
+    )
+    add_dependencies(tccstatic tinycc_build)
+
+    target_link_libraries(${EXTENSION_NAME} PRIVATE tccstatic)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKTINYCC_DEFAULT_RUNTIME_PATH="${TINYCC_BUILD_DIR}")
+    if (NOT APPLE AND NOT WIN32)
+        target_link_libraries(${EXTENSION_NAME} PRIVATE dl m pthread)
+    endif()
+else()
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKTINYCC_WASM_UNSUPPORTED=1)
+endif()

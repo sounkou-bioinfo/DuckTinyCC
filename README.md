@@ -3,11 +3,22 @@
 
 # DuckTinyCC
 
-DuckTinyCC is a DuckDB C extension with a `tcc_*` SQL surface.
+DuckTinyCC is a DuckDB C extension with a `tcc_*` SQL surface for
+TinyCC-based in-process C scripting workflows.
 
-The current implementation provides a session-oriented control plane
-through `tcc_module(...)` and returns structured diagnostics rows for
-each operation.
+## Functions
+
+| Function                                                                        | Description                                                  | Notes                                    |
+|---------------------------------------------------------------------------------|--------------------------------------------------------------|------------------------------------------|
+| `tcc_module(mode := 'config_get', ...)`                                         | Show current session configuration                           | Returns diagnostics table                |
+| `tcc_module(mode := 'config_set', runtime_path := ... )`                        | Set session runtime path                                     | Connection-scoped state                  |
+| `tcc_module(mode := 'config_reset', ...)`                                       | Reset session configuration                                  | Falls back to default runtime path       |
+| `tcc_module(mode := 'list', ...)`                                               | Show current registry/session counters                       | Diagnostics table                        |
+| `tcc_module(mode := 'compile', source := ..., symbol := ...)`                   | Compile + relocate C source and resolve symbol               | Real libtcc execution                    |
+| `tcc_module(mode := 'call', source := ..., symbol := ..., arg_bigint := ...)`   | Compile + execute `BIGINT(BIGINT)` symbol                    | One-shot compile+execute                 |
+| `tcc_module(mode := 'register', source := ..., symbol := ..., sql_name := ...)` | Compile unit and store callable artifact in session registry | Uses fresh TinyCC state per registration |
+| `tcc_module(mode := 'call', sql_name := ..., arg_bigint := ...)`                | Execute previously registered artifact                       | No recompile on call path                |
+| `tcc_module(mode := 'unregister', sql_name := ...)`                             | Remove a registered artifact from session registry           | Frees TinyCC state                       |
 
 ## Build
 
@@ -20,98 +31,99 @@ make debug
 
 ``` sh
 make test_debug
+make test_release
 ```
 
-## Usage from R (DBI)
+## SQL Usage
 
-``` r
-library(DBI)
-library(duckdb)
+``` sql
+-- In local development, unsigned extension loading must be enabled in the client.
+LOAD 'build/debug/ducktinycc.duckdb_extension';
 ```
 
-``` r
-db <- duckdb(config = list(allow_unsigned_extensions = "true"))
-con <- dbConnect(
-  db
+``` sql
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'config_get');
+```
+
+``` sql
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'config_set',
+  runtime_path := 'third_party/tinycc'
+);
+```
+
+``` sql
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'compile',
+  source := 'long long tcc_tmp(long long x){ return x + 1; }',
+  symbol := 'tcc_tmp'
+);
+```
+
+``` sql
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'call',
+  source := 'long long tcc_add1(long long x){ return x + 1; }',
+  symbol := 'tcc_add1',
+  arg_bigint := '41'
+);
+```
+
+``` sql
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'register',
+  source := 'long long tcc_add1(long long x){ return x + 1; }',
+  symbol := 'tcc_add1',
+  sql_name := 'tcc_add1'
+);
+```
+
+``` sql
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'call',
+  sql_name := 'tcc_add1',
+  arg_bigint := '41'
+);
+```
+
+``` sql
+-- Naked-style SQL call via a macro wrapper
+CREATE OR REPLACE MACRO tcc_add1(x) AS (
+  SELECT CAST(detail AS BIGINT)
+  FROM tcc_module(
+    mode := 'call',
+    sql_name := 'tcc_add1',
+    arg_bigint := CAST(x AS VARCHAR)
+  )
+);
+
+SELECT tcc_add1(41) AS answer;
+```
+
+``` sql
+-- Series/loop-style usage
+SELECT i, tcc_add1(i) AS i_plus_1
+FROM range(0, 10) AS t(i);
+```
+
+``` sql
+-- Array-style usage through UNNEST
+WITH vals AS (
+  SELECT unnest([1, 2, 3, 10, 20]) AS x
 )
-dbExecute(con, "LOAD 'build/debug/capi_quack.duckdb_extension'")
+SELECT x, tcc_add1(x) AS y
+FROM vals;
 ```
-
-    ## [1] 0
-
-For convenience in examples:
-
-``` r
-q <- function(sql) dbGetQuery(con, sql)
-```
-
-### Inspect default session state
-
-``` r
-q("SELECT ok, mode, code, detail FROM tcc_module(mode := 'config_get')")
-```
-
-    ##     ok       mode code  detail
-    ## 1 TRUE config_get   OK (unset)
-
-### Set runtime path for this connection session
-
-``` r
-q(
-  "SELECT ok, mode, code, detail
-   FROM tcc_module(
-     mode := 'config_set',
-     runtime_path := 'third_party/tinycc'
-   )"
-)
-```
-
-    ##     ok       mode code             detail
-    ## 1 TRUE config_set   OK third_party/tinycc
-
-### Verify current session config
-
-``` r
-q("SELECT ok, mode, code, detail FROM tcc_module(mode := 'config_get')")
-```
-
-    ##     ok       mode code             detail
-    ## 1 TRUE config_get   OK third_party/tinycc
-
-### List current artifact registry state
-
-``` r
-q("SELECT ok, mode, phase, code, message FROM tcc_module(mode := 'list')")
-```
-
-    ##     ok mode    phase code                           message
-    ## 1 TRUE list registry   OK no registered tcc_* artifacts yet
-
-### Reset session configuration
-
-``` r
-q("SELECT ok, mode, code, detail FROM tcc_module(mode := 'config_reset')")
-```
-
-    ##     ok         mode code  detail
-    ## 1 TRUE config_reset   OK (unset)
-
-### Error diagnostics example (invalid mode)
-
-``` r
-q("SELECT ok, mode, phase, code, message FROM tcc_module(mode := 'unknown')")
-```
-
-    ##      ok    mode phase       code      message
-    ## 1 FALSE unknown  bind E_BAD_MODE unknown mode
 
 ## Notes
 
-- The API is intentionally row-oriented and diagnostic-first, so it fits
-  SQL workflows and test assertions.
-- `compile/register` execution paths are being wired to TinyCC runtime
-  next.
-
-``` r
-dbDisconnect(con, shutdown = TRUE)
-```
+- Current callable execution path is `mode := 'call'` with
+  `BIGINT(BIGINT)` function signatures.
+- All outputs are returned as a diagnostics table for SQL-native
+  observability.

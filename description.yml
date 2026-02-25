@@ -1,4 +1,4 @@
-name: capi_quack
+name: ducktinycc
 version: 0.0.1
 description: DuckDB TinyCC extension with tcc_* SQL surface
 license: MIT

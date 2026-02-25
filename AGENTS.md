@@ -32,6 +32,17 @@ This repository uses local precedent references under `.sync/` to guide implemen
 ## Current Project Plan Reference
 - `PLAN_tcc_extension.md`
 
+## Current Implementation State
+- Extension artifact/name: `ducktinycc`
+- Public SQL entrypoint: `tcc_module(...)`
+- Implemented modes:
+  - `config_get`, `config_set`, `config_reset`, `list`
+  - `compile` (real TinyCC compile+relocate)
+  - `register` (fresh TinyCC state per compilation unit, stored in session registry)
+  - `call` (one-shot compile+execute OR call by registered `sql_name`)
+  - `unregister` (remove and free session artifact)
+- Tests currently passing: `make test_debug`, `make test_release`
+
 ## Working Rules for This Repo
 - Prefix public SQL/API surface with `tcc_*`.
 - Use `.sync/Rtinycc` for TinyCC build/runtime decisions.
