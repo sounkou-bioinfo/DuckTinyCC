@@ -1,5 +1,4 @@
 ---
-title: "DuckTinyCC"
 output: github_document
 ---
 

@@ -11,7 +11,7 @@ EXTENSION_NAME=capi_quack
 USE_UNSTABLE_C_API=0
 
 # The DuckDB version to target
-TARGET_DUCKDB_VERSION=v1.2.0
+TARGET_DUCKDB_VERSION=v1.4.3
 
 all: configure release
 
@@ -32,4 +32,4 @@ clean: clean_build clean_cmake
 clean_all: clean clean_configure
 
 rdm:
-	Rscript -e "rmarkdown::render('README.Rmd', output_format = 'github_document', quiet = TRUE)"
+	R -e "rmarkdown::render('README.Rmd')"
