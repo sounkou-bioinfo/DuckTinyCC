@@ -1,4 +1,4 @@
-.PHONY: clean clean_all
+.PHONY: clean clean_all rdm
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -30,3 +30,6 @@ test_release: test_extension_release
 
 clean: clean_build clean_cmake
 clean_all: clean clean_configure
+
+rdm:
+	Rscript -e "rmarkdown::render('README.Rmd', output_format = 'github_document', quiet = TRUE)"

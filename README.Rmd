@@ -1,43 +1,44 @@
-DuckTinyCC
-================
+---
+title: "DuckTinyCC"
+output: github_document
+---
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
 # DuckTinyCC
 
-DuckTinyCC is a DuckDB C extension that exposes a `tcc_*` SQL surface
-for TinyCC-driven C scripting workflows.
+DuckTinyCC is a DuckDB C extension that exposes a `tcc_*` SQL surface for
+TinyCC-driven C scripting workflows.
 
 Current status:
 
 - `tcc_module(...)` is available as the main table function.
 - session-oriented configuration modes are implemented (`config_get`,
   `config_set`, `config_reset`, `list`).
-- compile/register execution modes are present and currently return
-  explicit `E_NOT_IMPLEMENTED` diagnostics until TinyCC runtime wiring
-  is completed.
+- compile/register execution modes are present and currently return explicit
+  `E_NOT_IMPLEMENTED` diagnostics until TinyCC runtime wiring is completed.
 
 ## Build
 
-``` sh
+```sh
 make configure
 make debug
 ```
 
 ## Test
 
-``` sh
+```sh
 make test_debug
 ```
 
 ## Usage from R
 
-``` r
+```{r setup, message=FALSE, warning=FALSE}
 library(DBI)
 library(duckdb)
 ```
 
-``` r
+```{r connect}
 db <- duckdb(config = list(allow_unsigned_extensions = "true"))
 con <- dbConnect(
   db
@@ -45,16 +46,11 @@ con <- dbConnect(
 dbExecute(con, "LOAD 'build/debug/capi_quack.duckdb_extension'")
 ```
 
-    ## [1] 0
-
-``` r
+```{r config-get}
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'config_get')")
 ```
 
-    ##     ok       mode code  detail
-    ## 1 TRUE config_get   OK (unset)
-
-``` r
+```{r config-set}
 dbGetQuery(
   con,
   "SELECT ok, mode, code, detail
@@ -62,20 +58,13 @@ dbGetQuery(
 )
 ```
 
-    ##     ok       mode code             detail
-    ## 1 TRUE config_set   OK third_party/tinycc
-
-``` r
+```{r compile-stub}
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'compile')")
 ```
 
-    ##      ok    mode              code
-    ## 1 FALSE compile E_NOT_IMPLEMENTED
+The output is intentionally tabular and diagnostic-oriented, so SQL users can
+inspect configuration and execution status directly inside DuckDB queries.
 
-The output is intentionally tabular and diagnostic-oriented, so SQL
-users can inspect configuration and execution status directly inside
-DuckDB queries.
-
-``` r
+```{r cleanup}
 dbDisconnect(con, shutdown = TRUE)
 ```
