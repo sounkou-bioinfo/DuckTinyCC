@@ -52,9 +52,13 @@ make test_release
 
 ## Examples
 
-The examples below follow the same `DBI` + `duckdb` usage style as `duckhts`.
+The examples below use `DBI` + `duckdb` and run end-to-end against the built extension.
 
-```{r eval=FALSE}
+### Setup
+
+This chunk connects to DuckDB in-memory and loads the extension artifact.
+
+```{r eval=TRUE}
 library(DBI)
 library(duckdb)
 
@@ -62,43 +66,132 @@ drv <- duckdb::duckdb(config = list(allow_unsigned_extensions = "true"))
 con <- dbConnect(drv, dbdir = ":memory:")
 ext_path <- normalizePath("build/release/ducktinycc.duckdb_extension", mustWork = FALSE)
 dbExecute(con, sprintf("LOAD '%s'", ext_path))
+```
+
+### Session Configuration
+
+This chunk exercises `config_set`, `config_get`, and `list` before compilation work starts.
+
+```{r eval=TRUE}
+dbGetQuery(con, "
+  SELECT ok, mode, code, detail
+  FROM tcc_module(
+    mode := 'config_set',
+    runtime_path := 'third_party/tinycc'
+  )
+")
 
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
-  FROM tcc_module(mode := 'tcc_new_state')
+  FROM tcc_module(mode := 'config_get')
 ")
 
 dbGetQuery(con, "
-  SELECT ok, mode, code
+  SELECT ok, mode, code, detail
+  FROM tcc_module(mode := 'list')
+")
+```
+
+### Build State 1: Multiple Inputs and Functions
+
+This chunk starts a fresh state, adds include/sysinclude/library paths, options, defines, headers, and source code.  
+It then binds and compiles two different functions from the same state and calls both.
+
+```{r eval=TRUE}
+dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state')")
+dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_include', include_path := 'third_party/tinycc/include')")
+dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_sysinclude', sysinclude_path := 'third_party/tinycc/include')")
+dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library_path', library_path := 'third_party/tinycc')")
+dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library', library := 'm')")
+dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_option', option := '-O2')")
+dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_define', define_name := 'TCC_SHIFT', define_value := '3')")
+
+dbGetQuery(con, "
+  SELECT ok, mode, code, detail
+  FROM tcc_module(
+    mode := 'add_header',
+    header := '#include <stdint.h>'
+  )
+")
+
+dbGetQuery(con, "
+  SELECT ok, mode, code, detail
   FROM tcc_module(
     mode := 'add_source',
-    source := 'long long tcc_add1(long long x){ return x + 1; }'
+    source := '
+      long long tcc_add_shift(long long x){ return x + TCC_SHIFT; }
+      long long tcc_times2(long long x){ return x * 2; }
+    '
   )
 ")
 
+dbGetQuery(con, "
+  SELECT ok, mode, code
+  FROM tcc_module(mode := 'tinycc_bind', symbol := 'tcc_add_shift', sql_name := 'tcc_add_shift')
+")
+dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'tinycc_compile')")
+dbGetQuery(con, "
+  SELECT ok, mode, code, detail
+  FROM tcc_module(mode := 'call', sql_name := 'tcc_add_shift', arg_bigint := '39')
+")
+
+dbGetQuery(con, "
+  SELECT ok, mode, code
+  FROM tcc_module(mode := 'tinycc_bind', symbol := 'tcc_times2', sql_name := 'tcc_times2')
+")
+dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'compile')")
+dbGetQuery(con, "
+  SELECT ok, mode, code, detail
+  FROM tcc_module(mode := 'call', sql_name := 'tcc_times2', arg_bigint := '21')
+")
+```
+
+### Build State 2: Explicit Register Mode and One-Shot Call
+
+This chunk exercises `register` directly and also the one-shot `call` path with inline source.
+
+```{r eval=TRUE}
 dbGetQuery(con, "
   SELECT ok, mode, code
   FROM tcc_module(
-    mode := 'tinycc_bind',
-    symbol := 'tcc_add1',
-    sql_name := 'tcc_add1'
+    mode := 'register',
+    source := 'long long tcc_add10(long long x){ return x + 10; }',
+    symbol := 'tcc_add10',
+    sql_name := 'tcc_add10'
   )
 ")
 
 dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(mode := 'tinycc_compile')
+  SELECT ok, mode, code, detail
+  FROM tcc_module(mode := 'call', sql_name := 'tcc_add10', arg_bigint := '32')
 ")
 
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
   FROM tcc_module(
     mode := 'call',
-    sql_name := 'tcc_add1',
-    arg_bigint := '41'
+    source := 'long long tcc_square(long long x){ return x * x; }',
+    symbol := 'tcc_square',
+    arg_bigint := '9'
   )
 ")
+```
 
+### Unregister and Reset
+
+This final chunk exercises `unregister`, `list`, and `config_reset`.
+
+```{r eval=TRUE}
+dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add10')")
+dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'list')")
+dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
+```
+
+### Cleanup
+
+This chunk closes the database connection.
+
+```{r eval=TRUE}
 dbDisconnect(con, shutdown = TRUE)
 ```
 
