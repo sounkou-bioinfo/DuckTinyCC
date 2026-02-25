@@ -70,14 +70,15 @@ dbExecute(con, sprintf("LOAD '%s'", ext_path))
 
 ### Session Configuration
 
-This chunk exercises `config_set`, `config_get`, and `list` before compilation work starts.
+This chunk exercises `config_set`, `config_get`, and `list` before compilation work starts.  
+It intentionally sets `runtime_path := ''` so TinyCC uses the extension-managed default runtime location.
 
 ```{r eval=TRUE}
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
   FROM tcc_module(
     mode := 'config_set',
-    runtime_path := 'third_party/tinycc'
+    runtime_path := ''
   )
 ")
 
@@ -102,7 +103,6 @@ dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_include', include_path := 'third_party/tinycc/include')")
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_sysinclude', sysinclude_path := 'third_party/tinycc/include')")
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library_path', library_path := 'third_party/tinycc')")
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library', library := 'm')")
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_option', option := '-O2')")
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_define', define_name := 'TCC_SHIFT', define_value := '3')")
 
@@ -148,7 +148,8 @@ dbGetQuery(con, "
 
 ### Build State 2: Explicit Register Mode and One-Shot Call
 
-This chunk exercises `register` directly and also the one-shot `call` path with inline source.
+This chunk exercises `register` directly and also the one-shot `call` path with inline source.  
+It confirms both pre-registered and ephemeral compilation paths in one session.
 
 ```{r eval=TRUE}
 dbGetQuery(con, "

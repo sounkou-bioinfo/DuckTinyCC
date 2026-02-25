@@ -62,25 +62,29 @@ dbExecute(con, sprintf("LOAD '%s'", ext_path))
 ### Session Configuration
 
 This chunk exercises `config_set`, `config_get`, and `list` before
-compilation work starts.
+compilation work starts.  
+It intentionally sets `runtime_path := ''` so TinyCC uses the
+extension-managed default runtime location.
 
 ``` r
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
   FROM tcc_module(
     mode := 'config_set',
-    runtime_path := 'third_party/tinycc'
+    runtime_path := ''
   )
 ")
-#>     ok       mode code             detail
-#> 1 TRUE config_set   OK third_party/tinycc
+#>     ok       mode code  detail
+#> 1 TRUE config_set   OK (empty)
 
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
   FROM tcc_module(mode := 'config_get')
 ")
-#>     ok       mode code                                                 detail
-#> 1 TRUE config_get   OK runtime=third_party/tinycc state_id=0 config_version=1
+#>     ok       mode code
+#> 1 TRUE config_get   OK
+#>                                                                                  detail
+#> 1 runtime=/root/DuckTinyCC/cmake_build/release/tinycc_build state_id=0 config_version=1
 
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
@@ -110,9 +114,6 @@ dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_sysi
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library_path', library_path := 'third_party/tinycc')")
 #>     ok             mode code             detail
 #> 1 TRUE add_library_path   OK third_party/tinycc
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library', library := 'm')")
-#>     ok        mode code detail
-#> 1 TRUE add_library   OK      m
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_option', option := '-O2')")
 #>     ok       mode code detail
 #> 1 TRUE add_option   OK    -O2
@@ -150,14 +151,14 @@ dbGetQuery(con, "
 #>     ok        mode code
 #> 1 TRUE tinycc_bind   OK
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'tinycc_compile')")
-#>      ok           mode             code
-#> 1 FALSE tinycc_compile E_COMPILE_FAILED
+#>     ok           mode code
+#> 1 TRUE tinycc_compile   OK
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
   FROM tcc_module(mode := 'call', sql_name := 'tcc_add_shift', arg_bigint := '39')
 ")
-#>      ok mode        code detail
-#> 1 FALSE call E_NOT_FOUND   <NA>
+#>     ok mode code detail
+#> 1 TRUE call   OK     42
 
 dbGetQuery(con, "
   SELECT ok, mode, code
@@ -166,20 +167,22 @@ dbGetQuery(con, "
 #>     ok        mode code
 #> 1 TRUE tinycc_bind   OK
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'compile')")
-#>      ok    mode             code
-#> 1 FALSE compile E_COMPILE_FAILED
+#>     ok    mode code
+#> 1 TRUE compile   OK
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
   FROM tcc_module(mode := 'call', sql_name := 'tcc_times2', arg_bigint := '21')
 ")
-#>      ok mode        code detail
-#> 1 FALSE call E_NOT_FOUND   <NA>
+#>     ok mode code detail
+#> 1 TRUE call   OK     42
 ```
 
 ### Build State 2: Explicit Register Mode and One-Shot Call
 
 This chunk exercises `register` directly and also the one-shot `call`
-path with inline source.
+path with inline source.  
+It confirms both pre-registered and ephemeral compilation paths in one
+session.
 
 ``` r
 dbGetQuery(con, "
@@ -191,15 +194,15 @@ dbGetQuery(con, "
     sql_name := 'tcc_add10'
   )
 ")
-#>      ok     mode             code
-#> 1 FALSE register E_COMPILE_FAILED
+#>     ok     mode code
+#> 1 TRUE register   OK
 
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
   FROM tcc_module(mode := 'call', sql_name := 'tcc_add10', arg_bigint := '32')
 ")
-#>      ok mode        code detail
-#> 1 FALSE call E_NOT_FOUND   <NA>
+#>     ok mode code detail
+#> 1 TRUE call   OK     42
 
 dbGetQuery(con, "
   SELECT ok, mode, code, detail
@@ -210,8 +213,8 @@ dbGetQuery(con, "
     arg_bigint := '9'
   )
 ")
-#>      ok mode             code                                 detail
-#> 1 FALSE call E_COMPILE_FAILED tcc: error: file 'libtcc1.a' not found
+#>     ok mode code detail
+#> 1 TRUE call   OK     81
 ```
 
 ### Unregister and Reset
@@ -220,11 +223,11 @@ This final chunk exercises `unregister`, `list`, and `config_reset`.
 
 ``` r
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add10')")
-#>      ok       mode        code
-#> 1 FALSE unregister E_NOT_FOUND
+#>     ok       mode code
+#> 1 TRUE unregister   OK
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'list')")
 #>     ok mode code                                                        detail
-#> 1 TRUE list   OK registered=0 sources=1 headers=1 includes=1 libs=1 state_id=1
+#> 1 TRUE list   OK registered=2 sources=1 headers=1 includes=1 libs=0 state_id=1
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 #>     ok         mode code
 #> 1 TRUE config_reset   OK
