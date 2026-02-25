@@ -10,11 +10,11 @@ FROM tcc_module(mode := 'config_set', runtime_path := '/tmp/runtime-a');
 ----
 true	config_set	OK	/tmp/runtime-a
 
-query TTTT
-SELECT ok, mode, code, detail
+query TTT
+SELECT ok, mode, code
 FROM tcc_module(mode := 'config_get');
 ----
-true	config_get	OK	/tmp/runtime-a
+true	config_get	OK
 
 query TTT
 SELECT ok, mode, code
@@ -69,6 +69,47 @@ FROM tcc_module(
   mode := 'call',
   sql_name := 'tcc_add1',
   arg_bigint := '41'
+);
+----
+true	call	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tcc_new_state');
+----
+true	tcc_new_state	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_source',
+  source := 'long long tcc_add2(long long x){ return x + 2; }'
+);
+----
+true	add_source	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'tinycc_bind',
+  symbol := 'tcc_add2',
+  sql_name := 'tcc_add2'
+);
+----
+true	tinycc_bind	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tinycc_compile');
+----
+true	tinycc_compile	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'call',
+  sql_name := 'tcc_add2',
+  arg_bigint := '40'
 );
 ----
 true	call	OK

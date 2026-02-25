@@ -14,16 +14,45 @@
 DUCKDB_EXTENSION_EXTERN
 
 typedef struct {
+	char **items;
+	idx_t count;
+	idx_t capacity;
+} tcc_string_list_t;
+
+typedef struct {
 	char *runtime_path;
+	char *bound_symbol;
+	char *bound_sql_name;
+	tcc_string_list_t include_paths;
+	tcc_string_list_t sysinclude_paths;
+	tcc_string_list_t library_paths;
+	tcc_string_list_t libraries;
+	tcc_string_list_t options;
+	tcc_string_list_t headers;
+	tcc_string_list_t sources;
+	tcc_string_list_t define_names;
+	tcc_string_list_t define_values;
 	uint64_t config_version;
+	uint64_t state_id;
 } tcc_session_t;
+
+#ifndef DUCKTINYCC_WASM_UNSUPPORTED
+typedef struct {
+	TCCState *tcc;
+	int64_t (*fn)(int64_t);
+	char *sql_name;
+	char *symbol;
+	uint64_t state_id;
+} tcc_registered_artifact_t;
+#endif
 
 typedef struct {
 	char *sql_name;
 	char *symbol;
-#ifndef DUCKTINYCC_WASM_UNSUPPORTED
-	TCCState *tcc;
 	int64_t (*fn)(int64_t);
+	uint64_t state_id;
+#ifndef DUCKTINYCC_WASM_UNSUPPORTED
+	tcc_registered_artifact_t *artifact;
 #endif
 } tcc_registered_entry_t;
 
@@ -42,6 +71,14 @@ typedef struct {
 	char *symbol;
 	char *sql_name;
 	char *arg_bigint;
+	char *include_path;
+	char *sysinclude_path;
+	char *library_path;
+	char *library;
+	char *option;
+	char *header;
+	char *define_name;
+	char *define_value;
 } tcc_module_bind_data_t;
 
 typedef struct {
@@ -81,6 +118,132 @@ static void tcc_append_error(void *opaque, const char *msg) {
 	snprintf(buffer->message + cur, left, "%s%s", cur > 0 ? " | " : "", msg);
 }
 
+static void tcc_set_error(tcc_error_buffer_t *error_buf, const char *message) {
+	if (!error_buf || !message) {
+		return;
+	}
+	snprintf(error_buf->message, sizeof(error_buf->message), "%s", message);
+}
+
+static void tcc_string_list_destroy(tcc_string_list_t *list) {
+	idx_t i;
+	if (!list) {
+		return;
+	}
+	for (i = 0; i < list->count; i++) {
+		if (list->items[i]) {
+			duckdb_free(list->items[i]);
+		}
+	}
+	if (list->items) {
+		duckdb_free(list->items);
+	}
+	memset(list, 0, sizeof(tcc_string_list_t));
+}
+
+static bool tcc_string_list_reserve(tcc_string_list_t *list, idx_t wanted) {
+	char **new_items;
+	idx_t new_capacity;
+	if (!list) {
+		return false;
+	}
+	if (list->capacity >= wanted) {
+		return true;
+	}
+	new_capacity = list->capacity == 0 ? 8 : list->capacity * 2;
+	while (new_capacity < wanted) {
+		new_capacity *= 2;
+	}
+	new_items = (char **)duckdb_malloc(sizeof(char *) * new_capacity);
+	if (!new_items) {
+		return false;
+	}
+	memset(new_items, 0, sizeof(char *) * new_capacity);
+	if (list->items && list->count > 0) {
+		memcpy(new_items, list->items, sizeof(char *) * list->count);
+		duckdb_free(list->items);
+	}
+	list->items = new_items;
+	list->capacity = new_capacity;
+	return true;
+}
+
+static bool tcc_string_list_append(tcc_string_list_t *list, const char *value) {
+	char *copy;
+	if (!list || !value || value[0] == '\0') {
+		return false;
+	}
+	if (!tcc_string_list_reserve(list, list->count + 1)) {
+		return false;
+	}
+	copy = tcc_strdup(value);
+	if (!copy) {
+		return false;
+	}
+	list->items[list->count++] = copy;
+	return true;
+}
+
+static void tcc_session_clear_bind(tcc_session_t *session) {
+	if (!session) {
+		return;
+	}
+	if (session->bound_symbol) {
+		duckdb_free(session->bound_symbol);
+		session->bound_symbol = NULL;
+	}
+	if (session->bound_sql_name) {
+		duckdb_free(session->bound_sql_name);
+		session->bound_sql_name = NULL;
+	}
+}
+
+static void tcc_session_clear_build_state(tcc_session_t *session) {
+	if (!session) {
+		return;
+	}
+	tcc_string_list_destroy(&session->include_paths);
+	tcc_string_list_destroy(&session->sysinclude_paths);
+	tcc_string_list_destroy(&session->library_paths);
+	tcc_string_list_destroy(&session->libraries);
+	tcc_string_list_destroy(&session->options);
+	tcc_string_list_destroy(&session->headers);
+	tcc_string_list_destroy(&session->sources);
+	tcc_string_list_destroy(&session->define_names);
+	tcc_string_list_destroy(&session->define_values);
+	tcc_session_clear_bind(session);
+	session->state_id++;
+	session->config_version++;
+}
+
+static void tcc_session_set_runtime_path(tcc_session_t *session, const char *runtime_path) {
+	if (!session) {
+		return;
+	}
+	if (session->runtime_path) {
+		duckdb_free(session->runtime_path);
+		session->runtime_path = NULL;
+	}
+	if (runtime_path && runtime_path[0] != '\0') {
+		session->runtime_path = tcc_strdup(runtime_path);
+	}
+	session->config_version++;
+}
+
+static const char *tcc_session_runtime_path(tcc_module_state_t *state, const char *override_path) {
+	if (override_path && override_path[0] != '\0') {
+		return override_path;
+	}
+	if (state->session.runtime_path && state->session.runtime_path[0] != '\0') {
+		return state->session.runtime_path;
+	}
+#ifdef DUCKTINYCC_DEFAULT_RUNTIME_PATH
+	return DUCKTINYCC_DEFAULT_RUNTIME_PATH;
+#else
+	return "third_party/tinycc";
+#endif
+}
+
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
 static void tcc_configure_runtime_paths(TCCState *s, const char *runtime_path) {
 	char include_path[1024];
@@ -103,37 +266,154 @@ static void tcc_configure_runtime_paths(TCCState *s, const char *runtime_path) {
 	(void)tcc_add_library_path(s, lib_path);
 	(void)tcc_add_library_path(s, lib_tcc_path);
 }
-#endif
 
-static void tcc_session_set_runtime_path(tcc_session_t *session, const char *runtime_path) {
-	if (session->runtime_path) {
-		duckdb_free(session->runtime_path);
-		session->runtime_path = NULL;
-	}
-	if (runtime_path && runtime_path[0] != '\0') {
-		session->runtime_path = tcc_strdup(runtime_path);
-	}
-	session->config_version++;
-}
-
-#ifndef DUCKTINYCC_WASM_UNSUPPORTED
-static void tcc_registered_entry_destroy(tcc_registered_entry_t *entry) {
-	if (!entry) {
+static void tcc_artifact_destroy(void *ptr) {
+	tcc_registered_artifact_t *artifact = (tcc_registered_artifact_t *)ptr;
+	if (!artifact) {
 		return;
 	}
-	if (entry->tcc) {
-		tcc_delete(entry->tcc);
-		entry->tcc = NULL;
+	if (artifact->tcc) {
+		tcc_delete(artifact->tcc);
 	}
-	if (entry->sql_name) {
-		duckdb_free(entry->sql_name);
-		entry->sql_name = NULL;
+	if (artifact->sql_name) {
+		duckdb_free(artifact->sql_name);
 	}
-	if (entry->symbol) {
-		duckdb_free(entry->symbol);
-		entry->symbol = NULL;
+	if (artifact->symbol) {
+		duckdb_free(artifact->symbol);
 	}
+	duckdb_free(artifact);
 }
+
+static int tcc_apply_session_to_state(TCCState *s, const tcc_session_t *session, tcc_error_buffer_t *error_buf) {
+	idx_t i;
+	for (i = 0; i < session->include_paths.count; i++) {
+		if (tcc_add_include_path(s, session->include_paths.items[i]) != 0) {
+			tcc_set_error(error_buf, "tcc_add_include_path failed");
+			return -1;
+		}
+	}
+	for (i = 0; i < session->sysinclude_paths.count; i++) {
+		if (tcc_add_sysinclude_path(s, session->sysinclude_paths.items[i]) != 0) {
+			tcc_set_error(error_buf, "tcc_add_sysinclude_path failed");
+			return -1;
+		}
+	}
+	for (i = 0; i < session->library_paths.count; i++) {
+		if (tcc_add_library_path(s, session->library_paths.items[i]) != 0) {
+			tcc_set_error(error_buf, "tcc_add_library_path failed");
+			return -1;
+		}
+	}
+	for (i = 0; i < session->options.count; i++) {
+		tcc_set_options(s, session->options.items[i]);
+	}
+	for (i = 0; i < session->define_names.count; i++) {
+		tcc_define_symbol(s, session->define_names.items[i], session->define_values.items[i]);
+	}
+	for (i = 0; i < session->headers.count; i++) {
+		if (tcc_compile_string(s, session->headers.items[i]) != 0) {
+			if (error_buf->message[0] == '\0') {
+				tcc_set_error(error_buf, "header compile failed");
+			}
+			return -1;
+		}
+	}
+	for (i = 0; i < session->sources.count; i++) {
+		if (tcc_compile_string(s, session->sources.items[i]) != 0) {
+			if (error_buf->message[0] == '\0') {
+				tcc_set_error(error_buf, "source compile failed");
+			}
+			return -1;
+		}
+	}
+	for (i = 0; i < session->libraries.count; i++) {
+		if (tcc_add_library(s, session->libraries.items[i]) != 0) {
+			tcc_set_error(error_buf, "tcc_add_library failed");
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int tcc_build_artifact(const char *runtime_path, tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
+                              const char *effective_symbol, const char *effective_sql_name,
+                              tcc_registered_artifact_t **out_artifact, tcc_error_buffer_t *error_buf) {
+	TCCState *s;
+	void *sym;
+	tcc_registered_artifact_t *artifact;
+	if (!effective_symbol || effective_symbol[0] == '\0') {
+		tcc_set_error(error_buf, "symbol is required");
+		return -1;
+	}
+	if (!effective_sql_name || effective_sql_name[0] == '\0') {
+		tcc_set_error(error_buf, "sql_name is required");
+		return -1;
+	}
+	if (state->session.sources.count == 0 && (!bind->source || bind->source[0] == '\0')) {
+		tcc_set_error(error_buf, "no source provided (use add_source/source)");
+		return -1;
+	}
+
+	s = tcc_new();
+	if (!s) {
+		tcc_set_error(error_buf, "tcc_new failed");
+		return -1;
+	}
+	tcc_set_error_func(s, error_buf, tcc_append_error);
+	if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) != 0) {
+		tcc_set_error(error_buf, "tcc_set_output_type failed");
+		tcc_delete(s);
+		return -1;
+	}
+	tcc_configure_runtime_paths(s, runtime_path);
+	if (tcc_apply_session_to_state(s, &state->session, error_buf) != 0) {
+		tcc_delete(s);
+		return -1;
+	}
+	if (bind->source && bind->source[0] != '\0') {
+		if (tcc_compile_string(s, bind->source) != 0) {
+			if (error_buf->message[0] == '\0') {
+				tcc_set_error(error_buf, "source compile failed");
+			}
+			tcc_delete(s);
+			return -1;
+		}
+	}
+	if (tcc_relocate(s) != 0) {
+		if (error_buf->message[0] == '\0') {
+			tcc_set_error(error_buf, "tcc_relocate failed");
+		}
+		tcc_delete(s);
+		return -1;
+	}
+	sym = tcc_get_symbol(s, effective_symbol);
+	if (!sym) {
+		tcc_set_error(error_buf, "symbol not found after relocation");
+		tcc_delete(s);
+		return -1;
+	}
+
+	artifact = (tcc_registered_artifact_t *)duckdb_malloc(sizeof(tcc_registered_artifact_t));
+	if (!artifact) {
+		tcc_set_error(error_buf, "out of memory");
+		tcc_delete(s);
+		return -1;
+	}
+	memset(artifact, 0, sizeof(tcc_registered_artifact_t));
+	artifact->tcc = s;
+	artifact->fn = (int64_t(*)(int64_t))sym;
+	artifact->sql_name = tcc_strdup(effective_sql_name);
+	artifact->symbol = tcc_strdup(effective_symbol);
+	artifact->state_id = state->session.state_id;
+	if (!artifact->sql_name || !artifact->symbol) {
+		tcc_artifact_destroy(artifact);
+		tcc_set_error(error_buf, "out of memory");
+		return -1;
+	}
+	*out_artifact = artifact;
+	return 0;
+}
+#endif
 
 static idx_t tcc_registry_find_sql_name(tcc_module_state_t *state, const char *sql_name) {
 	idx_t i;
@@ -185,8 +465,34 @@ static bool tcc_registry_reserve(tcc_module_state_t *state, idx_t wanted) {
 	return true;
 }
 
-static bool tcc_registry_store(tcc_module_state_t *state, const char *sql_name, const char *symbol, TCCState *tcc,
-                               void *fn_ptr) {
+static void tcc_registry_entry_destroy_metadata(tcc_registered_entry_t *entry) {
+	if (!entry) {
+		return;
+	}
+	if (entry->sql_name) {
+		duckdb_free(entry->sql_name);
+		entry->sql_name = NULL;
+	}
+	if (entry->symbol) {
+		duckdb_free(entry->symbol);
+		entry->symbol = NULL;
+	}
+	entry->fn = NULL;
+	entry->state_id = 0;
+#ifndef DUCKTINYCC_WASM_UNSUPPORTED
+	if (entry->artifact) {
+		tcc_artifact_destroy(entry->artifact);
+	}
+	entry->artifact = NULL;
+#endif
+}
+
+static bool tcc_registry_store_metadata(tcc_module_state_t *state, const char *sql_name, const char *symbol,
+                                        int64_t (*fn)(int64_t), uint64_t state_id
+#ifndef DUCKTINYCC_WASM_UNSUPPORTED
+                                        , tcc_registered_artifact_t *artifact
+#endif
+) {
 	idx_t idx = tcc_registry_find_sql_name(state, sql_name);
 	tcc_registered_entry_t *entry;
 	if (idx == (idx_t)-1) {
@@ -196,24 +502,27 @@ static bool tcc_registry_store(tcc_module_state_t *state, const char *sql_name, 
 		idx = state->entry_count++;
 	}
 	entry = &state->entries[idx];
-	tcc_registered_entry_destroy(entry);
+	tcc_registry_entry_destroy_metadata(entry);
 	entry->sql_name = tcc_strdup(sql_name);
 	entry->symbol = tcc_strdup(symbol);
-	entry->tcc = tcc;
-	entry->fn = (int64_t(*)(int64_t))fn_ptr;
-	if (!entry->sql_name || !entry->symbol || !entry->fn || !entry->tcc) {
-		tcc_registered_entry_destroy(entry);
+	entry->fn = fn;
+	entry->state_id = state_id;
+#ifndef DUCKTINYCC_WASM_UNSUPPORTED
+	entry->artifact = artifact;
+#endif
+	if (!entry->sql_name || !entry->symbol || !entry->fn) {
+		tcc_registry_entry_destroy_metadata(entry);
 		return false;
 	}
 	return true;
 }
 
-static bool tcc_registry_remove(tcc_module_state_t *state, const char *sql_name) {
+static bool tcc_registry_remove_metadata(tcc_module_state_t *state, const char *sql_name) {
 	idx_t idx = tcc_registry_find_sql_name(state, sql_name);
 	if (idx == (idx_t)-1) {
 		return false;
 	}
-	tcc_registered_entry_destroy(&state->entries[idx]);
+	tcc_registry_entry_destroy_metadata(&state->entries[idx]);
 	if (idx + 1 < state->entry_count) {
 		memmove(&state->entries[idx], &state->entries[idx + 1],
 		        sizeof(tcc_registered_entry_t) * (state->entry_count - idx - 1));
@@ -222,21 +531,6 @@ static bool tcc_registry_remove(tcc_module_state_t *state, const char *sql_name)
 	memset(&state->entries[state->entry_count], 0, sizeof(tcc_registered_entry_t));
 	return true;
 }
-#endif
-
-static const char *tcc_session_runtime_path(tcc_module_state_t *state, const char *override_path) {
-	if (override_path && override_path[0] != '\0') {
-		return override_path;
-	}
-	if (state->session.runtime_path && state->session.runtime_path[0] != '\0') {
-		return state->session.runtime_path;
-	}
-#ifdef DUCKTINYCC_DEFAULT_RUNTIME_PATH
-	return DUCKTINYCC_DEFAULT_RUNTIME_PATH;
-#else
-	return "third_party/tinycc";
-#endif
-}
 
 static void destroy_tcc_module_state(void *ptr) {
 	tcc_module_state_t *state = (tcc_module_state_t *)ptr;
@@ -244,17 +538,16 @@ static void destroy_tcc_module_state(void *ptr) {
 	if (!state) {
 		return;
 	}
-#ifndef DUCKTINYCC_WASM_UNSUPPORTED
 	for (i = 0; i < state->entry_count; i++) {
-		tcc_registered_entry_destroy(&state->entries[i]);
+		tcc_registry_entry_destroy_metadata(&state->entries[i]);
 	}
-#endif
 	if (state->entries) {
 		duckdb_free(state->entries);
 	}
 	if (state->session.runtime_path) {
 		duckdb_free(state->session.runtime_path);
 	}
+	tcc_session_clear_build_state(&state->session);
 	duckdb_free(state);
 }
 
@@ -281,6 +574,30 @@ static void destroy_tcc_module_bind_data(void *ptr) {
 	if (bind->arg_bigint) {
 		duckdb_free(bind->arg_bigint);
 	}
+	if (bind->include_path) {
+		duckdb_free(bind->include_path);
+	}
+	if (bind->sysinclude_path) {
+		duckdb_free(bind->sysinclude_path);
+	}
+	if (bind->library_path) {
+		duckdb_free(bind->library_path);
+	}
+	if (bind->library) {
+		duckdb_free(bind->library);
+	}
+	if (bind->option) {
+		duckdb_free(bind->option);
+	}
+	if (bind->header) {
+		duckdb_free(bind->header);
+	}
+	if (bind->define_name) {
+		duckdb_free(bind->define_name);
+	}
+	if (bind->define_value) {
+		duckdb_free(bind->define_value);
+	}
 	duckdb_free(bind);
 }
 
@@ -292,9 +609,20 @@ static void destroy_tcc_module_init_data(void *ptr) {
 	duckdb_free(init);
 }
 
+static void tcc_bind_read_named_varchar(duckdb_bind_info info, const char *name, char **out_value) {
+	duckdb_value value = duckdb_bind_get_named_parameter(info, name);
+	if (value && !duckdb_is_null_value(value)) {
+		*out_value = duckdb_get_varchar(value);
+	}
+	if (value) {
+		duckdb_destroy_value(&value);
+	}
+}
+
 static void tcc_module_bind(duckdb_bind_info info) {
 	tcc_module_bind_data_t *bind;
-	duckdb_value value;
+	tcc_module_state_t *state;
+	const char *runtime_path;
 	duckdb_logical_type varchar_type;
 	duckdb_logical_type bool_type;
 
@@ -305,56 +633,26 @@ static void tcc_module_bind(duckdb_bind_info info) {
 	}
 	memset(bind, 0, sizeof(tcc_module_bind_data_t));
 
-	value = duckdb_bind_get_named_parameter(info, "mode");
-	if (value && !duckdb_is_null_value(value)) {
-		bind->mode = duckdb_get_varchar(value);
-	}
-	if (value) {
-		duckdb_destroy_value(&value);
-	}
+	tcc_bind_read_named_varchar(info, "mode", &bind->mode);
 	if (!bind->mode || bind->mode[0] == '\0') {
 		bind->mode = tcc_strdup("config_get");
 	}
-
-	value = duckdb_bind_get_named_parameter(info, "runtime_path");
-	if (value && !duckdb_is_null_value(value)) {
-		bind->runtime_path = duckdb_get_varchar(value);
-	}
-	if (value) {
-		duckdb_destroy_value(&value);
-	}
-
-	value = duckdb_bind_get_named_parameter(info, "source");
-	if (value && !duckdb_is_null_value(value)) {
-		bind->source = duckdb_get_varchar(value);
-	}
-	if (value) {
-		duckdb_destroy_value(&value);
-	}
-
-	value = duckdb_bind_get_named_parameter(info, "symbol");
-	if (value && !duckdb_is_null_value(value)) {
-		bind->symbol = duckdb_get_varchar(value);
-	}
-	if (value) {
-		duckdb_destroy_value(&value);
-	}
-
-	value = duckdb_bind_get_named_parameter(info, "sql_name");
-	if (value && !duckdb_is_null_value(value)) {
-		bind->sql_name = duckdb_get_varchar(value);
-	}
-	if (value) {
-		duckdb_destroy_value(&value);
-	}
-
-	value = duckdb_bind_get_named_parameter(info, "arg_bigint");
-	if (value && !duckdb_is_null_value(value)) {
-		bind->arg_bigint = duckdb_get_varchar(value);
-	}
-	if (value) {
-		duckdb_destroy_value(&value);
-	}
+	tcc_bind_read_named_varchar(info, "runtime_path", &bind->runtime_path);
+	tcc_bind_read_named_varchar(info, "source", &bind->source);
+	tcc_bind_read_named_varchar(info, "symbol", &bind->symbol);
+	tcc_bind_read_named_varchar(info, "sql_name", &bind->sql_name);
+	tcc_bind_read_named_varchar(info, "arg_bigint", &bind->arg_bigint);
+	tcc_bind_read_named_varchar(info, "include_path", &bind->include_path);
+	tcc_bind_read_named_varchar(info, "sysinclude_path", &bind->sysinclude_path);
+	tcc_bind_read_named_varchar(info, "library_path", &bind->library_path);
+	tcc_bind_read_named_varchar(info, "library", &bind->library);
+	tcc_bind_read_named_varchar(info, "option", &bind->option);
+	tcc_bind_read_named_varchar(info, "header", &bind->header);
+	tcc_bind_read_named_varchar(info, "define_name", &bind->define_name);
+	tcc_bind_read_named_varchar(info, "define_value", &bind->define_value);
+	state = (tcc_module_state_t *)duckdb_bind_get_extra_info(info);
+	runtime_path = state ? tcc_session_runtime_path(state, bind->runtime_path) : NULL;
+	(void)runtime_path;
 
 	bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
 	varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
@@ -418,54 +716,6 @@ static void tcc_write_row(duckdb_data_chunk output, bool ok, const char *mode, c
 	duckdb_data_chunk_set_size(output, 1);
 }
 
-#ifndef DUCKTINYCC_WASM_UNSUPPORTED
-static int tcc_compile_and_relocate(const char *runtime_path, const char *source, const char *symbol, TCCState **out_tcc,
-                                    void **out_symbol, tcc_error_buffer_t *error_buf) {
-	TCCState *s;
-	if (!source || source[0] == '\0') {
-		snprintf(error_buf->message, sizeof(error_buf->message), "missing source");
-		return -1;
-	}
-	s = tcc_new();
-	if (!s) {
-		snprintf(error_buf->message, sizeof(error_buf->message), "tcc_new failed");
-		return -1;
-	}
-	tcc_set_error_func(s, error_buf, tcc_append_error);
-	if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) != 0) {
-		snprintf(error_buf->message, sizeof(error_buf->message), "tcc_set_output_type failed");
-		tcc_delete(s);
-		return -1;
-	}
-	tcc_configure_runtime_paths(s, runtime_path);
-	if (tcc_compile_string(s, source) != 0) {
-		if (error_buf->message[0] == '\0') {
-			snprintf(error_buf->message, sizeof(error_buf->message), "tcc_compile_string failed");
-		}
-		tcc_delete(s);
-		return -1;
-	}
-	if (tcc_relocate(s) != 0) {
-		if (error_buf->message[0] == '\0') {
-			snprintf(error_buf->message, sizeof(error_buf->message), "tcc_relocate failed");
-		}
-		tcc_delete(s);
-		return -1;
-	}
-	if (symbol && symbol[0] != '\0') {
-		void *sym = tcc_get_symbol(s, symbol);
-		if (!sym) {
-			snprintf(error_buf->message, sizeof(error_buf->message), "symbol '%s' not found", symbol);
-			tcc_delete(s);
-			return -1;
-		}
-		*out_symbol = sym;
-	}
-	*out_tcc = s;
-	return 0;
-}
-#endif
-
 static bool tcc_parse_int64(const char *text, int64_t *out) {
 	char *endptr;
 	long long val;
@@ -481,6 +731,27 @@ static bool tcc_parse_int64(const char *text, int64_t *out) {
 	return true;
 }
 
+static const char *tcc_effective_symbol(tcc_module_state_t *state, tcc_module_bind_data_t *bind) {
+	if (bind->symbol && bind->symbol[0] != '\0') {
+		return bind->symbol;
+	}
+	if (state->session.bound_symbol && state->session.bound_symbol[0] != '\0') {
+		return state->session.bound_symbol;
+	}
+	return NULL;
+}
+
+static const char *tcc_effective_sql_name(tcc_module_state_t *state, tcc_module_bind_data_t *bind,
+                                          const char *effective_symbol) {
+	if (bind->sql_name && bind->sql_name[0] != '\0') {
+		return bind->sql_name;
+	}
+	if (state->session.bound_sql_name && state->session.bound_sql_name[0] != '\0') {
+		return state->session.bound_sql_name;
+	}
+	return effective_symbol;
+}
+
 static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk output) {
 	tcc_module_state_t *state = (tcc_module_state_t *)duckdb_function_get_extra_info(info);
 	tcc_module_bind_data_t *bind = (tcc_module_bind_data_t *)duckdb_function_get_bind_data(info);
@@ -493,42 +764,171 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 	}
 
 	runtime_path = tcc_session_runtime_path(state, bind->runtime_path);
-
 	if (strcmp(bind->mode, "config_set") == 0) {
 		tcc_session_set_runtime_path(&state->session, bind->runtime_path);
-		tcc_write_row(output, true, bind->mode, "config", "OK", "session configuration updated",
+		tcc_write_row(output, true, bind->mode, "config", "OK", "session runtime updated",
 		              state->session.runtime_path ? state->session.runtime_path : "(empty)", NULL, NULL, NULL,
 		              "connection");
 	} else if (strcmp(bind->mode, "config_get") == 0) {
-		tcc_write_row(output, true, bind->mode, "config", "OK", "session configuration", runtime_path, NULL, NULL,
-		              NULL, "connection");
+		char detail[256];
+		snprintf(detail, sizeof(detail), "runtime=%s state_id=%llu config_version=%llu",
+		         runtime_path ? runtime_path : "(unset)", (unsigned long long)state->session.state_id,
+		         (unsigned long long)state->session.config_version);
+		tcc_write_row(output, true, bind->mode, "config", "OK", "session configuration", detail, NULL, NULL, NULL,
+		              "connection");
 	} else if (strcmp(bind->mode, "config_reset") == 0) {
 		tcc_session_set_runtime_path(&state->session, NULL);
-		tcc_write_row(output, true, bind->mode, "config", "OK", "session configuration reset", "(unset)", NULL, NULL,
-		              NULL, "connection");
+		tcc_session_clear_build_state(&state->session);
+		tcc_write_row(output, true, bind->mode, "config", "OK", "session reset", "runtime/build state cleared",
+		              NULL, NULL, NULL, "connection");
+	} else if (strcmp(bind->mode, "tcc_new_state") == 0 || strcmp(bind->mode, "new_state") == 0) {
+		char detail[128];
+		tcc_session_clear_build_state(&state->session);
+		snprintf(detail, sizeof(detail), "state_id=%llu", (unsigned long long)state->session.state_id);
+		tcc_write_row(output, true, bind->mode, "state", "OK", "new TinyCC build state prepared", detail, NULL,
+		              NULL, NULL, "connection");
+	} else if (strcmp(bind->mode, "add_include") == 0) {
+		if (bind->include_path && tcc_string_list_append(&state->session.include_paths, bind->include_path)) {
+			state->session.config_version++;
+			tcc_write_row(output, true, bind->mode, "state", "OK", "include path added", bind->include_path, NULL,
+			              NULL, NULL, "connection");
+		} else {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "include_path is required", NULL,
+			              NULL, NULL, NULL, "connection");
+		}
+	} else if (strcmp(bind->mode, "add_sysinclude") == 0) {
+		if (bind->sysinclude_path && tcc_string_list_append(&state->session.sysinclude_paths, bind->sysinclude_path)) {
+			state->session.config_version++;
+			tcc_write_row(output, true, bind->mode, "state", "OK", "sysinclude path added", bind->sysinclude_path,
+			              NULL, NULL, NULL, "connection");
+		} else {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "sysinclude_path is required", NULL,
+			              NULL, NULL, NULL, "connection");
+		}
+	} else if (strcmp(bind->mode, "add_library_path") == 0) {
+		if (bind->library_path && tcc_string_list_append(&state->session.library_paths, bind->library_path)) {
+			state->session.config_version++;
+			tcc_write_row(output, true, bind->mode, "state", "OK", "library path added", bind->library_path, NULL,
+			              NULL, NULL, "connection");
+		} else {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "library_path is required", NULL,
+			              NULL, NULL, NULL, "connection");
+		}
+	} else if (strcmp(bind->mode, "add_library") == 0) {
+		if (bind->library && tcc_string_list_append(&state->session.libraries, bind->library)) {
+			state->session.config_version++;
+			tcc_write_row(output, true, bind->mode, "state", "OK", "library added", bind->library, NULL, NULL, NULL,
+			              "connection");
+		} else {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "library is required", NULL, NULL,
+			              NULL, NULL, "connection");
+		}
+	} else if (strcmp(bind->mode, "add_option") == 0) {
+		if (bind->option && tcc_string_list_append(&state->session.options, bind->option)) {
+			state->session.config_version++;
+			tcc_write_row(output, true, bind->mode, "state", "OK", "compiler option added", bind->option, NULL,
+			              NULL, NULL, "connection");
+		} else {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "option is required", NULL, NULL,
+			              NULL, NULL, "connection");
+		}
+	} else if (strcmp(bind->mode, "add_header") == 0) {
+		if (bind->header && tcc_string_list_append(&state->session.headers, bind->header)) {
+			state->session.config_version++;
+			tcc_write_row(output, true, bind->mode, "state", "OK", "header source added", "header appended", NULL,
+			              NULL, NULL, "connection");
+		} else {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "header is required", NULL, NULL,
+			              NULL, NULL, "connection");
+		}
+	} else if (strcmp(bind->mode, "add_source") == 0) {
+		if (bind->source && tcc_string_list_append(&state->session.sources, bind->source)) {
+			state->session.config_version++;
+			tcc_write_row(output, true, bind->mode, "state", "OK", "source appended", "source appended", NULL,
+			              NULL, NULL, "connection");
+		} else {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "source is required", NULL, NULL,
+			              NULL, NULL, "connection");
+		}
+	} else if (strcmp(bind->mode, "add_define") == 0) {
+		if (bind->define_name && bind->define_name[0] != '\0') {
+			const char *define_value = bind->define_value ? bind->define_value : "1";
+			if (tcc_string_list_append(&state->session.define_names, bind->define_name) &&
+			    tcc_string_list_append(&state->session.define_values, define_value)) {
+				state->session.config_version++;
+				tcc_write_row(output, true, bind->mode, "state", "OK", "define added", bind->define_name, NULL, NULL,
+				              NULL, "connection");
+			} else {
+				tcc_write_row(output, false, bind->mode, "state", "E_STORE_FAILED", "failed to store define", NULL,
+				              NULL, NULL, NULL, "connection");
+			}
+		} else {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "define_name is required", NULL, NULL,
+			              NULL, NULL, "connection");
+		}
+	} else if (strcmp(bind->mode, "tinycc_bind") == 0 || strcmp(bind->mode, "bind") == 0) {
+		if (!bind->symbol || bind->symbol[0] == '\0') {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required", NULL,
+			              bind->sql_name, bind->symbol, NULL, "connection");
+		} else {
+			tcc_session_clear_bind(&state->session);
+			state->session.bound_symbol = tcc_strdup(bind->symbol);
+			state->session.bound_sql_name = tcc_strdup(bind->sql_name && bind->sql_name[0] != '\0' ? bind->sql_name : bind->symbol);
+			state->session.config_version++;
+			tcc_write_row(output, true, bind->mode, "bind", "OK", "symbol binding updated",
+			              state->session.bound_sql_name, state->session.bound_sql_name, state->session.bound_symbol, NULL,
+			              "connection");
+		}
 	} else if (strcmp(bind->mode, "list") == 0) {
-		char detail[64];
-		snprintf(detail, sizeof(detail), "registered_count=%llu", (unsigned long long)state->entry_count);
-		tcc_write_row(output, true, bind->mode, "registry", "OK", "registered artifact count", detail, NULL, NULL, NULL,
+		char detail[256];
+		snprintf(detail, sizeof(detail),
+		         "registered=%llu sources=%llu headers=%llu includes=%llu libs=%llu state_id=%llu", 
+		         (unsigned long long)state->entry_count, (unsigned long long)state->session.sources.count,
+		         (unsigned long long)state->session.headers.count, (unsigned long long)state->session.include_paths.count,
+		         (unsigned long long)state->session.libraries.count, (unsigned long long)state->session.state_id);
+		tcc_write_row(output, true, bind->mode, "registry", "OK", "session summary", detail, NULL, NULL, NULL,
 		              "connection");
-	} else if (strcmp(bind->mode, "compile") == 0) {
+	} else if (strcmp(bind->mode, "compile") == 0 || strcmp(bind->mode, "tinycc_compile") == 0 ||
+	           strcmp(bind->mode, "register") == 0) {
 #ifdef DUCKTINYCC_WASM_UNSUPPORTED
 		tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-		              "TinyCC compile not supported for WASM build", NULL, NULL, NULL, NULL, "connection");
+	              "TinyCC compile/register not supported for WASM build", NULL, bind->sql_name, bind->symbol, NULL,
+	              "connection");
 #else
-		TCCState *compiled = NULL;
-		void *sym = NULL;
+		const char *effective_symbol = tcc_effective_symbol(state, bind);
+		const char *effective_sql_name = tcc_effective_sql_name(state, bind, effective_symbol);
 		tcc_error_buffer_t err;
+		tcc_registered_artifact_t *artifact = NULL;
+		char artifact_id[256];
+
 		memset(&err, 0, sizeof(err));
-		if (tcc_compile_and_relocate(runtime_path, bind->source, bind->symbol, &compiled, &sym, &err) == 0) {
-			(void)sym;
-			tcc_delete(compiled);
-			tcc_write_row(output, true, bind->mode, "compile", "OK", "compiled and relocated", runtime_path, NULL,
-			              bind->symbol, NULL, "connection");
-		} else {
-			tcc_write_row(output, false, bind->mode, "compile", "E_COMPILE_FAILED", "compile failed",
-			              err.message[0] ? err.message : NULL, NULL, bind->symbol, NULL, "connection");
+
+		if (!effective_symbol || effective_symbol[0] == '\0') {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required (bind or argument)",
+	              NULL, effective_sql_name, effective_symbol, NULL, "connection");
+			init->emitted = true;
+			return;
 		}
+
+		if (tcc_build_artifact(runtime_path, state, bind, effective_symbol, effective_sql_name, &artifact, &err) != 0) {
+			tcc_write_row(output, false, bind->mode, "compile", "E_COMPILE_FAILED", "compile failed",
+	              err.message[0] ? err.message : NULL, effective_sql_name, effective_symbol, NULL, "connection");
+			init->emitted = true;
+			return;
+		}
+
+		if (!tcc_registry_store_metadata(state, effective_sql_name, effective_symbol, artifact->fn, artifact->state_id, artifact)) {
+			tcc_artifact_destroy(artifact);
+			tcc_write_row(output, false, bind->mode, "register", "E_STORE_FAILED",
+	                      "failed to store session metadata", NULL, effective_sql_name,
+	                      effective_symbol, NULL, "connection");
+			init->emitted = true;
+			return;
+		}
+		snprintf(artifact_id, sizeof(artifact_id), "%s@state_%llu", effective_sql_name,
+	         (unsigned long long)artifact->state_id);
+		tcc_write_row(output, true, bind->mode, "register", "OK", "compiled, relocated and registered in session",
+	              runtime_path, effective_sql_name, effective_symbol, artifact_id, "connection");
 #endif
 	} else if (strcmp(bind->mode, "call") == 0) {
 #ifdef DUCKTINYCC_WASM_UNSUPPORTED
@@ -546,21 +946,28 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			int64_t (*fn)(int64_t) = NULL;
 			const char *effective_symbol = bind->symbol;
 			if (bind->source && bind->source[0] != '\0') {
-				TCCState *compiled = NULL;
-				void *sym = NULL;
+				const char *symbol = bind->symbol;
+				const char *sql_name = bind->sql_name && bind->sql_name[0] != '\0' ? bind->sql_name : "__call_once";
+				tcc_registered_artifact_t *artifact = NULL;
 				tcc_error_buffer_t err;
 				memset(&err, 0, sizeof(err));
-				if (tcc_compile_and_relocate(runtime_path, bind->source, bind->symbol, &compiled, &sym, &err) != 0) {
-					tcc_write_row(output, false, bind->mode, "compile", "E_COMPILE_FAILED", "compile failed",
-					              err.message[0] ? err.message : NULL, bind->sql_name, bind->symbol, NULL,
-					              "connection");
+				if (!symbol || symbol[0] == '\0') {
+					tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required with source", NULL,
+					              bind->sql_name, bind->symbol, NULL, "connection");
 					init->emitted = true;
 					return;
 				}
-				fn = (int64_t(*)(int64_t))sym;
+				if (tcc_build_artifact(runtime_path, state, bind, symbol, sql_name, &artifact, &err) != 0) {
+					tcc_write_row(output, false, bind->mode, "compile", "E_COMPILE_FAILED", "compile failed",
+					              err.message[0] ? err.message : NULL, bind->sql_name, bind->symbol, NULL, "connection");
+					init->emitted = true;
+					return;
+				}
+				fn = artifact->fn;
+				effective_symbol = artifact->symbol;
 				result = fn(arg);
 				snprintf(result_buf, sizeof(result_buf), "%lld", (long long)result);
-				tcc_delete(compiled);
+				tcc_artifact_destroy(artifact);
 			} else {
 				idx_t idx = (idx_t)-1;
 				if (bind->sql_name && bind->sql_name[0] != '\0') {
@@ -580,54 +987,22 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 				result = fn(arg);
 				snprintf(result_buf, sizeof(result_buf), "%lld", (long long)result);
 			}
-			tcc_write_row(output, true, bind->mode, "execute", "OK", "compiled and executed", result_buf, bind->sql_name,
+			tcc_write_row(output, true, bind->mode, "execute", "OK", "executed", result_buf, bind->sql_name,
 			              effective_symbol, NULL, "connection");
 		}
 #endif
-	} else if (strcmp(bind->mode, "register") == 0) {
-#ifdef DUCKTINYCC_WASM_UNSUPPORTED
-		tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-		              "TinyCC register not supported for WASM build", NULL, bind->sql_name, bind->symbol, NULL,
-		              "connection");
-#else
-		TCCState *compiled = NULL;
-		void *sym = NULL;
-		tcc_error_buffer_t err;
-		memset(&err, 0, sizeof(err));
-		if (!bind->source || bind->source[0] == '\0' || !bind->symbol || bind->symbol[0] == '\0' ||
-		    !bind->sql_name || bind->sql_name[0] == '\0') {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS",
-			              "source, symbol and sql_name are required", NULL, bind->sql_name, bind->symbol, NULL,
-			              "connection");
-		} else if (tcc_compile_and_relocate(runtime_path, bind->source, bind->symbol, &compiled, &sym, &err) != 0) {
-			tcc_write_row(output, false, bind->mode, "compile", "E_COMPILE_FAILED", "compile failed",
-			              err.message[0] ? err.message : NULL, bind->sql_name, bind->symbol, NULL, "connection");
-		} else if (!tcc_registry_store(state, bind->sql_name, bind->symbol, compiled, sym)) {
-			tcc_delete(compiled);
-			tcc_write_row(output, false, bind->mode, "register", "E_STORE_FAILED",
-			              "failed to store compiled artifact", NULL, bind->sql_name, bind->symbol, NULL, "connection");
-		} else {
-			tcc_write_row(output, true, bind->mode, "register", "OK", "compiled artifact registered in session",
-			              runtime_path, bind->sql_name, bind->symbol, bind->sql_name, "connection");
-		}
-#endif
 	} else if (strcmp(bind->mode, "unregister") == 0) {
-#ifdef DUCKTINYCC_WASM_UNSUPPORTED
-		tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-		              "TinyCC unregister not supported for WASM build", NULL, bind->sql_name, bind->symbol, NULL,
-		              "connection");
-#else
 		if (!bind->sql_name || bind->sql_name[0] == '\0') {
 			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "sql_name is required", NULL,
 			              bind->sql_name, bind->symbol, NULL, "connection");
-		} else if (tcc_registry_remove(state, bind->sql_name)) {
-			tcc_write_row(output, true, bind->mode, "register", "OK", "artifact removed from session registry", NULL,
-			              bind->sql_name, bind->symbol, NULL, "connection");
+		} else if (tcc_registry_remove_metadata(state, bind->sql_name)) {
+			tcc_write_row(output, true, bind->mode, "register", "OK",
+			              "metadata removed from session (DuckDB function remains registered)", NULL, bind->sql_name,
+			              bind->symbol, NULL, "connection");
 		} else {
-			tcc_write_row(output, false, bind->mode, "register", "E_NOT_FOUND", "no matching artifact", NULL,
+			tcc_write_row(output, false, bind->mode, "register", "E_NOT_FOUND", "no matching artifact metadata", NULL,
 			              bind->sql_name, bind->symbol, NULL, "connection");
 		}
-#endif
 	} else {
 		tcc_write_row(output, false, bind->mode, "bind", "E_BAD_MODE", "unknown mode", NULL, NULL, NULL, NULL,
 		              "connection");
@@ -657,6 +1032,14 @@ void RegisterTccModuleFunction(duckdb_connection connection) {
 	duckdb_table_function_add_named_parameter(tf, "symbol", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "sql_name", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "arg_bigint", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "include_path", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "sysinclude_path", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "library_path", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "library", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "option", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "header", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "define_name", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "define_value", varchar_type);
 
 	duckdb_table_function_set_extra_info(tf, state, destroy_tcc_module_state);
 	duckdb_table_function_set_bind(tf, tcc_module_bind);
