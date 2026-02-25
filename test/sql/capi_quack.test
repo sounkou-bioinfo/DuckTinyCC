@@ -4,15 +4,34 @@
 
 # Before we load the extension, this will fail
 statement error
-SELECT multiply_numbers_together(1,2);
+SELECT * FROM tcc_module(mode := 'config_get');
 ----
-Catalog Error: Scalar Function with name multiply_numbers_together does not exist!
+Catalog Error: Table Function with name tcc_module does not exist!
 
 # Require statement will ensure the extension is loaded from now on
 require capi_quack
 
-# Confirm the extension works
-query I
-SELECT multiply_numbers_together(5,10)
+# Confirm the extension works (default mode is config_get)
+query TTT
+SELECT ok, mode, code
+FROM tcc_module();
 ----
-50
+true	config_get	OK
+
+query TTTT
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'config_set', runtime_path := '/tmp/tcc-runtime');
+----
+true	config_set	OK	/tmp/tcc-runtime
+
+query TTTT
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'config_get');
+----
+true	config_get	OK	/tmp/tcc-runtime
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'compile');
+----
+false	compile	E_NOT_IMPLEMENTED

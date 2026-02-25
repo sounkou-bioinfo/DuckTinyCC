@@ -1,11 +1,10 @@
 #include "duckdb_extension.h"
-
-#include "add_numbers.h"
+#include "tcc_module.h"
 
 DUCKDB_EXTENSION_ENTRYPOINT(duckdb_connection connection, duckdb_extension_info info, struct duckdb_extension_access *access) {
-	// Register a demo function
-	RegisterAddNumbersFunction(connection);
+	(void)info;
+	(void)access;
 
-	// Return true to indicate succesful initialization
+	RegisterTccModuleFunction(connection);
 	return true;
 }

@@ -30,8 +30,8 @@ project(${EXTENSION_NAME} LANGUAGES C)
 
 # Create Extension library
 set(EXTENSION_SOURCES
-        src/add_numbers.c
-        src/capi_quack.c
+        src/ducktinycc.c
+        src/tcc_module.c
 )
 
 if (DUCKDB_WASM_EXTENSION)
