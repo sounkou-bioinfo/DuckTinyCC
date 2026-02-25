@@ -5,17 +5,11 @@ DuckTinyCC
 
 # DuckTinyCC
 
-DuckTinyCC is a DuckDB C extension that exposes a `tcc_*` SQL surface
-for TinyCC-driven C scripting workflows.
+DuckTinyCC is a DuckDB C extension with a `tcc_*` SQL surface.
 
-Current status:
-
-- `tcc_module(...)` is available as the main table function.
-- session-oriented configuration modes are implemented (`config_get`,
-  `config_set`, `config_reset`, `list`).
-- compile/register execution modes are present and currently return
-  explicit `E_NOT_IMPLEMENTED` diagnostics until TinyCC runtime wiring
-  is completed.
+The current implementation provides a session-oriented control plane
+through `tcc_module(...)` and returns structured diagnostics rows for
+each operation.
 
 ## Build
 
@@ -30,7 +24,7 @@ make debug
 make test_debug
 ```
 
-## Usage from R
+## Usage from R (DBI)
 
 ``` r
 library(DBI)
@@ -47,34 +41,78 @@ dbExecute(con, "LOAD 'build/debug/capi_quack.duckdb_extension'")
 
     ## [1] 0
 
+For convenience in examples:
+
 ``` r
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'config_get')")
+q <- function(sql) dbGetQuery(con, sql)
+```
+
+### Inspect default session state
+
+``` r
+q("SELECT ok, mode, code, detail FROM tcc_module(mode := 'config_get')")
 ```
 
     ##     ok       mode code  detail
     ## 1 TRUE config_get   OK (unset)
 
+### Set runtime path for this connection session
+
 ``` r
-dbGetQuery(
-  con,
+q(
   "SELECT ok, mode, code, detail
-   FROM tcc_module(mode := 'config_set', runtime_path := 'third_party/tinycc')"
+   FROM tcc_module(
+     mode := 'config_set',
+     runtime_path := 'third_party/tinycc'
+   )"
 )
 ```
 
     ##     ok       mode code             detail
     ## 1 TRUE config_set   OK third_party/tinycc
 
+### Verify current session config
+
 ``` r
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'compile')")
+q("SELECT ok, mode, code, detail FROM tcc_module(mode := 'config_get')")
 ```
 
-    ##      ok    mode              code
-    ## 1 FALSE compile E_NOT_IMPLEMENTED
+    ##     ok       mode code             detail
+    ## 1 TRUE config_get   OK third_party/tinycc
 
-The output is intentionally tabular and diagnostic-oriented, so SQL
-users can inspect configuration and execution status directly inside
-DuckDB queries.
+### List current artifact registry state
+
+``` r
+q("SELECT ok, mode, phase, code, message FROM tcc_module(mode := 'list')")
+```
+
+    ##     ok mode    phase code                           message
+    ## 1 TRUE list registry   OK no registered tcc_* artifacts yet
+
+### Reset session configuration
+
+``` r
+q("SELECT ok, mode, code, detail FROM tcc_module(mode := 'config_reset')")
+```
+
+    ##     ok         mode code  detail
+    ## 1 TRUE config_reset   OK (unset)
+
+### Error diagnostics example (invalid mode)
+
+``` r
+q("SELECT ok, mode, phase, code, message FROM tcc_module(mode := 'unknown')")
+```
+
+    ##      ok    mode phase       code      message
+    ## 1 FALSE unknown  bind E_BAD_MODE unknown mode
+
+## Notes
+
+- The API is intentionally row-oriented and diagnostic-first, so it fits
+  SQL workflows and test assertions.
+- `compile/register` execution paths are being wired to TinyCC runtime
+  next.
 
 ``` r
 dbDisconnect(con, shutdown = TRUE)
