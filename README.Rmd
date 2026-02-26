@@ -80,6 +80,22 @@ Additional limits and behavior:
 - NULL handling: NULL-in/NULL-out
 - `void` return registers as a SQL function that emits `NULL` values
 
+## How It Works (Current)
+
+- `compile`, `tinycc_compile`, and `quick_compile` generate C wrapper code around the target `symbol`.
+- Generated wrappers use a typed row ABI (`void **args`, `out_value`, `out_is_null`), unpack inputs, call the C symbol, and write back the result.
+- A generated module init function calls `ducktinycc_register_signature(...)` to register the SQL scalar UDF in the active DuckDB connection.
+- TinyCC compile + relocate is fully in-memory (no shared library file is emitted).
+- Host symbols injected into each TinyCC state are currently fixed: `duckdb_ext_api` and `ducktinycc_register_signature`.
+- Execution uses DuckDB vectors but invokes the generated wrapper row-by-row inside the scalar UDF loop.
+
+## Design Direction (API Still Evolving)
+
+- Host symbol registration mode: feasible and aligned with Rtinycc-style embedding; prefer an allow-listed registry (name -> host address) over raw SQL-provided addresses.
+- Arrow to reduce marshalling: not used in the current scalar UDF path; DuckDB already provides columnar vectors, and remaining overhead is mainly per-row wrapper calls.
+- Structs: usable inside compiled C code today, but not yet first-class SQL argument/return types.
+- Pointers: best exposed as `UBIGINT` handles with helper functions and type/ownership tags, rather than untyped raw pointer values.
+
 ## Builds
 
 ```sh
