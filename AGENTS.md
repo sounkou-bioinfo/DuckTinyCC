@@ -41,7 +41,7 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - DuckTinyCC generates C wrappers during compile that unpack typed args, call target C symbols, and re-pack result for DuckDB scalar UDF execution.
   - Wrapper modules are compiled+relocated in-memory via libtcc; no separate shared library artifact is produced.
   - Host symbols injected into each TCC state today are fixed: `duckdb_ext_api`, `ducktinycc_register_signature`.
-  - Supported SQL-visible signature tokens today are scalar-only: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64` with max arity 10.
+  - Supported SQL-visible signature tokens today are scalar-only: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64` with dynamic arity.
 - Tests currently passing: `make test_debug`, `make test_release`
 
 ## Working Rules for This Repo

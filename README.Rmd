@@ -76,7 +76,7 @@ Current executable SQL registration support:
 
 Additional limits and behavior:
 
-- Arity: `0..10` arguments
+- Arity: `0..N` arguments (no fixed hard-coded cap)
 - NULL handling: NULL-in/NULL-out
 - `void` return registers as a SQL function that emits `NULL` values
 
