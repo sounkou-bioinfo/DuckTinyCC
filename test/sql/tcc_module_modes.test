@@ -28,6 +28,30 @@ FROM tcc_module(mode := 'list');
 ----
 true	list	OK
 
+query I
+SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END
+FROM tcc_system_paths();
+----
+1
+
+query I
+SELECT CASE WHEN SUM(CASE WHEN kind = 'runtime' THEN 1 ELSE 0 END) >= 1 THEN 1 ELSE 0 END
+FROM tcc_system_paths();
+----
+1
+
+query I
+SELECT CASE WHEN SUM(CASE WHEN kind = 'resolved' AND exists THEN 1 ELSE 0 END) >= 1 THEN 1 ELSE 0 END
+FROM tcc_library_probe(library := 'libtcc1.a');
+----
+1
+
+query I
+SELECT CASE WHEN SUM(CASE WHEN kind = 'resolved' AND exists THEN 1 ELSE 0 END) = 0 THEN 1 ELSE 0 END
+FROM tcc_library_probe(library := '__ducktinycc_missing_lib__');
+----
+1
+
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(mode := 'register');

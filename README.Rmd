@@ -52,6 +52,13 @@ context columns.
 | `compile`, `tinycc_compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name` |
 | `quick_compile` | One-shot fast lane compile + register | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types`; can also pass per-call `include_path`, `sysinclude_path`, `library_path`, `library`, `option`, `define_*`, `header` |
 
+### Discovery Helpers
+
+| Function | Purpose | Notes |
+|---|---|---|
+| `tcc_system_paths(runtime_path := '', library_path := '')` | Show include and library search paths used by TinyCC workflows | Includes existence flags; includes Windows/MSYS2/Rtools defaults on Windows builds |
+| `tcc_library_probe(library := ..., runtime_path := '', library_path := '')` | Resolve a library short name or full filename/path | Supports `.a`, `.so*`, `.dylib`, `.dll`, `.lib` style names |
+
 ## Supported Types
 
 Type metadata is explicit for `compile`, `tinycc_compile`, and
@@ -129,7 +136,24 @@ dbGetQuery(con, "
 ")
 ```
 
-### 3) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
+### 3) System Paths and Library Probe Helpers
+
+This chunk inspects computed search paths and probes a static library by name.
+
+```{r eval=TRUE}
+dbGetQuery(con, "
+  SELECT kind, key, exists, value
+  FROM tcc_system_paths()
+  LIMIT 12
+")
+
+dbGetQuery(con, "
+  SELECT kind, key, exists, value, detail
+  FROM tcc_library_probe(library := 'libtcc1.a')
+")
+```
+
+### 4) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
 
 This example stages shared build inputs once, compiles two symbols, and calls both SQL functions.
 
@@ -189,7 +213,7 @@ dbGetQuery(con, "
 dbGetQuery(con, "SELECT tcc_times2(21) AS value")
 ```
 
-### 4) Example B: Fast Lane `quick_compile` (with include/library inputs)
+### 5) Example B: Fast Lane `quick_compile` (with include/library inputs)
 
 This example compiles and registers directly from one SQL call, including
 `include_path`, `library_path`, and `library`.
@@ -213,7 +237,7 @@ double qpow(double x, double y){ return pow(x, y); }',
 dbGetQuery(con, "SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value")
 ```
 
-### 5) Example C: Libraries (`add_library`)
+### 6) Example C: Libraries (`add_library`)
 
 This example links `libm`, compiles a function that uses `pow`, then calls it.
 The required C header is included in the source unit.
@@ -240,7 +264,7 @@ dbGetQuery(con, "
 dbGetQuery(con, "SELECT CAST(pwr(2.0, 5.0) AS BIGINT) AS value")
 ```
 
-### 6) Reset Session
+### 7) Reset Session
 
 This chunk resets session state and shows summary counters.
 
@@ -249,7 +273,7 @@ dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'list')")
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 ```
 
-### 7) Cleanup
+### 8) Cleanup
 
 This chunk closes the database connection.
 
@@ -261,4 +285,5 @@ dbDisconnect(con, shutdown = TRUE)
 
 - Function invocation is plain SQL (`SELECT my_udf(...)`) after `compile` or `quick_compile`.
 - `add_header`/`add_source` are compiled as separate translation units. For external library prototypes, include headers directly in the relevant `source` unit.
+- Use `tcc_system_paths()` and `tcc_library_probe()` to diagnose platform-specific library resolution (including Windows/Rtools/MSYS2 layouts).
 - All outputs are returned as a diagnostics table for SQL-native observability.

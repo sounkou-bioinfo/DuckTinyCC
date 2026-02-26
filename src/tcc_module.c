@@ -12,6 +12,17 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#ifdef _WIN32
+#include <io.h>
+#define TCC_ACCESS _access
+#define TCC_ACCESS_FOK 0
+#define TCC_ENV_PATH_SEP ';'
+#else
+#include <unistd.h>
+#define TCC_ACCESS access
+#define TCC_ACCESS_FOK F_OK
+#define TCC_ENV_PATH_SEP ':'
+#endif
 
 DUCKDB_EXTENSION_EXTERN
 
@@ -120,9 +131,32 @@ typedef struct {
 	tcc_ffi_type_t arg_types[TCC_MAX_ARGS];
 } tcc_host_sig_ctx_t;
 
+typedef struct {
+	char *kind;
+	char *key;
+	char *value;
+	bool exists;
+	char *detail;
+} tcc_diag_row_t;
+
+typedef struct {
+	tcc_diag_row_t *rows;
+	idx_t count;
+	idx_t capacity;
+} tcc_diag_rows_t;
+
+typedef struct {
+	tcc_diag_rows_t rows;
+} tcc_diag_bind_data_t;
+
+typedef struct {
+	idx_t offset;
+} tcc_diag_init_data_t;
+
 static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
                                 tcc_ffi_type_t out_arg_types[TCC_MAX_ARGS], int *out_arg_count,
                                 tcc_error_buffer_t *error_buf);
+static bool tcc_equals_ci(const char *a, const char *b);
 
 static char *tcc_strdup(const char *value) {
 	size_t len;
@@ -175,6 +209,179 @@ static void tcc_set_error(tcc_error_buffer_t *error_buf, const char *message) {
 	}
 	snprintf(error_buf->message, sizeof(error_buf->message), "%s", message);
 }
+
+static const char *tcc_default_runtime_path(void) {
+#ifdef DUCKTINYCC_DEFAULT_RUNTIME_PATH
+	return DUCKTINYCC_DEFAULT_RUNTIME_PATH;
+#else
+	return "third_party/tinycc";
+#endif
+}
+
+static bool tcc_path_exists(const char *path) {
+	return path && path[0] != '\0' && TCC_ACCESS(path, TCC_ACCESS_FOK) == 0;
+}
+
+static bool tcc_string_ends_with(const char *value, const char *suffix) {
+	size_t value_len;
+	size_t suffix_len;
+	if (!value || !suffix) {
+		return false;
+	}
+	value_len = strlen(value);
+	suffix_len = strlen(suffix);
+	if (suffix_len > value_len) {
+		return false;
+	}
+	return strcmp(value + value_len - suffix_len, suffix) == 0;
+}
+
+static bool tcc_diag_rows_reserve(tcc_diag_rows_t *rows, idx_t wanted) {
+	tcc_diag_row_t *new_rows;
+	idx_t new_capacity;
+	if (!rows) {
+		return false;
+	}
+	if (rows->capacity >= wanted) {
+		return true;
+	}
+	new_capacity = rows->capacity == 0 ? 16 : rows->capacity * 2;
+	while (new_capacity < wanted) {
+		new_capacity *= 2;
+	}
+	new_rows = (tcc_diag_row_t *)duckdb_malloc(sizeof(tcc_diag_row_t) * new_capacity);
+	if (!new_rows) {
+		return false;
+	}
+	memset(new_rows, 0, sizeof(tcc_diag_row_t) * new_capacity);
+	if (rows->rows && rows->count > 0) {
+		memcpy(new_rows, rows->rows, sizeof(tcc_diag_row_t) * rows->count);
+		duckdb_free(rows->rows);
+	}
+	rows->rows = new_rows;
+	rows->capacity = new_capacity;
+	return true;
+}
+
+static bool tcc_diag_rows_add(tcc_diag_rows_t *rows, const char *kind, const char *key, const char *value, bool exists,
+                              const char *detail) {
+	tcc_diag_row_t *row;
+	if (!rows || !kind || !key) {
+		return false;
+	}
+	if (!tcc_diag_rows_reserve(rows, rows->count + 1)) {
+		return false;
+	}
+	row = &rows->rows[rows->count];
+	memset(row, 0, sizeof(tcc_diag_row_t));
+	row->kind = tcc_strdup(kind);
+	row->key = tcc_strdup(key);
+	row->value = value ? tcc_strdup(value) : NULL;
+	row->exists = exists;
+	row->detail = detail ? tcc_strdup(detail) : NULL;
+	if (!row->kind || !row->key || (value && !row->value) || (detail && !row->detail)) {
+		if (row->kind) {
+			duckdb_free(row->kind);
+		}
+		if (row->key) {
+			duckdb_free(row->key);
+		}
+		if (row->value) {
+			duckdb_free(row->value);
+		}
+		if (row->detail) {
+			duckdb_free(row->detail);
+		}
+		memset(row, 0, sizeof(tcc_diag_row_t));
+		return false;
+	}
+	rows->count++;
+	return true;
+}
+
+static void tcc_diag_rows_destroy(tcc_diag_rows_t *rows) {
+	idx_t i;
+	if (!rows) {
+		return;
+	}
+	for (i = 0; i < rows->count; i++) {
+		if (rows->rows[i].kind) {
+			duckdb_free(rows->rows[i].kind);
+		}
+		if (rows->rows[i].key) {
+			duckdb_free(rows->rows[i].key);
+		}
+		if (rows->rows[i].value) {
+			duckdb_free(rows->rows[i].value);
+		}
+		if (rows->rows[i].detail) {
+			duckdb_free(rows->rows[i].detail);
+		}
+	}
+	if (rows->rows) {
+		duckdb_free(rows->rows);
+	}
+	memset(rows, 0, sizeof(tcc_diag_rows_t));
+}
+
+static char *tcc_path_join(const char *base, const char *leaf) {
+	size_t base_len;
+	size_t leaf_len;
+	bool needs_sep;
+	char *joined;
+	if (!base || !leaf || base[0] == '\0' || leaf[0] == '\0') {
+		return NULL;
+	}
+	base_len = strlen(base);
+	leaf_len = strlen(leaf);
+	needs_sep = !(base[base_len - 1] == '/' || base[base_len - 1] == '\\');
+	joined = (char *)duckdb_malloc(base_len + leaf_len + (needs_sep ? 2 : 1));
+	if (!joined) {
+		return NULL;
+	}
+	memcpy(joined, base, base_len);
+	if (needs_sep) {
+		joined[base_len] = '/';
+		memcpy(joined + base_len + 1, leaf, leaf_len);
+		joined[base_len + 1 + leaf_len] = '\0';
+	} else {
+		memcpy(joined + base_len, leaf, leaf_len);
+		joined[base_len + leaf_len] = '\0';
+	}
+	return joined;
+}
+
+static bool tcc_string_equals_path(const char *a, const char *b) {
+#ifdef _WIN32
+	while (*a && *b) {
+		unsigned char ca = (unsigned char)tolower((unsigned char)*a);
+		unsigned char cb = (unsigned char)tolower((unsigned char)*b);
+		if (ca != cb) {
+			return false;
+		}
+		a++;
+		b++;
+	}
+	return *a == '\0' && *b == '\0';
+#else
+	return strcmp(a, b) == 0;
+#endif
+}
+
+static bool tcc_string_list_contains(const tcc_string_list_t *list, const char *value) {
+	idx_t i;
+	if (!list || !value || value[0] == '\0') {
+		return false;
+	}
+	for (i = 0; i < list->count; i++) {
+		if (list->items[i] && tcc_string_equals_path(list->items[i], value)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool tcc_append_env_path_list(tcc_string_list_t *list, const char *path_list);
 
 static void tcc_string_list_destroy(tcc_string_list_t *list) {
 	idx_t i;
@@ -235,6 +442,367 @@ static bool tcc_string_list_append(tcc_string_list_t *list, const char *value) {
 	return true;
 }
 
+static bool tcc_string_list_append_unique(tcc_string_list_t *list, const char *value) {
+	if (!list || !value || value[0] == '\0') {
+		return false;
+	}
+	if (tcc_string_list_contains(list, value)) {
+		return true;
+	}
+	return tcc_string_list_append(list, value);
+}
+
+static bool tcc_is_path_like(const char *value) {
+	if (!value || value[0] == '\0') {
+		return false;
+	}
+	if (strchr(value, '/') || strchr(value, '\\')) {
+		return true;
+	}
+#ifdef _WIN32
+	if (strlen(value) >= 2 && isalpha((unsigned char)value[0]) && value[1] == ':') {
+		return true;
+	}
+#endif
+	if (value[0] == '.') {
+		return true;
+	}
+	return false;
+}
+
+static bool tcc_has_library_suffix(const char *value) {
+	if (!value || value[0] == '\0') {
+		return false;
+	}
+#ifdef _WIN32
+	if (tcc_string_ends_with(value, ".dll") || tcc_string_ends_with(value, ".DLL") ||
+	    tcc_string_ends_with(value, ".lib") || tcc_string_ends_with(value, ".LIB") ||
+	    tcc_string_ends_with(value, ".a") || tcc_string_ends_with(value, ".A")) {
+		return true;
+	}
+#else
+	if (tcc_string_ends_with(value, ".so") || strstr(value, ".so.") || tcc_string_ends_with(value, ".dylib") ||
+	    tcc_string_ends_with(value, ".a")) {
+		return true;
+	}
+#endif
+	return false;
+}
+
+static bool tcc_append_env_path_list(tcc_string_list_t *list, const char *path_list) {
+	const char *start;
+	const char *p;
+	if (!list || !path_list || path_list[0] == '\0') {
+		return true;
+	}
+	start = path_list;
+	p = path_list;
+	while (true) {
+		if (*p == '\0' || *p == TCC_ENV_PATH_SEP) {
+			const char *token_start = start;
+			const char *token_end = p;
+			char *token;
+			size_t len;
+			while (token_start < token_end && isspace((unsigned char)*token_start)) {
+				token_start++;
+			}
+			while (token_end > token_start && isspace((unsigned char)token_end[-1])) {
+				token_end--;
+			}
+			len = (size_t)(token_end - token_start);
+			if (len > 0) {
+				token = (char *)duckdb_malloc(len + 1);
+				if (!token) {
+					return false;
+				}
+				memcpy(token, token_start, len);
+				token[len] = '\0';
+				if (!tcc_string_list_append_unique(list, token)) {
+					duckdb_free(token);
+					return false;
+				}
+				duckdb_free(token);
+			}
+			if (*p == '\0') {
+				break;
+			}
+			start = p + 1;
+		}
+		p++;
+	}
+	return true;
+}
+
+static bool tcc_add_platform_library_paths(tcc_string_list_t *paths) {
+	idx_t i;
+#ifdef _WIN32
+	const char *candidates[] = {
+	    "C:/msys64/mingw64/lib", "C:/msys64/mingw32/lib", "C:/Rtools45/mingw_64/lib", "C:/Rtools45/mingw_32/lib",
+	    "C:/Rtools44/mingw_64/lib", "C:/Rtools44/mingw_32/lib"};
+	const char *system_root = getenv("SystemRoot");
+	char *system32 = NULL;
+	char *syswow64 = NULL;
+	if (!system_root || system_root[0] == '\0') {
+		system_root = "C:/Windows";
+	}
+	system32 = tcc_path_join(system_root, "System32");
+	syswow64 = tcc_path_join(system_root, "SysWOW64");
+	if (system32) {
+		if (!tcc_string_list_append_unique(paths, system32)) {
+			duckdb_free(system32);
+			if (syswow64) {
+				duckdb_free(syswow64);
+			}
+			return false;
+		}
+		duckdb_free(system32);
+	}
+	if (syswow64) {
+		if (!tcc_string_list_append_unique(paths, syswow64)) {
+			duckdb_free(syswow64);
+			return false;
+		}
+		duckdb_free(syswow64);
+	}
+#elif defined(__APPLE__)
+	const char *candidates[] = {"/usr/lib", "/usr/local/lib", "/opt/homebrew/lib", "/opt/local/lib",
+	                            "/System/Library/Frameworks", "/Library/Frameworks"};
+#else
+	const char *candidates[] = {"/usr/lib",          "/usr/lib64",            "/usr/local/lib",       "/lib",
+	                            "/lib64",            "/lib32",                "/usr/local/lib64",     "/usr/lib/x86_64-linux-gnu",
+	                            "/usr/lib/i386-linux-gnu", "/lib/x86_64-linux-gnu", "/lib32/x86_64-linux-gnu",
+	                            "/usr/lib/x86_64-linux-musl", "/usr/lib/i386-linux-musl", "/lib/x86_64-linux-musl",
+	                            "/lib32/x86_64-linux-musl",   "/usr/lib/amd64-linux-gnu", "/usr/lib/aarch64-linux-gnu"};
+#endif
+	for (i = 0; i < (idx_t)(sizeof(candidates) / sizeof(candidates[0])); i++) {
+		if (!tcc_string_list_append_unique(paths, candidates[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool tcc_collect_library_search_paths(const char *runtime_path, const char *extra_paths,
+                                             tcc_string_list_t *out_paths) {
+	char *p = NULL;
+	if (!out_paths) {
+		return false;
+	}
+	if (runtime_path && runtime_path[0] != '\0') {
+		if (!tcc_string_list_append_unique(out_paths, runtime_path)) {
+			return false;
+		}
+		p = tcc_path_join(runtime_path, "lib");
+		if (p) {
+			if (!tcc_string_list_append_unique(out_paths, p)) {
+				duckdb_free(p);
+				return false;
+			}
+			duckdb_free(p);
+		}
+		p = tcc_path_join(runtime_path, "lib/tcc");
+		if (p) {
+			if (!tcc_string_list_append_unique(out_paths, p)) {
+				duckdb_free(p);
+				return false;
+			}
+			duckdb_free(p);
+		}
+#ifdef _WIN32
+		p = tcc_path_join(runtime_path, "bin");
+		if (p) {
+			if (!tcc_string_list_append_unique(out_paths, p)) {
+				duckdb_free(p);
+				return false;
+			}
+			duckdb_free(p);
+		}
+#endif
+	}
+	if (extra_paths && extra_paths[0] != '\0') {
+		if (!tcc_append_env_path_list(out_paths, extra_paths)) {
+			return false;
+		}
+	}
+	if (!tcc_add_platform_library_paths(out_paths)) {
+		return false;
+	}
+#ifdef _WIN32
+	if (!tcc_append_env_path_list(out_paths, getenv("LIB"))) {
+		return false;
+	}
+	if (!tcc_append_env_path_list(out_paths, getenv("PATH"))) {
+		return false;
+	}
+#elif defined(__APPLE__)
+	if (!tcc_append_env_path_list(out_paths, getenv("DYLD_LIBRARY_PATH"))) {
+		return false;
+	}
+	if (!tcc_append_env_path_list(out_paths, getenv("LD_LIBRARY_PATH"))) {
+		return false;
+	}
+	if (!tcc_append_env_path_list(out_paths, getenv("LIBRARY_PATH"))) {
+		return false;
+	}
+#else
+	if (!tcc_append_env_path_list(out_paths, getenv("LD_LIBRARY_PATH"))) {
+		return false;
+	}
+	if (!tcc_append_env_path_list(out_paths, getenv("LIBRARY_PATH"))) {
+		return false;
+	}
+#endif
+	return true;
+}
+
+static bool tcc_collect_include_paths(const char *runtime_path, tcc_string_list_t *out_paths) {
+	char *p = NULL;
+	if (!out_paths) {
+		return false;
+	}
+	if (runtime_path && runtime_path[0] != '\0') {
+		p = tcc_path_join(runtime_path, "include");
+		if (p) {
+			if (!tcc_string_list_append_unique(out_paths, p)) {
+				duckdb_free(p);
+				return false;
+			}
+			duckdb_free(p);
+		}
+		p = tcc_path_join(runtime_path, "lib/tcc/include");
+		if (p) {
+			if (!tcc_string_list_append_unique(out_paths, p)) {
+				duckdb_free(p);
+				return false;
+			}
+			duckdb_free(p);
+		}
+#ifdef _WIN32
+		p = tcc_path_join(runtime_path, "include/winapi");
+		if (p) {
+			if (!tcc_string_list_append_unique(out_paths, p)) {
+				duckdb_free(p);
+				return false;
+			}
+			duckdb_free(p);
+		}
+#endif
+	}
+	return true;
+}
+
+static bool tcc_build_library_candidates(const char *library, tcc_string_list_t *out_candidates) {
+	char candidate[512];
+	if (!library || library[0] == '\0' || !out_candidates) {
+		return false;
+	}
+	if (tcc_is_path_like(library) || tcc_has_library_suffix(library)) {
+		return tcc_string_list_append_unique(out_candidates, library);
+	}
+	if (!tcc_string_list_append_unique(out_candidates, library)) {
+		return false;
+	}
+#ifdef _WIN32
+	snprintf(candidate, sizeof(candidate), "%s.dll", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+	snprintf(candidate, sizeof(candidate), "lib%s.dll", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+	snprintf(candidate, sizeof(candidate), "%s.lib", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+	snprintf(candidate, sizeof(candidate), "lib%s.lib", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+	snprintf(candidate, sizeof(candidate), "lib%s.a", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+#elif defined(__APPLE__)
+	snprintf(candidate, sizeof(candidate), "lib%s.dylib", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+	snprintf(candidate, sizeof(candidate), "lib%s.so", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+	snprintf(candidate, sizeof(candidate), "lib%s.a", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+#else
+	snprintf(candidate, sizeof(candidate), "lib%s.so", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+	snprintf(candidate, sizeof(candidate), "lib%s.a", library);
+	if (!tcc_string_list_append_unique(out_candidates, candidate)) {
+		return false;
+	}
+#endif
+	return true;
+}
+
+static const char *tcc_basename_ptr(const char *path) {
+	const char *s1;
+	const char *s2;
+	const char *best;
+	if (!path) {
+		return "";
+	}
+	s1 = strrchr(path, '/');
+	s2 = strrchr(path, '\\');
+	best = s1;
+	if (!best || (s2 && s2 > best)) {
+		best = s2;
+	}
+	return best ? best + 1 : path;
+}
+
+static char *tcc_library_link_name_from_path(const char *path) {
+	const char *base;
+	char *name;
+	char *so_pos;
+	size_t len;
+	if (!path || path[0] == '\0') {
+		return NULL;
+	}
+	base = tcc_basename_ptr(path);
+	name = tcc_strdup(base);
+	if (!name) {
+		return NULL;
+	}
+	len = strlen(name);
+#ifdef _WIN32
+	if (len > 4 && tcc_equals_ci(name + len - 4, ".dll")) {
+		name[len - 4] = '\0';
+	} else if (len > 4 && tcc_equals_ci(name + len - 4, ".lib")) {
+		name[len - 4] = '\0';
+	} else if (len > 2 && tcc_equals_ci(name + len - 2, ".a")) {
+		name[len - 2] = '\0';
+	}
+#else
+	so_pos = strstr(name, ".so");
+	if (so_pos) {
+		*so_pos = '\0';
+	} else if (len > 6 && tcc_equals_ci(name + len - 6, ".dylib")) {
+		name[len - 6] = '\0';
+	} else if (len > 2 && tcc_equals_ci(name + len - 2, ".a")) {
+		name[len - 2] = '\0';
+	}
+#endif
+	if (strncmp(name, "lib", 3) == 0 && strlen(name) > 3) {
+		memmove(name, name + 3, strlen(name + 3) + 1);
+	}
+	return name;
+}
+
 static void tcc_session_clear_bind(tcc_session_t *session) {
 	if (!session) {
 		return;
@@ -288,11 +856,7 @@ static const char *tcc_session_runtime_path(tcc_module_state_t *state, const cha
 	if (state->session.runtime_path && state->session.runtime_path[0] != '\0') {
 		return state->session.runtime_path;
 	}
-#ifdef DUCKTINYCC_DEFAULT_RUNTIME_PATH
-	return DUCKTINYCC_DEFAULT_RUNTIME_PATH;
-#else
-	return "third_party/tinycc";
-#endif
+	return tcc_default_runtime_path();
 }
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
@@ -1634,6 +2198,282 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 	init->emitted = true;
 }
 
+static void destroy_tcc_diag_bind_data(void *ptr) {
+	tcc_diag_bind_data_t *bind = (tcc_diag_bind_data_t *)ptr;
+	if (!bind) {
+		return;
+	}
+	tcc_diag_rows_destroy(&bind->rows);
+	duckdb_free(bind);
+}
+
+static void destroy_tcc_diag_init_data(void *ptr) {
+	tcc_diag_init_data_t *init = (tcc_diag_init_data_t *)ptr;
+	if (!init) {
+		return;
+	}
+	duckdb_free(init);
+}
+
+static void tcc_diag_set_result_schema(duckdb_bind_info info) {
+	duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+	duckdb_bind_add_result_column(info, "kind", varchar_type);
+	duckdb_bind_add_result_column(info, "key", varchar_type);
+	duckdb_bind_add_result_column(info, "value", varchar_type);
+	duckdb_bind_add_result_column(info, "exists", bool_type);
+	duckdb_bind_add_result_column(info, "detail", varchar_type);
+	duckdb_destroy_logical_type(&bool_type);
+	duckdb_destroy_logical_type(&varchar_type);
+}
+
+static void tcc_diag_table_init(duckdb_init_info info) {
+	tcc_diag_init_data_t *init = (tcc_diag_init_data_t *)duckdb_malloc(sizeof(tcc_diag_init_data_t));
+	if (!init) {
+		duckdb_init_set_error(info, "out of memory");
+		return;
+	}
+	init->offset = 0;
+	duckdb_init_set_init_data(info, init, destroy_tcc_diag_init_data);
+	duckdb_init_set_max_threads(info, 1);
+}
+
+static void tcc_diag_table_function(duckdb_function_info info, duckdb_data_chunk output) {
+	tcc_diag_bind_data_t *bind = (tcc_diag_bind_data_t *)duckdb_function_get_bind_data(info);
+	tcc_diag_init_data_t *init = (tcc_diag_init_data_t *)duckdb_function_get_init_data(info);
+	tcc_diag_row_t *row;
+	duckdb_vector v_exists;
+	bool *exists_data;
+	if (!bind || !init || init->offset >= bind->rows.count) {
+		duckdb_data_chunk_set_size(output, 0);
+		return;
+	}
+	row = &bind->rows.rows[init->offset++];
+	tcc_set_varchar_col(duckdb_data_chunk_get_vector(output, 0), 0, row->kind);
+	tcc_set_varchar_col(duckdb_data_chunk_get_vector(output, 1), 0, row->key);
+	tcc_set_varchar_col(duckdb_data_chunk_get_vector(output, 2), 0, row->value);
+	v_exists = duckdb_data_chunk_get_vector(output, 3);
+	exists_data = (bool *)duckdb_vector_get_data(v_exists);
+	exists_data[0] = row->exists;
+	tcc_set_varchar_col(duckdb_data_chunk_get_vector(output, 4), 0, row->detail);
+	duckdb_data_chunk_set_size(output, 1);
+}
+
+static void tcc_system_paths_bind(duckdb_bind_info info) {
+	tcc_diag_bind_data_t *bind = (tcc_diag_bind_data_t *)duckdb_malloc(sizeof(tcc_diag_bind_data_t));
+	tcc_string_list_t include_paths;
+	tcc_string_list_t library_paths;
+	char *runtime_path = NULL;
+	char *library_path = NULL;
+	const char *effective_runtime;
+	idx_t i;
+	if (!bind) {
+		duckdb_bind_set_error(info, "out of memory");
+		return;
+	}
+	memset(bind, 0, sizeof(tcc_diag_bind_data_t));
+	memset(&include_paths, 0, sizeof(tcc_string_list_t));
+	memset(&library_paths, 0, sizeof(tcc_string_list_t));
+
+	tcc_bind_read_named_varchar(info, "runtime_path", &runtime_path);
+	tcc_bind_read_named_varchar(info, "library_path", &library_path);
+	effective_runtime = (runtime_path && runtime_path[0] != '\0') ? runtime_path : tcc_default_runtime_path();
+
+	if (!tcc_collect_include_paths(effective_runtime, &include_paths) ||
+	    !tcc_collect_library_search_paths(effective_runtime, library_path, &library_paths)) {
+		tcc_string_list_destroy(&include_paths);
+		tcc_string_list_destroy(&library_paths);
+		if (runtime_path) {
+			duckdb_free(runtime_path);
+		}
+		if (library_path) {
+			duckdb_free(library_path);
+		}
+		destroy_tcc_diag_bind_data(bind);
+		duckdb_bind_set_error(info, "out of memory");
+		return;
+	}
+
+	(void)tcc_diag_rows_add(&bind->rows, "runtime", "runtime_path", effective_runtime, tcc_path_exists(effective_runtime),
+	                        "effective runtime path");
+	for (i = 0; i < include_paths.count; i++) {
+		(void)tcc_diag_rows_add(&bind->rows, "include_path", "path", include_paths.items[i],
+		                        tcc_path_exists(include_paths.items[i]), "TinyCC include search path");
+	}
+	for (i = 0; i < library_paths.count; i++) {
+		(void)tcc_diag_rows_add(&bind->rows, "library_path", "path", library_paths.items[i],
+		                        tcc_path_exists(library_paths.items[i]), "library search path");
+	}
+
+	tcc_string_list_destroy(&include_paths);
+	tcc_string_list_destroy(&library_paths);
+	if (runtime_path) {
+		duckdb_free(runtime_path);
+	}
+	if (library_path) {
+		duckdb_free(library_path);
+	}
+
+	tcc_diag_set_result_schema(info);
+	duckdb_bind_set_cardinality(info, bind->rows.count, true);
+	duckdb_bind_set_bind_data(info, bind, destroy_tcc_diag_bind_data);
+}
+
+static bool tcc_try_resolve_candidate(const char *candidate, const tcc_string_list_t *search_paths, char **out_path) {
+	idx_t i;
+	if (!candidate || candidate[0] == '\0' || !search_paths || !out_path) {
+		return false;
+	}
+	if (tcc_is_path_like(candidate)) {
+		if (tcc_path_exists(candidate)) {
+			*out_path = tcc_strdup(candidate);
+			return *out_path != NULL;
+		}
+		return false;
+	}
+	for (i = 0; i < search_paths->count; i++) {
+		char *full_path = tcc_path_join(search_paths->items[i], candidate);
+		if (!full_path) {
+			return false;
+		}
+		if (tcc_path_exists(full_path)) {
+			*out_path = full_path;
+			return true;
+		}
+		duckdb_free(full_path);
+	}
+	return false;
+}
+
+static void tcc_library_probe_bind(duckdb_bind_info info) {
+	tcc_diag_bind_data_t *bind = (tcc_diag_bind_data_t *)duckdb_malloc(sizeof(tcc_diag_bind_data_t));
+	tcc_string_list_t library_paths;
+	tcc_string_list_t candidates;
+	char *library = NULL;
+	char *runtime_path = NULL;
+	char *library_path = NULL;
+	const char *effective_runtime;
+	idx_t i;
+	bool found = false;
+	if (!bind) {
+		duckdb_bind_set_error(info, "out of memory");
+		return;
+	}
+	memset(bind, 0, sizeof(tcc_diag_bind_data_t));
+	memset(&library_paths, 0, sizeof(tcc_string_list_t));
+	memset(&candidates, 0, sizeof(tcc_string_list_t));
+
+	tcc_bind_read_named_varchar(info, "library", &library);
+	tcc_bind_read_named_varchar(info, "runtime_path", &runtime_path);
+	tcc_bind_read_named_varchar(info, "library_path", &library_path);
+	effective_runtime = (runtime_path && runtime_path[0] != '\0') ? runtime_path : tcc_default_runtime_path();
+
+	if (!library || library[0] == '\0') {
+		if (library) {
+			duckdb_free(library);
+		}
+		if (runtime_path) {
+			duckdb_free(runtime_path);
+		}
+		if (library_path) {
+			duckdb_free(library_path);
+		}
+		destroy_tcc_diag_bind_data(bind);
+		duckdb_bind_set_error(info, "library is required");
+		return;
+	}
+
+	if (!tcc_collect_library_search_paths(effective_runtime, library_path, &library_paths) ||
+	    !tcc_build_library_candidates(library, &candidates)) {
+		tcc_string_list_destroy(&library_paths);
+		tcc_string_list_destroy(&candidates);
+		duckdb_free(library);
+		if (runtime_path) {
+			duckdb_free(runtime_path);
+		}
+		if (library_path) {
+			duckdb_free(library_path);
+		}
+		destroy_tcc_diag_bind_data(bind);
+		duckdb_bind_set_error(info, "out of memory");
+		return;
+	}
+
+	(void)tcc_diag_rows_add(&bind->rows, "input", "library", library, false, "library probe request");
+	(void)tcc_diag_rows_add(&bind->rows, "runtime", "runtime_path", effective_runtime, tcc_path_exists(effective_runtime),
+	                        "effective runtime path");
+	for (i = 0; i < library_paths.count; i++) {
+		(void)tcc_diag_rows_add(&bind->rows, "search_path", "path", library_paths.items[i],
+		                        tcc_path_exists(library_paths.items[i]), "searched path");
+	}
+	for (i = 0; i < candidates.count; i++) {
+		char *resolved = NULL;
+		bool candidate_found = tcc_try_resolve_candidate(candidates.items[i], &library_paths, &resolved);
+		if (candidate_found && resolved) {
+			char *link_name = tcc_library_link_name_from_path(resolved);
+			(void)tcc_diag_rows_add(&bind->rows, "candidate", candidates.items[i], resolved, true, "resolved");
+			(void)tcc_diag_rows_add(&bind->rows, "resolved", "path", resolved, true, "resolved library path");
+			if (link_name) {
+				(void)tcc_diag_rows_add(&bind->rows, "resolved", "link_name", link_name, true,
+				                        "normalized tcc_add_library value");
+				duckdb_free(link_name);
+			}
+			found = true;
+			duckdb_free(resolved);
+			break;
+		}
+		(void)tcc_diag_rows_add(&bind->rows, "candidate", candidates.items[i], NULL, false, "not found");
+	}
+	if (!found) {
+		(void)tcc_diag_rows_add(&bind->rows, "resolved", "path", NULL, false, "no matching library found");
+	}
+
+	tcc_string_list_destroy(&library_paths);
+	tcc_string_list_destroy(&candidates);
+	duckdb_free(library);
+	if (runtime_path) {
+		duckdb_free(runtime_path);
+	}
+	if (library_path) {
+		duckdb_free(library_path);
+	}
+
+	tcc_diag_set_result_schema(info);
+	duckdb_bind_set_cardinality(info, bind->rows.count, true);
+	duckdb_bind_set_bind_data(info, bind, destroy_tcc_diag_bind_data);
+}
+
+static void register_tcc_system_paths_function(duckdb_connection connection) {
+	duckdb_table_function tf = duckdb_create_table_function();
+	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+	duckdb_table_function_set_name(tf, "tcc_system_paths");
+	duckdb_table_function_add_named_parameter(tf, "runtime_path", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "library_path", varchar_type);
+	duckdb_table_function_set_bind(tf, tcc_system_paths_bind);
+	duckdb_table_function_set_init(tf, tcc_diag_table_init);
+	duckdb_table_function_set_function(tf, tcc_diag_table_function);
+	duckdb_table_function_supports_projection_pushdown(tf, false);
+	duckdb_register_table_function(connection, tf);
+	duckdb_destroy_logical_type(&varchar_type);
+	duckdb_destroy_table_function(&tf);
+}
+
+static void register_tcc_library_probe_function(duckdb_connection connection) {
+	duckdb_table_function tf = duckdb_create_table_function();
+	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+	duckdb_table_function_set_name(tf, "tcc_library_probe");
+	duckdb_table_function_add_named_parameter(tf, "library", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "runtime_path", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "library_path", varchar_type);
+	duckdb_table_function_set_bind(tf, tcc_library_probe_bind);
+	duckdb_table_function_set_init(tf, tcc_diag_table_init);
+	duckdb_table_function_set_function(tf, tcc_diag_table_function);
+	duckdb_table_function_supports_projection_pushdown(tf, false);
+	duckdb_register_table_function(connection, tf);
+	duckdb_destroy_logical_type(&varchar_type);
+	duckdb_destroy_table_function(&tf);
+}
+
 void RegisterTccModuleFunction(duckdb_connection connection, duckdb_database database) {
 	duckdb_table_function tf = duckdb_create_table_function();
 	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
@@ -1674,6 +2514,8 @@ void RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 	duckdb_table_function_supports_projection_pushdown(tf, false);
 
 	duckdb_register_table_function(connection, tf);
+	register_tcc_system_paths_function(connection);
+	register_tcc_library_probe_function(connection);
 
 	duckdb_destroy_logical_type(&list_varchar_type);
 	duckdb_destroy_logical_type(&varchar_type);

@@ -40,6 +40,13 @@ context columns.
 | `compile`, `tinycc_compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name`                                                                                                                                       |
 | `quick_compile`             | One-shot fast lane compile + register            | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types`; can also pass per-call `include_path`, `sysinclude_path`, `library_path`, `library`, `option`, `define_*`, `header` |
 
+### Discovery Helpers
+
+| Function                                                                    | Purpose                                                        | Notes                                                                              |
+|-----------------------------------------------------------------------------|----------------------------------------------------------------|------------------------------------------------------------------------------------|
+| `tcc_system_paths(runtime_path := '', library_path := '')`                  | Show include and library search paths used by TinyCC workflows | Includes existence flags; includes Windows/MSYS2/Rtools defaults on Windows builds |
+| `tcc_library_probe(library := ..., runtime_path := '', library_path := '')` | Resolve a library short name or full filename/path             | Supports `.a`, `.so*`, `.dylib`, `.dll`, `.lib` style names                        |
+
 ## Supported Types
 
 Type metadata is explicit for `compile`, `tinycc_compile`, and
@@ -128,7 +135,135 @@ dbGetQuery(con, "
 #> 1 TRUE list   OK registered=0 sources=0 headers=0 includes=0 libs=0 state_id=0
 ```
 
-### 3) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
+### 3) System Paths and Library Probe Helpers
+
+This chunk inspects computed search paths and probes a static library by
+name.
+
+``` r
+dbGetQuery(con, "
+  SELECT kind, key, exists, value
+  FROM tcc_system_paths()
+  LIMIT 12
+")
+#>            kind          key exists
+#> 1       runtime runtime_path   TRUE
+#> 2  include_path         path  FALSE
+#> 3  include_path         path  FALSE
+#> 4  library_path         path   TRUE
+#> 5  library_path         path   TRUE
+#> 6  library_path         path  FALSE
+#> 7  library_path         path   TRUE
+#> 8  library_path         path   TRUE
+#> 9  library_path         path   TRUE
+#> 10 library_path         path   TRUE
+#> 11 library_path         path   TRUE
+#> 12 library_path         path   TRUE
+#>                                                                value
+#> 1                  /root/DuckTinyCC/cmake_build/release/tinycc_build
+#> 2          /root/DuckTinyCC/cmake_build/release/tinycc_build/include
+#> 3  /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc/include
+#> 4                  /root/DuckTinyCC/cmake_build/release/tinycc_build
+#> 5              /root/DuckTinyCC/cmake_build/release/tinycc_build/lib
+#> 6          /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc
+#> 7                                                           /usr/lib
+#> 8                                                         /usr/lib64
+#> 9                                                     /usr/local/lib
+#> 10                                                              /lib
+#> 11                                                            /lib64
+#> 12                                                            /lib32
+
+dbGetQuery(con, "
+  SELECT kind, key, exists, value, detail
+  FROM tcc_library_probe(library := 'libtcc1.a')
+")
+#>           kind          key exists
+#> 1        input      library  FALSE
+#> 2      runtime runtime_path   TRUE
+#> 3  search_path         path   TRUE
+#> 4  search_path         path   TRUE
+#> 5  search_path         path  FALSE
+#> 6  search_path         path   TRUE
+#> 7  search_path         path   TRUE
+#> 8  search_path         path   TRUE
+#> 9  search_path         path   TRUE
+#> 10 search_path         path   TRUE
+#> 11 search_path         path   TRUE
+#> 12 search_path         path  FALSE
+#> 13 search_path         path   TRUE
+#> 14 search_path         path  FALSE
+#> 15 search_path         path   TRUE
+#> 16 search_path         path  FALSE
+#> 17 search_path         path  FALSE
+#> 18 search_path         path  FALSE
+#> 19 search_path         path  FALSE
+#> 20 search_path         path  FALSE
+#> 21 search_path         path  FALSE
+#> 22 search_path         path  FALSE
+#> 23 search_path         path   TRUE
+#> 24 search_path         path   TRUE
+#> 25   candidate    libtcc1.a   TRUE
+#> 26    resolved         path   TRUE
+#> 27    resolved    link_name   TRUE
+#>                                                          value
+#> 1                                                    libtcc1.a
+#> 2            /root/DuckTinyCC/cmake_build/release/tinycc_build
+#> 3            /root/DuckTinyCC/cmake_build/release/tinycc_build
+#> 4        /root/DuckTinyCC/cmake_build/release/tinycc_build/lib
+#> 5    /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc
+#> 6                                                     /usr/lib
+#> 7                                                   /usr/lib64
+#> 8                                               /usr/local/lib
+#> 9                                                         /lib
+#> 10                                                      /lib64
+#> 11                                                      /lib32
+#> 12                                            /usr/local/lib64
+#> 13                                   /usr/lib/x86_64-linux-gnu
+#> 14                                     /usr/lib/i386-linux-gnu
+#> 15                                       /lib/x86_64-linux-gnu
+#> 16                                     /lib32/x86_64-linux-gnu
+#> 17                                  /usr/lib/x86_64-linux-musl
+#> 18                                    /usr/lib/i386-linux-musl
+#> 19                                      /lib/x86_64-linux-musl
+#> 20                                    /lib32/x86_64-linux-musl
+#> 21                                    /usr/lib/amd64-linux-gnu
+#> 22                                  /usr/lib/aarch64-linux-gnu
+#> 23                                              /usr/lib/R/lib
+#> 24                        /usr/lib/jvm/default-java/lib/server
+#> 25 /root/DuckTinyCC/cmake_build/release/tinycc_build/libtcc1.a
+#> 26 /root/DuckTinyCC/cmake_build/release/tinycc_build/libtcc1.a
+#> 27                                                        tcc1
+#>                              detail
+#> 1             library probe request
+#> 2            effective runtime path
+#> 3                     searched path
+#> 4                     searched path
+#> 5                     searched path
+#> 6                     searched path
+#> 7                     searched path
+#> 8                     searched path
+#> 9                     searched path
+#> 10                    searched path
+#> 11                    searched path
+#> 12                    searched path
+#> 13                    searched path
+#> 14                    searched path
+#> 15                    searched path
+#> 16                    searched path
+#> 17                    searched path
+#> 18                    searched path
+#> 19                    searched path
+#> 20                    searched path
+#> 21                    searched path
+#> 22                    searched path
+#> 23                    searched path
+#> 24                    searched path
+#> 25                         resolved
+#> 26            resolved library path
+#> 27 normalized tcc_add_library value
+```
+
+### 4) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
 
 This example stages shared build inputs once, compiles two symbols, and
 calls both SQL functions.
@@ -217,7 +352,7 @@ dbGetQuery(con, "SELECT tcc_times2(21) AS value")
 #> 1    42
 ```
 
-### 4) Example B: Fast Lane `quick_compile` (with include/library inputs)
+### 5) Example B: Fast Lane `quick_compile` (with include/library inputs)
 
 This example compiles and registers directly from one SQL call,
 including `include_path`, `library_path`, and `library`.
@@ -245,7 +380,7 @@ dbGetQuery(con, "SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value")
 #> 1    32
 ```
 
-### 5) Example C: Libraries (`add_library`)
+### 6) Example C: Libraries (`add_library`)
 
 This example links `libm`, compiles a function that uses `pow`, then
 calls it. The required C header is included in the source unit.
@@ -284,7 +419,7 @@ dbGetQuery(con, "SELECT CAST(pwr(2.0, 5.0) AS BIGINT) AS value")
 #> 1    32
 ```
 
-### 6) Reset Session
+### 7) Reset Session
 
 This chunk resets session state and shows summary counters.
 
@@ -297,7 +432,7 @@ dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 #> 1 TRUE config_reset   OK
 ```
 
-### 7) Cleanup
+### 8) Cleanup
 
 This chunk closes the database connection.
 
@@ -312,5 +447,8 @@ dbDisconnect(con, shutdown = TRUE)
 - `add_header`/`add_source` are compiled as separate translation units.
   For external library prototypes, include headers directly in the
   relevant `source` unit.
+- Use `tcc_system_paths()` and `tcc_library_probe()` to diagnose
+  platform-specific library resolution (including Windows/Rtools/MSYS2
+  layouts).
 - All outputs are returned as a diagnostics table for SQL-native
   observability.
