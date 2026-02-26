@@ -80,11 +80,12 @@ Additional limits and behavior:
 - NULL handling: NULL-in/NULL-out
 - `void` return registers as a SQL function that emits `NULL` values
 
-## Build
+## Builds
 
 ```sh
 make configure
-make debug
+make debug  # debug
+make release # release
 ```
 
 ## Test
@@ -96,121 +97,90 @@ make test_release
 
 ## Examples
 
-The examples below use `DBI` + `duckdb` and focus on one workflow at a time.
+Run these snippets in one DuckDB shell session (`duckdb -unsigned`) with timing
+enabled.
 
 ### 1) Setup
 
-This chunk connects to DuckDB in-memory and loads the extension artifact.
-
-```{r eval=TRUE}
-library(DBI)
-library(duckdb)
-
-drv <- duckdb::duckdb(config = list(allow_unsigned_extensions = "true"))
-con <- dbConnect(drv, dbdir = ":memory:")
-ext_path <- normalizePath("build/release/ducktinycc.duckdb_extension", mustWork = FALSE)
-dbExecute(con, sprintf("LOAD '%s'", ext_path))
+```sh
+duckdb -unsigned
+.timer on
+LOAD 'build/release/ducktinycc.duckdb_extension';
 ```
 
 ### 2) Session Configuration
 
-This chunk initializes a clean session and inspects the current state.
+```sql
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'config_set',
+  runtime_path := ''
+);
 
-```{r eval=TRUE}
-dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(
-    mode := 'config_set',
-    runtime_path := ''
-  )
-")
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'config_get');
 
-dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(mode := 'config_get')
-")
-
-dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(mode := 'list')
-")
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'list');
 ```
 
 ### 3) System Paths and Library Probe Helpers
 
-This chunk inspects computed search paths and probes a static library by name.
+```sql
+SELECT kind, key, exists, value
+FROM tcc_system_paths()
+LIMIT 12;
 
-```{r eval=TRUE}
-dbGetQuery(con, "
-  SELECT kind, key, exists, value
-  FROM tcc_system_paths()
-  LIMIT 12
-")
-
-dbGetQuery(con, "
-  SELECT kind, key, exists, value, detail
-  FROM tcc_library_probe(library := 'libtcc1.a')
-")
+SELECT kind, key, exists, value, detail
+FROM tcc_library_probe(library := 'libtcc1.a');
 ```
 
 ### 4) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
 
 This example stages shared build inputs once, compiles two symbols, and calls both SQL functions.
 
-```{r eval=TRUE}
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state')")
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_include', include_path := 'third_party/tinycc/include')")
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_sysinclude', sysinclude_path := 'third_party/tinycc/include')")
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library_path', library_path := 'third_party/tinycc')")
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_option', option := '-O2')")
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_define', define_name := 'TCC_SHIFT', define_value := '3')")
+```sql
+SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state');
+SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_include', include_path := 'third_party/tinycc/include');
+SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_sysinclude', sysinclude_path := 'third_party/tinycc/include');
+SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library_path', library_path := 'third_party/tinycc');
+SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_option', option := '-O2');
+SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_define', define_name := 'TCC_SHIFT', define_value := '3');
 
-dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(
-    mode := 'add_header',
-    header := '#include <stdint.h>'
-  )
-")
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_header',
+  header := '#include <stdint.h>'
+);
 
-dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(
-    mode := 'add_source',
-    source := '
-      long long tcc_add_shift(long long x){ return x + TCC_SHIFT; }
-      long long tcc_times2(long long x){ return x * 2; }
-    '
-  )
-")
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_source',
+  source := '
+    long long tcc_add_shift(long long x){ return x + TCC_SHIFT; }
+    long long tcc_times2(long long x){ return x * 2; }
+  '
+);
 
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(mode := 'tinycc_bind', symbol := 'tcc_add_shift', sql_name := 'tcc_add_shift')
-")
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(
-    mode := 'tinycc_compile',
-    return_type := 'i64',
-    arg_types := ['i64']
-  )
-")
-dbGetQuery(con, "SELECT tcc_add_shift(39) AS value")
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tinycc_bind', symbol := 'tcc_add_shift', sql_name := 'tcc_add_shift');
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'tinycc_compile',
+  return_type := 'i64',
+  arg_types := ['i64']
+);
+SELECT tcc_add_shift(39) AS value;
 
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(mode := 'tinycc_bind', symbol := 'tcc_times2', sql_name := 'tcc_times2')
-")
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(
-    mode := 'compile',
-    return_type := 'i64',
-    arg_types := ['i64']
-  )
-")
-dbGetQuery(con, "SELECT tcc_times2(21) AS value")
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tinycc_bind', symbol := 'tcc_times2', sql_name := 'tcc_times2');
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'compile',
+  return_type := 'i64',
+  arg_types := ['i64']
+);
+SELECT tcc_times2(21) AS value;
 ```
 
 ### 5) Example B: Fast Lane `quick_compile` (with include/library inputs)
@@ -218,23 +188,21 @@ dbGetQuery(con, "SELECT tcc_times2(21) AS value")
 This example compiles and registers directly from one SQL call, including
 `include_path`, `library_path`, and `library`.
 
-```{r eval=TRUE}
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(
-    mode := 'quick_compile',
-    source := '#include <math.h>
+```sql
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#include <math.h>
 double qpow(double x, double y){ return pow(x, y); }',
-    symbol := 'qpow',
-    sql_name := 'qpow',
-    return_type := 'f64',
-    arg_types := ['f64', 'f64'],
-    include_path := 'third_party/tinycc/include',
-    library_path := 'third_party/tinycc',
-    library := 'm'
-  )
-")
-dbGetQuery(con, "SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value")
+  symbol := 'qpow',
+  sql_name := 'qpow',
+  return_type := 'f64',
+  arg_types := ['f64', 'f64'],
+  include_path := 'third_party/tinycc/include',
+  library_path := 'third_party/tinycc',
+  library := 'm'
+);
+SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
 ```
 
 ### 6) Example C: Libraries (`add_library`)
@@ -242,35 +210,27 @@ dbGetQuery(con, "SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value")
 This example links `libm`, compiles a function that uses `pow`, then calls it.
 The required C header is included in the source unit.
 
-```{r eval=TRUE}
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'tcc_new_state')")
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'add_library', library := 'm')")
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(
-    mode := 'add_source',
-    source := '#include <math.h>
+```sql
+SELECT ok, mode, code FROM tcc_module(mode := 'tcc_new_state');
+SELECT ok, mode, code FROM tcc_module(mode := 'add_library', library := 'm');
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_source',
+  source := '#include <math.h>
 double pwr(double x, double y){ return pow(x, y); }'
-  )
-")
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(mode := 'tinycc_bind', symbol := 'pwr', sql_name := 'pwr')
-")
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(mode := 'compile', return_type := 'f64', arg_types := ['f64', 'f64'])
-")
-dbGetQuery(con, "SELECT CAST(pwr(2.0, 5.0) AS BIGINT) AS value")
+);
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tinycc_bind', symbol := 'pwr', sql_name := 'pwr');
+SELECT ok, mode, code
+FROM tcc_module(mode := 'compile', return_type := 'f64', arg_types := ['f64', 'f64']);
+SELECT CAST(pwr(2.0, 5.0) AS BIGINT) AS value;
 ```
 
 ### 7) Reset Session
 
-This chunk resets session state and shows summary counters.
-
-```{r eval=TRUE}
-dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'list')")
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
+```sql
+SELECT ok, mode, code, detail FROM tcc_module(mode := 'list');
+SELECT ok, mode, code FROM tcc_module(mode := 'config_reset');
 ```
 
 ### 8) CLI Benchmark Snippet
@@ -299,11 +259,7 @@ SQL
 
 ### 9) Cleanup
 
-This chunk closes the database connection.
-
-```{r eval=TRUE}
-dbDisconnect(con, shutdown = TRUE)
-```
+No explicit cleanup is required in the CLI example flow.
 
 ## Notes
 
