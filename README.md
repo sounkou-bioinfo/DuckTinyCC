@@ -514,42 +514,42 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
 
-    Run Time (s): real 0.000 user 0.000385 sys 0.000000
+    Run Time (s): real 0.000 user 0.000290 sys 0.000079
     ┌─────────┬───────────────┬─────────┐
     │   ok    │     mode      │  code   │
     │ boolean │    varchar    │ varchar │
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.001 user 0.001585 sys 0.000000
+    Run Time (s): real 0.001 user 0.000000 sys 0.000896
     ┌─────────────────┐
     │ add_i32(20, 22) │
     │      int32      │
     ├─────────────────┤
     │              42 │
     └─────────────────┘
-    Run Time (s): real 0.000 user 0.000254 sys 0.000000
+    Run Time (s): real 0.000 user 0.000180 sys 0.000251
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.008 user 0.007869 sys 0.000000
+    Run Time (s): real 0.011 user 0.010802 sys 0.000000
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.008 user 0.016084 sys 0.000000
+    Run Time (s): real 0.009 user 0.008840 sys 0.000000
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.008 user 0.008182 sys 0.000000
+    Run Time (s): real 0.008 user 0.017084 sys 0.000000
 
 ### 9) Cleanup
 
