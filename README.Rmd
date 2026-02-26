@@ -277,7 +277,7 @@ dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 
 Use the DuckDB CLI timer to benchmark compile and call latency quickly:
 
-```sh
+```{bash eval=TRUE, collapse=FALSE, comment=""}
 duckdb -unsigned <<'SQL'
 .timer on
 LOAD 'build/release/ducktinycc.duckdb_extension';

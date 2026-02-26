@@ -436,7 +436,7 @@ dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 
 Use the DuckDB CLI timer to benchmark compile and call latency quickly:
 
-``` sh
+``` bash
 duckdb -unsigned <<'SQL'
 .timer on
 LOAD 'build/release/ducktinycc.duckdb_extension';
@@ -455,6 +455,43 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
+
+    Run Time (s): real 0.001 user 0.000306 sys 0.000000
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    Run Time (s): real 0.000 user 0.000783 sys 0.000000
+    ┌─────────────────┐
+    │ add_i32(20, 22) │
+    │      int32      │
+    ├─────────────────┤
+    │              42 │
+    └─────────────────┘
+    Run Time (s): real 0.001 user 0.000188 sys 0.000343
+    ┌──────────────┐
+    │      s       │
+    │    int128    │
+    ├──────────────┤
+    │ 500041500000 │
+    └──────────────┘
+    Run Time (s): real 0.008 user 0.008206 sys 0.000145
+    ┌──────────────┐
+    │      s       │
+    │    int128    │
+    ├──────────────┤
+    │ 500041500000 │
+    └──────────────┘
+    Run Time (s): real 0.008 user 0.008182 sys 0.000034
+    ┌──────────────┐
+    │      s       │
+    │    int128    │
+    ├──────────────┤
+    │ 500041500000 │
+    └──────────────┘
+    Run Time (s): real 0.008 user 0.008363 sys 0.000046
 
 ### 9) Cleanup
 
