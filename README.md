@@ -8,22 +8,21 @@ TinyCC-based in-process C scripting workflows.
 
 ## Functions
 
-| Function                                                                                   | Description                                                                        | Notes                                    |
-|--------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|------------------------------------------|
-| `tcc_module(mode := 'config_get', ...)`                                                    | Show current session configuration                                                 | Returns diagnostics table                |
-| `tcc_module(mode := 'config_set', runtime_path := ... )`                                   | Set session runtime path                                                           | Connection-scoped state                  |
-| `tcc_module(mode := 'config_reset', ...)`                                                  | Reset session configuration                                                        | Falls back to default runtime path       |
-| `tcc_module(mode := 'tcc_new_state', ...)`                                                 | Start a fresh TinyCC build state                                                   | Keeps connection/runtime scope           |
-| `tcc_module(mode := 'add_include'/'add_sysinclude'/'add_library_path'/'add_library', ...)` | Add TinyCC include/library inputs                                                  | Session-scoped build inputs              |
-| `tcc_module(mode := 'add_option'/'add_define'/'add_header'/'add_source', ...)`             | Add compile options/defines/code units                                             | Session-scoped build inputs              |
-| `tcc_module(mode := 'tinycc_bind', symbol := ..., sql_name := ...)`                        | Bind symbol + sql alias for next compile                                           | Rtinycc-style bind step                  |
-| `tcc_module(mode := 'list', ...)`                                                          | Show current registry/session counters                                             | Diagnostics table                        |
-| `tcc_module(mode := 'compile'/'tinycc_compile', ...)`                                      | Compile + relocate from current session and store callable artifact                | Fresh `tcc_new` per compile              |
-| `tcc_module(mode := 'load', source := ..., symbol := ..., sql_name := ...)`                | Compile and run a dynamic module init entrypoint on the extension-owned connection | Keeps compiled module alive in registry  |
-| `tcc_module(mode := 'call', source := ..., symbol := ..., arg1 := ..., ..., arg10 := ...)` | Compile + execute callable symbol                                                  | One-shot compile+execute                 |
-| `tcc_module(mode := 'register', source := ..., symbol := ..., sql_name := ...)`            | Compile unit and store callable artifact in session registry                       | Uses fresh TinyCC state per registration |
-| `tcc_module(mode := 'call', sql_name := ..., arg1 := ..., ..., arg10 := ...)`              | Execute previously registered artifact                                             | No recompile on call path                |
-| `tcc_module(mode := 'unregister', sql_name := ...)`                                        | Remove a registered artifact from session registry                                 | Frees TinyCC state                       |
+| Function                                                                                                                | Description                                                                        | Notes                                    |
+|-------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|------------------------------------------|
+| `tcc_module(mode := 'config_get', ...)`                                                                                 | Show current session configuration                                                 | Returns diagnostics table                |
+| `tcc_module(mode := 'config_set', runtime_path := ... )`                                                                | Set session runtime path                                                           | Connection-scoped state                  |
+| `tcc_module(mode := 'config_reset', ...)`                                                                               | Reset session configuration                                                        | Falls back to default runtime path       |
+| `tcc_module(mode := 'tcc_new_state', ...)`                                                                              | Start a fresh TinyCC build state                                                   | Keeps connection/runtime scope           |
+| `tcc_module(mode := 'add_include'/'add_sysinclude'/'add_library_path'/'add_library', ...)`                              | Add TinyCC include/library inputs                                                  | Session-scoped build inputs              |
+| `tcc_module(mode := 'add_option'/'add_define'/'add_header'/'add_source', ...)`                                          | Add compile options/defines/code units                                             | Session-scoped build inputs              |
+| `tcc_module(mode := 'tinycc_bind', symbol := ..., sql_name := ...)`                                                     | Bind symbol + sql alias for next compile                                           | Rtinycc-style bind step                  |
+| `tcc_module(mode := 'list', ...)`                                                                                       | Show current registry/session counters                                             | Diagnostics table                        |
+| `tcc_module(mode := 'compile'/'tinycc_compile', ...)`                                                                   | Compile + relocate from current session and store callable artifact                | Fresh `tcc_new` per compile              |
+| `tcc_module(mode := 'load', source := ..., symbol := ..., sql_name := ...)`                                             | Compile and run a dynamic module init entrypoint on the extension-owned connection | Keeps compiled module alive in registry  |
+| `tcc_module(mode := 'ffi_load', source := ..., symbol := ..., sql_name := ..., return_type := ..., arg_types := [...])` | Generate and load a TinyCC FFI module that registers a real DuckDB SQL function    | C codegen path                           |
+| `tcc_module(mode := 'register', source := ..., symbol := ..., sql_name := ...)`                                         | Compile unit and store callable artifact in session registry                       | Uses fresh TinyCC state per registration |
+| `tcc_module(mode := 'unregister', sql_name := ...)`                                                                     | Remove a registered artifact from session registry                                 | Frees TinyCC state                       |
 
 ## Build
 
@@ -95,12 +94,11 @@ dbGetQuery(con, "
 #> 1 TRUE list   OK registered=0 sources=0 headers=0 includes=0 libs=0 state_id=0
 ```
 
-### Build State 1: Multiple Inputs and Functions
+### Build State 1: Session Build Inputs
 
 This chunk starts a fresh state, adds include/sysinclude/library paths,
 options, defines, headers, and source code.  
-It then binds and compiles two different functions from the same state
-and calls both.
+It then binds and compiles two different functions from the same state.
 
 ``` r
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state')")
@@ -151,15 +149,16 @@ dbGetQuery(con, "
 ")
 #>     ok        mode code
 #> 1 TRUE tinycc_bind   OK
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'tinycc_compile')")
-#>      ok           mode             code
-#> 1 FALSE tinycc_compile E_COMPILE_FAILED
 dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(mode := 'call', sql_name := 'tcc_add_shift', arg1 := '39')
+  SELECT ok, mode, code
+  FROM tcc_module(
+    mode := 'tinycc_compile',
+    return_type := 'i64',
+    arg_types := ['i64']
+  )
 ")
-#>      ok mode        code detail
-#> 1 FALSE call E_NOT_FOUND   <NA>
+#>     ok           mode code
+#> 1 TRUE tinycc_compile   OK
 
 dbGetQuery(con, "
   SELECT ok, mode, code
@@ -167,55 +166,41 @@ dbGetQuery(con, "
 ")
 #>     ok        mode code
 #> 1 TRUE tinycc_bind   OK
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'compile')")
-#>      ok    mode             code
-#> 1 FALSE compile E_COMPILE_FAILED
 dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(mode := 'call', sql_name := 'tcc_times2', arg1 := '21')
+  SELECT ok, mode, code
+  FROM tcc_module(
+    mode := 'compile',
+    return_type := 'i64',
+    arg_types := ['i64']
+  )
 ")
-#>      ok mode        code detail
-#> 1 FALSE call E_NOT_FOUND   <NA>
+#>     ok    mode code
+#> 1 TRUE compile   OK
 ```
 
-### Build State 2: Explicit Register Mode and One-Shot Call
+### Build State 2: FFI Codegen and SQL Invocation
 
-This chunk exercises `register` directly and also the one-shot `call`
-path with inline source.  
-It confirms both pre-registered and ephemeral compilation paths in one
-session.
+This chunk exercises the dynamic C codegen path (`ffi_load`) and then
+calls the registered SQL function normally.
 
 ``` r
 dbGetQuery(con, "
   SELECT ok, mode, code
   FROM tcc_module(
-    mode := 'register',
+    mode := 'ffi_load',
     source := 'long long tcc_add10(long long x){ return x + 10; }',
     symbol := 'tcc_add10',
-    sql_name := 'tcc_add10'
+    sql_name := 'tcc_add10',
+    return_type := 'i64',
+    arg_types := ['i64']
   )
 ")
-#>      ok     mode             code
-#> 1 FALSE register E_COMPILE_FAILED
+#>     ok     mode code
+#> 1 TRUE ffi_load   OK
 
-dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(mode := 'call', sql_name := 'tcc_add10', arg1 := '32')
-")
-#>      ok mode        code detail
-#> 1 FALSE call E_NOT_FOUND   <NA>
-
-dbGetQuery(con, "
-  SELECT ok, mode, code, detail
-  FROM tcc_module(
-    mode := 'call',
-    source := 'long long tcc_square(long long x){ return x * x; }',
-    symbol := 'tcc_square',
-    arg1 := '9'
-  )
-")
-#>      ok mode             code                  detail
-#> 1 FALSE call E_COMPILE_FAILED return_type is required
+dbGetQuery(con, "SELECT tcc_add10(32) AS value")
+#>   value
+#> 1    42
 ```
 
 ### Unregister and Reset
@@ -223,12 +208,12 @@ dbGetQuery(con, "
 This final chunk exercises `unregister`, `list`, and `config_reset`.
 
 ``` r
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add10')")
-#>      ok       mode        code
-#> 1 FALSE unregister E_NOT_FOUND
+dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add_shift')")
+#>     ok       mode code
+#> 1 TRUE unregister   OK
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'list')")
 #>     ok mode code                                                        detail
-#> 1 TRUE list   OK registered=0 sources=1 headers=1 includes=1 libs=0 state_id=1
+#> 1 TRUE list   OK registered=2 sources=1 headers=1 includes=1 libs=0 state_id=1
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 #>     ok         mode code
 #> 1 TRUE config_reset   OK
@@ -244,13 +229,12 @@ dbDisconnect(con, shutdown = TRUE)
 
 ## Notes
 
-- Current callable execution path is `mode := 'call'` with explicit
-  `return_type`/`arg_types` metadata and `arg1..arg10` call arguments.
+- Function invocation is plain SQL (`SELECT my_udf(...)`) after
+  `load`/`ffi_load`.
 - Dynamic module mode (`mode := 'load'`) keeps compiled TinyCC state
   alive and can use host helper symbols such as
   `ducktinycc_register_i64_unary`.
-- Dynamic runtime registration as standalone DuckDB scalar names from
-  inside `tcc_module` is not enabled in this build; artifacts are
-  session-registered and invoked with `mode := 'call'`.
+- Dynamic FFI codegen mode (`mode := 'ffi_load'`) generates a C loader
+  module and registers SQL functions via host helpers.
 - All outputs are returned as a diagnostics table for SQL-native
   observability.

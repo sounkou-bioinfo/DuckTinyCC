@@ -24,12 +24,6 @@ true	config_reset	OK
 
 query TTT
 SELECT ok, mode, code
-FROM tcc_module(mode := 'config_get');
-----
-true	config_get	OK
-
-query TTT
-SELECT ok, mode, code
 FROM tcc_module(mode := 'list');
 ----
 true	list	OK
@@ -45,6 +39,12 @@ SELECT ok, mode, code
 FROM tcc_module(mode := 'unregister');
 ----
 false	unregister	E_MISSING_ARGS
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'call');
+----
+false	call	E_BAD_MODE
 
 query TTT
 SELECT ok, mode, code
@@ -64,16 +64,6 @@ FROM tcc_module(
 );
 ----
 true	register	OK
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'call',
-  sql_name := 'tcc_add1',
-  arg1 := '41'
-);
-----
-true	call	OK
 
 query TTT
 SELECT ok, mode, code
@@ -105,16 +95,6 @@ SELECT ok, mode, code
 FROM tcc_module(mode := 'tinycc_compile', return_type := 'i64', arg_types := ['i64']);
 ----
 true	tinycc_compile	OK
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'call',
-  sql_name := 'tcc_add2',
-  arg1 := '40'
-);
-----
-true	call	OK
 
 query TTT
 SELECT ok, mode, code
@@ -161,87 +141,6 @@ FROM tcc_module(
 ----
 false	unregister	E_UNSAFE_UNLOAD
 
-query TTTT
-SELECT ok, mode, code, detail
-FROM tcc_module(
-  mode := 'call',
-  sql_name := 'tcc_add3',
-  arg1 := '10',
-  arg2 := '20',
-  arg3 := '12'
-);
-----
-true	call	OK	42
-
-query TTTT
-SELECT ok, mode, code, detail
-FROM tcc_module(
-  mode := 'call',
-  source := 'void tcc_sink(long long x){ (void)x; }',
-  symbol := 'tcc_sink',
-  return_type := 'void',
-  arg_types := ['i64'],
-  arg1 := '5'
-);
-----
-true	call	OK	(void)
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'register',
-  source := 'long long tcc_const42(void){ return 42; }',
-  symbol := 'tcc_const42',
-  sql_name := 'tcc_const42',
-  return_type := 'i64',
-  arg_types := []
-);
-----
-true	register	OK
-
-query TTTT
-SELECT ok, mode, code, detail
-FROM tcc_module(
-  mode := 'call',
-  sql_name := 'tcc_const42',
-  return_type := 'i64',
-  arg_types := []
-);
-----
-true	call	OK	42
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'register',
-  source := 'long long tcc_sum10(long long a0,long long a1,long long a2,long long a3,long long a4,long long a5,long long a6,long long a7,long long a8,long long a9){ return a0+a1+a2+a3+a4+a5+a6+a7+a8+a9; }',
-  symbol := 'tcc_sum10',
-  sql_name := 'tcc_sum10',
-  return_type := 'i64',
-  arg_types := ['i64','i64','i64','i64','i64','i64','i64','i64','i64','i64']
-);
-----
-true	register	OK
-
-query TTTT
-SELECT ok, mode, code, detail
-FROM tcc_module(
-  mode := 'call',
-  sql_name := 'tcc_sum10',
-  arg1 := '1',
-  arg2 := '2',
-  arg3 := '3',
-  arg4 := '4',
-  arg5 := '5',
-  arg6 := '6',
-  arg7 := '7',
-  arg8 := '8',
-  arg9 := '9',
-  arg10 := '10'
-);
-----
-true	call	OK	55
-
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(
@@ -267,26 +166,3 @@ FROM tcc_module(
 );
 ----
 false	register	E_COMPILE_FAILED
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'call',
-  sql_name := 'tcc_add3',
-  arg1 := '10',
-  arg2 := 'nope',
-  arg3 := '12'
-);
-----
-false	call	E_BAD_ARGS
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'call',
-  sql_name := 'tcc_add3',
-  arg1 := '10',
-  arg2 := '20'
-);
-----
-false	call	E_BAD_ARGS
