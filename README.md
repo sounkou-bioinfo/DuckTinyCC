@@ -33,37 +33,33 @@ context columns.
 | `add_header`, `add_source`        | Stage C code units in session                |
 | `tinycc_bind`                     | Stage `symbol` + `sql_name` for next compile |
 
-### Compile, Load, and Registry
+### Compile and Register
 
-| Mode                        | Purpose                                          | Notes                                                 |
-|-----------------------------|--------------------------------------------------|-------------------------------------------------------|
-| `compile`, `tinycc_compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name`    |
-| `register`                  | Compile provided `source` and register SQL UDF   | One-shot registration                                 |
-| `ffi_load`                  | Generate C loader + register SQL UDF             | Rtinycc-style dynamic codegen path                    |
-| `load`                      | Compile and execute module init symbol           | Manual dynamic module path                            |
-| `unregister`                | Remove artifact metadata from session registry   | Loaded/codegen modules are pinned (`E_UNSAFE_UNLOAD`) |
+| Mode                        | Purpose                                          | Notes                                                               |
+|-----------------------------|--------------------------------------------------|---------------------------------------------------------------------|
+| `compile`, `tinycc_compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name`                  |
+| `quick_compile`             | One-shot fast lane compile + register            | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types` |
 
 ## Supported Types
 
-Type metadata is explicit for `compile`, `tinycc_compile`, `register`,
-and `ffi_load`:
+Type metadata is explicit for `compile`, `tinycc_compile`, and
+`quick_compile`:
 
 - `return_type := ...` is required
 - `arg_types := [...]` is required (use `[]` for zero arguments)
 
 Current executable SQL registration support:
 
-| Signature Piece          | Accepted Tokens             | DuckDB Type |
-|--------------------------|-----------------------------|-------------|
-| `return_type`            | `i64`, `bigint`, `longlong` | `BIGINT`    |
-| each `arg_types` element | `i64`, `bigint`, `longlong` | `BIGINT`    |
+| Signature Piece          | Accepted Tokens                                                                    | DuckDB Type                                         |
+|--------------------------|------------------------------------------------------------------------------------|-----------------------------------------------------|
+| `return_type`            | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64` | `BIGINT` for `void`; otherwise matching scalar type |
+| each `arg_types` element | `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`         | matching scalar type                                |
 
 Additional limits and behavior:
 
 - Arity: `0..10` arguments
-- NULL handling: NULL-in/NULL-out on the generated BIGINT wrappers
-- `return_type := 'void'` is parsed but not currently executable in the
-  SQL registration path (`E_UNSUPPORTED_SIGNATURE`)
+- NULL handling: NULL-in/NULL-out
+- `void` return registers as a SQL function that emits `NULL` values
 
 ## Build
 
@@ -221,103 +217,83 @@ dbGetQuery(con, "SELECT tcc_times2(21) AS value")
 #> 1    42
 ```
 
-### 4) Example B: One-Shot `register`
+### 4) Example B: Fast Lane `quick_compile`
 
-This example compiles inline source and registers immediately without
-staged state reuse.
-
-``` r
-dbGetQuery(con, "
-  SELECT ok, mode, code
-  FROM tcc_module(
-    mode := 'register',
-    source := 'long long tcc_add3(long long a,long long b,long long c){ return a + b + c; }',
-    symbol := 'tcc_add3',
-    sql_name := 'tcc_add3',
-    return_type := 'i64',
-    arg_types := ['i64', 'i64', 'i64']
-  )
-")
-#>     ok     mode code
-#> 1 TRUE register   OK
-dbGetQuery(con, "SELECT tcc_add3(1, 2, 3) AS value")
-#>   value
-#> 1     6
-```
-
-### 5) Example C: `ffi_load` Codegen Path
-
-This chunk exercises the dynamic C codegen path (`ffi_load`) and then
-calls the registered SQL function normally.
+This example compiles and registers directly from one SQL call, without
+staged state.
 
 ``` r
 dbGetQuery(con, "
   SELECT ok, mode, code
   FROM tcc_module(
-    mode := 'ffi_load',
-    source := 'long long tcc_add10(long long x){ return x + 10; }',
-    symbol := 'tcc_add10',
-    sql_name := 'tcc_add10',
-    return_type := 'i64',
-    arg_types := ['i64']
+    mode := 'quick_compile',
+    source := 'int add_i32(int a, int b){ return a + b; }',
+    symbol := 'add_i32',
+    sql_name := 'add_i32',
+    return_type := 'i32',
+    arg_types := ['i32', 'i32']
   )
 ")
-#>     ok     mode code
-#> 1 TRUE ffi_load   OK
-
-dbGetQuery(con, "SELECT tcc_add10(32) AS value")
+#>     ok          mode code
+#> 1 TRUE quick_compile   OK
+dbGetQuery(con, "SELECT add_i32(20, 22) AS value")
 #>   value
 #> 1    42
 ```
 
-### 6) Example D: `load` Module Init Path
+### 5) Example C: Libraries (`add_library`)
 
-This example loads a manual module init symbol that registers a SQL
-function through host helpers.
+This example links `libm`, compiles a function that uses `pow`, then
+calls it. The required C header is included in the source unit.
 
 ``` r
+dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'tcc_new_state')")
+#>     ok          mode code
+#> 1 TRUE tcc_new_state   OK
+dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'add_library', library := 'm')")
+#>     ok        mode code
+#> 1 TRUE add_library   OK
 dbGetQuery(con, "
   SELECT ok, mode, code
   FROM tcc_module(
-    mode := 'load',
-    sql_name := 'jit_module_add100',
-    symbol := 'jit_mod_init',
-    source := '
-      typedef struct _duckdb_connection *duckdb_connection;
-      extern _Bool ducktinycc_register_i64_unary(duckdb_connection con, const char *name, void *fn_ptr);
-      long long jit_add100_impl(long long x) { return x + 100; }
-      _Bool jit_mod_init(duckdb_connection con) {
-        return ducktinycc_register_i64_unary(con, \"jit_add100\", (void *)jit_add100_impl);
-      }
-    '
+    mode := 'add_source',
+    source := '#include <math.h>
+double pwr(double x, double y){ return pow(x, y); }'
   )
 ")
-#>     ok mode code
-#> 1 TRUE load   OK
-dbGetQuery(con, "SELECT jit_add100(7) AS value")
+#>     ok       mode code
+#> 1 TRUE add_source   OK
+dbGetQuery(con, "
+  SELECT ok, mode, code
+  FROM tcc_module(mode := 'tinycc_bind', symbol := 'pwr', sql_name := 'pwr')
+")
+#>     ok        mode code
+#> 1 TRUE tinycc_bind   OK
+dbGetQuery(con, "
+  SELECT ok, mode, code
+  FROM tcc_module(mode := 'compile', return_type := 'f64', arg_types := ['f64', 'f64'])
+")
+#>     ok    mode code
+#> 1 TRUE compile   OK
+dbGetQuery(con, "SELECT CAST(pwr(2.0, 5.0) AS BIGINT) AS value")
 #>   value
-#> 1   107
+#> 1    32
 ```
 
-### 7) Reset and Unregister Notes
+### 6) Reset Session
 
-This chunk shows the current registry and reset behavior. Loaded/codegen
-modules are pinned for safety, so `unregister` returns
-`E_UNSAFE_UNLOAD`.
+This chunk resets session state and shows summary counters.
 
 ``` r
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add10')")
-#>      ok       mode            code
-#> 1 FALSE unregister E_UNSAFE_UNLOAD
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'list')")
 #>     ok mode code                                                        detail
-#> 1 TRUE list   OK registered=5 sources=1 headers=1 includes=1 libs=0 state_id=1
+#> 1 TRUE list   OK registered=4 sources=1 headers=0 includes=0 libs=1 state_id=2
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 #>     ok         mode code
 #> 1 TRUE config_reset   OK
 ```
 
-### 8) Cleanup
+### 7) Cleanup
 
 This chunk closes the database connection.
 
@@ -328,11 +304,9 @@ dbDisconnect(con, shutdown = TRUE)
 ## Notes
 
 - Function invocation is plain SQL (`SELECT my_udf(...)`) after
-  `compile`/`register`/`load`/`ffi_load`.
-- Dynamic module mode (`mode := 'load'`) keeps compiled TinyCC state
-  alive and can use host helper symbols such as
-  `ducktinycc_register_i64_unary`.
-- Dynamic FFI codegen mode (`mode := 'ffi_load'`) generates a C loader
-  module and registers SQL functions via host helpers.
+  `compile` or `quick_compile`.
+- `add_header`/`add_source` are compiled as separate translation units.
+  For external library prototypes, include headers directly in the
+  relevant `source` unit.
 - All outputs are returned as a diagnostics table for SQL-native
   observability.

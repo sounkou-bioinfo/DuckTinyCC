@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 DUCKDB_EXTENSION_EXTERN
 
@@ -40,30 +41,28 @@ typedef struct {
 #define TCC_MAX_ARGS 10
 
 typedef enum {
-	TCC_RET_I64 = 0,
-	TCC_RET_VOID = 1
-} tcc_return_type_t;
+	TCC_FFI_VOID = 0,
+	TCC_FFI_BOOL = 1,
+	TCC_FFI_I8 = 2,
+	TCC_FFI_U8 = 3,
+	TCC_FFI_I16 = 4,
+	TCC_FFI_U16 = 5,
+	TCC_FFI_I32 = 6,
+	TCC_FFI_U32 = 7,
+	TCC_FFI_I64 = 8,
+	TCC_FFI_U64 = 9,
+	TCC_FFI_F32 = 10,
+	TCC_FFI_F64 = 11
+} tcc_ffi_type_t;
 
 typedef bool (*tcc_dynamic_init_fn_t)(duckdb_connection connection);
-typedef bool (*tcc_runtime_invoke_fn_t)(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64);
-typedef void (*tcc_runtime_destroy_fn_t)(void *user_data);
-
-typedef struct {
-	tcc_runtime_invoke_fn_t invoke;
-	tcc_runtime_destroy_fn_t destroy;
-	void *user_data;
-} tcc_runtime_trampoline_t;
+typedef bool (*tcc_host_row_wrapper_fn_t)(void **args, void *out_value, bool *out_is_null);
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
 typedef struct {
 	TCCState *tcc;
-	void *symbol_ptr;
-	int arg_count;
-	tcc_return_type_t return_type;
-	tcc_runtime_trampoline_t trampoline;
 	bool is_module;
 	tcc_dynamic_init_fn_t module_init;
-	char *signature;
 	char *sql_name;
 	char *symbol;
 	uint64_t state_id;
@@ -114,10 +113,16 @@ typedef struct {
 	char message[4096];
 } tcc_error_buffer_t;
 
-static bool tcc_parse_explicit_types(const char *return_type, const char *arg_types, tcc_return_type_t *out_ret,
-                                     int *out_arg_count, tcc_error_buffer_t *error_buf);
-static void tcc_rt_destroy_noop(void *user_data);
-static tcc_runtime_invoke_fn_t tcc_select_runtime_invoke(tcc_return_type_t ret_type, int argc);
+typedef struct {
+	tcc_host_row_wrapper_fn_t wrapper;
+	int arg_count;
+	tcc_ffi_type_t return_type;
+	tcc_ffi_type_t arg_types[TCC_MAX_ARGS];
+} tcc_host_sig_ctx_t;
+
+static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
+                                tcc_ffi_type_t out_arg_types[TCC_MAX_ARGS], int *out_arg_count,
+                                tcc_error_buffer_t *error_buf);
 
 static char *tcc_strdup(const char *value) {
 	size_t len;
@@ -131,6 +136,22 @@ static char *tcc_strdup(const char *value) {
 		memcpy(copy, value, len);
 	}
 	return copy;
+}
+
+static bool tcc_buf_append(char *buffer, size_t capacity, size_t *offset, const char *fmt, ...) {
+	va_list args;
+	int n;
+	if (!buffer || !offset || !fmt || *offset >= capacity) {
+		return false;
+	}
+	va_start(args, fmt);
+	n = vsnprintf(buffer + *offset, capacity - *offset, fmt, args);
+	va_end(args);
+	if (n < 0 || (size_t)n >= capacity - *offset) {
+		return false;
+	}
+	*offset += (size_t)n;
+	return true;
 }
 
 static void tcc_append_error(void *opaque, const char *msg) {
@@ -275,18 +296,6 @@ static const char *tcc_session_runtime_path(tcc_module_state_t *state, const cha
 }
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
-typedef int64_t (*tcc_host_i64_unary_fn_t)(int64_t);
-
-typedef struct {
-	tcc_host_i64_unary_fn_t fn;
-} tcc_host_i64_unary_ctx_t;
-
-typedef struct {
-	tcc_runtime_invoke_fn_t invoke;
-	void *fn_ptr;
-	int arg_count;
-} tcc_host_i64_sig_ctx_t;
-
 static void tcc_configure_runtime_paths(TCCState *s, const char *runtime_path) {
 	char include_path[1024];
 	char include_path2[1024];
@@ -309,65 +318,95 @@ static void tcc_configure_runtime_paths(TCCState *s, const char *runtime_path) {
 	(void)tcc_add_library_path(s, lib_tcc_path);
 }
 
-static void tcc_host_i64_unary_ctx_destroy(void *ptr) {
+static void tcc_host_sig_ctx_destroy(void *ptr) {
 	if (ptr) {
 		duckdb_free(ptr);
 	}
 }
 
-static void tcc_host_i64_unary_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
-	tcc_host_i64_unary_ctx_t *ctx = (tcc_host_i64_unary_ctx_t *)duckdb_scalar_function_get_extra_info(info);
-	idx_t n = duckdb_data_chunk_get_size(input);
-	duckdb_vector in0;
-	int64_t *in_data;
-	int64_t *out_data;
-	uint64_t *in_validity;
-	uint64_t *out_validity;
-	idx_t i;
-	if (!ctx || !ctx->fn) {
-		duckdb_scalar_function_set_error(info, "ducktinycc i64 unary ctx missing");
-		return;
-	}
-	in0 = duckdb_data_chunk_get_vector(input, 0);
-	in_data = (int64_t *)duckdb_vector_get_data(in0);
-	out_data = (int64_t *)duckdb_vector_get_data(output);
-	in_validity = duckdb_vector_get_validity(in0);
-	duckdb_vector_ensure_validity_writable(output);
-	out_validity = duckdb_vector_get_validity(output);
-	for (i = 0; i < n; i++) {
-		bool valid = (!in_validity) || duckdb_validity_row_is_valid(in_validity, i);
-		duckdb_validity_set_row_validity(out_validity, i, valid);
-		if (valid) {
-			out_data[i] = ctx->fn(in_data[i]);
-		}
+static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
+	switch (type) {
+	case TCC_FFI_BOOL:
+	case TCC_FFI_I8:
+	case TCC_FFI_U8:
+		return 1;
+	case TCC_FFI_I16:
+	case TCC_FFI_U16:
+		return 2;
+	case TCC_FFI_I32:
+	case TCC_FFI_U32:
+	case TCC_FFI_F32:
+		return 4;
+	case TCC_FFI_I64:
+	case TCC_FFI_U64:
+	case TCC_FFI_F64:
+		return 8;
+	case TCC_FFI_VOID:
+	default:
+		return 0;
 	}
 }
 
-static void tcc_host_i64_sig_ctx_destroy(void *ptr) {
-	if (ptr) {
-		duckdb_free(ptr);
+static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
+	switch (type) {
+	case TCC_FFI_VOID:
+		/* Scalar UDFs need a concrete type; void returns are emitted as NULL BIGINT. */
+		return DUCKDB_TYPE_BIGINT;
+	case TCC_FFI_BOOL:
+		return DUCKDB_TYPE_BOOLEAN;
+	case TCC_FFI_I8:
+		return DUCKDB_TYPE_TINYINT;
+	case TCC_FFI_U8:
+		return DUCKDB_TYPE_UTINYINT;
+	case TCC_FFI_I16:
+		return DUCKDB_TYPE_SMALLINT;
+	case TCC_FFI_U16:
+		return DUCKDB_TYPE_USMALLINT;
+	case TCC_FFI_I32:
+		return DUCKDB_TYPE_INTEGER;
+	case TCC_FFI_U32:
+		return DUCKDB_TYPE_UINTEGER;
+	case TCC_FFI_I64:
+		return DUCKDB_TYPE_BIGINT;
+	case TCC_FFI_U64:
+		return DUCKDB_TYPE_UBIGINT;
+	case TCC_FFI_F32:
+		return DUCKDB_TYPE_FLOAT;
+	case TCC_FFI_F64:
+		return DUCKDB_TYPE_DOUBLE;
+	default:
+		return DUCKDB_TYPE_INVALID;
 	}
 }
 
-static void tcc_host_i64_signature_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
-	tcc_host_i64_sig_ctx_t *ctx = (tcc_host_i64_sig_ctx_t *)duckdb_scalar_function_get_extra_info(info);
+static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+	tcc_host_sig_ctx_t *ctx = (tcc_host_sig_ctx_t *)duckdb_scalar_function_get_extra_info(info);
 	idx_t n = duckdb_data_chunk_get_size(input);
-	int64_t *out_data = (int64_t *)duckdb_vector_get_data(output);
+	uint8_t *out_data = (uint8_t *)duckdb_vector_get_data(output);
 	uint64_t *out_validity;
-	int64_t *in_data[TCC_MAX_ARGS];
+	uint8_t *in_data[TCC_MAX_ARGS];
 	uint64_t *in_validity[TCC_MAX_ARGS];
-	int64_t args[TCC_MAX_ARGS];
+	size_t arg_sizes[TCC_MAX_ARGS];
+	size_t ret_size;
+	void *arg_ptrs[TCC_MAX_ARGS];
+	uint8_t out_value[16];
 	idx_t row;
 	int col;
-	if (!ctx || !ctx->invoke || !ctx->fn_ptr || ctx->arg_count < 0 || ctx->arg_count > TCC_MAX_ARGS) {
-		duckdb_scalar_function_set_error(info, "ducktinycc i64 signature ctx missing");
+	if (!ctx || !ctx->wrapper || ctx->arg_count < 0 || ctx->arg_count > TCC_MAX_ARGS) {
+		duckdb_scalar_function_set_error(info, "ducktinycc signature ctx missing");
 		return;
 	}
+	ret_size = tcc_ffi_type_size(ctx->return_type);
 
 	for (col = 0; col < ctx->arg_count; col++) {
 		duckdb_vector v = duckdb_data_chunk_get_vector(input, (idx_t)col);
-		in_data[col] = (int64_t *)duckdb_vector_get_data(v);
+		in_data[col] = (uint8_t *)duckdb_vector_get_data(v);
 		in_validity[col] = duckdb_vector_get_validity(v);
+		arg_sizes[col] = tcc_ffi_type_size(ctx->arg_types[col]);
+		if (arg_sizes[col] == 0) {
+			duckdb_scalar_function_set_error(info, "ducktinycc invalid arg type size");
+			return;
+		}
 	}
 
 	duckdb_vector_ensure_validity_writable(output);
@@ -375,131 +414,105 @@ static void tcc_host_i64_signature_scalar(duckdb_function_info info, duckdb_data
 
 	for (row = 0; row < n; row++) {
 		bool valid = true;
-		int64_t result = 0;
+		bool out_is_null = false;
 		for (col = 0; col < ctx->arg_count; col++) {
 			if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
 				valid = false;
 				break;
 			}
-			args[col] = in_data[col][row];
+			arg_ptrs[col] = (void *)(in_data[col] + ((size_t)row * arg_sizes[col]));
 		}
 		if (!valid) {
 			duckdb_validity_set_row_validity(out_validity, row, false);
 			continue;
 		}
-		if (!ctx->invoke(ctx->fn_ptr, args, &result)) {
+		if (!ctx->wrapper(arg_ptrs, out_value, &out_is_null)) {
 			duckdb_scalar_function_set_error(info, "ducktinycc invoke failed");
 			return;
 		}
+		if (ctx->return_type == TCC_FFI_VOID || out_is_null) {
+			duckdb_validity_set_row_validity(out_validity, row, false);
+			continue;
+		}
 		duckdb_validity_set_row_validity(out_validity, row, true);
-		out_data[row] = result;
+		if (ret_size > 0) {
+			memcpy(out_data + ((size_t)row * ret_size), out_value, ret_size);
+		}
 	}
 }
 
-static bool ducktinycc_register_i64_signature(duckdb_connection con, const char *name, void *fn_ptr,
-                                              const char *return_type, const char *arg_types_csv) {
-	duckdb_logical_type bigint = NULL;
+static bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr,
+                                          const char *return_type, const char *arg_types_csv) {
 	duckdb_scalar_function fn = NULL;
-	tcc_host_i64_sig_ctx_t *ctx = NULL;
+	tcc_host_sig_ctx_t *ctx = NULL;
 	duckdb_state rc;
-	tcc_return_type_t ret_type = TCC_RET_I64;
+	tcc_ffi_type_t ret_type = TCC_FFI_I64;
+	tcc_ffi_type_t arg_types[TCC_MAX_ARGS];
 	int arg_count = 0;
 	tcc_error_buffer_t err;
 	int i;
+	duckdb_type ret_duckdb_type;
 	memset(&err, 0, sizeof(err));
 	if (!con || !name || name[0] == '\0' || !fn_ptr) {
 		return false;
 	}
-	if (!tcc_parse_explicit_types(return_type, arg_types_csv, &ret_type, &arg_count, &err)) {
+	if (!tcc_parse_signature(return_type, arg_types_csv, &ret_type, arg_types, &arg_count, &err)) {
 		return false;
 	}
-	if (ret_type != TCC_RET_I64) {
+	ret_duckdb_type = tcc_ffi_type_to_duckdb_type(ret_type);
+	if (ret_duckdb_type == DUCKDB_TYPE_INVALID) {
 		return false;
 	}
 
-	bigint = duckdb_create_logical_type(DUCKDB_TYPE_BIGINT);
 	fn = duckdb_create_scalar_function();
-	if (!bigint || !fn) {
+	if (!fn) {
 		if (fn) {
 			duckdb_destroy_scalar_function(&fn);
 		}
-		if (bigint) {
-			duckdb_destroy_logical_type(&bigint);
-		}
 		return false;
 	}
-	ctx = (tcc_host_i64_sig_ctx_t *)duckdb_malloc(sizeof(tcc_host_i64_sig_ctx_t));
+	ctx = (tcc_host_sig_ctx_t *)duckdb_malloc(sizeof(tcc_host_sig_ctx_t));
 	if (!ctx) {
 		duckdb_destroy_scalar_function(&fn);
-		duckdb_destroy_logical_type(&bigint);
 		return false;
 	}
-	ctx->invoke = tcc_select_runtime_invoke(ret_type, arg_count);
-	ctx->fn_ptr = fn_ptr;
+	memset(ctx, 0, sizeof(tcc_host_sig_ctx_t));
+	ctx->wrapper = (tcc_host_row_wrapper_fn_t)fn_ptr;
 	ctx->arg_count = arg_count;
-	if (!ctx->invoke) {
-		tcc_host_i64_sig_ctx_destroy(ctx);
-		duckdb_destroy_scalar_function(&fn);
-		duckdb_destroy_logical_type(&bigint);
-		return false;
+	ctx->return_type = ret_type;
+	for (i = 0; i < arg_count; i++) {
+		ctx->arg_types[i] = arg_types[i];
 	}
 
 	duckdb_scalar_function_set_name(fn, name);
 	for (i = 0; i < arg_count; i++) {
-		duckdb_scalar_function_add_parameter(fn, bigint);
-	}
-	duckdb_scalar_function_set_return_type(fn, bigint);
-	duckdb_scalar_function_set_function(fn, tcc_host_i64_signature_scalar);
-	duckdb_scalar_function_set_extra_info(fn, ctx, tcc_host_i64_sig_ctx_destroy);
-	rc = duckdb_register_scalar_function(con, fn);
-	if (rc != DuckDBSuccess) {
-		duckdb_destroy_scalar_function(&fn);
-		duckdb_destroy_logical_type(&bigint);
-		return false;
-	}
-	duckdb_destroy_logical_type(&bigint);
-	return true;
-}
-
-static bool ducktinycc_register_i64_unary(duckdb_connection con, const char *name, void *fn_ptr) {
-	duckdb_logical_type bigint = NULL;
-	duckdb_scalar_function fn = NULL;
-	tcc_host_i64_unary_ctx_t *ctx = NULL;
-	duckdb_state rc;
-	if (!con || !name || name[0] == '\0' || !fn_ptr) {
-		return false;
-	}
-	bigint = duckdb_create_logical_type(DUCKDB_TYPE_BIGINT);
-	fn = duckdb_create_scalar_function();
-	if (!bigint || !fn) {
-		if (fn) {
+		duckdb_logical_type arg_type = duckdb_create_logical_type(tcc_ffi_type_to_duckdb_type(arg_types[i]));
+		if (!arg_type) {
+			tcc_host_sig_ctx_destroy(ctx);
 			duckdb_destroy_scalar_function(&fn);
+			return false;
 		}
-		if (bigint) {
-			duckdb_destroy_logical_type(&bigint);
+		duckdb_scalar_function_add_parameter(fn, arg_type);
+		duckdb_destroy_logical_type(&arg_type);
+	}
+	{
+		duckdb_logical_type ret_type_obj = duckdb_create_logical_type(ret_duckdb_type);
+		if (!ret_type_obj) {
+			tcc_host_sig_ctx_destroy(ctx);
+			duckdb_destroy_scalar_function(&fn);
+			return false;
 		}
-		return false;
+		duckdb_scalar_function_set_return_type(fn, ret_type_obj);
+		duckdb_destroy_logical_type(&ret_type_obj);
 	}
-	ctx = (tcc_host_i64_unary_ctx_t *)duckdb_malloc(sizeof(tcc_host_i64_unary_ctx_t));
-	if (!ctx) {
-		duckdb_destroy_scalar_function(&fn);
-		duckdb_destroy_logical_type(&bigint);
-		return false;
-	}
-	ctx->fn = (tcc_host_i64_unary_fn_t)fn_ptr;
-
-	duckdb_scalar_function_set_name(fn, name);
-	duckdb_scalar_function_add_parameter(fn, bigint);
-	duckdb_scalar_function_set_return_type(fn, bigint);
-	duckdb_scalar_function_set_function(fn, tcc_host_i64_unary_scalar);
-	duckdb_scalar_function_set_extra_info(fn, ctx, tcc_host_i64_unary_ctx_destroy);
+	duckdb_scalar_function_set_function(fn, tcc_host_signature_scalar);
+	duckdb_scalar_function_set_extra_info(fn, ctx, tcc_host_sig_ctx_destroy);
 	rc = duckdb_register_scalar_function(con, fn);
 	if (rc != DuckDBSuccess) {
+		tcc_host_sig_ctx_destroy(ctx);
 		duckdb_destroy_scalar_function(&fn);
-		duckdb_destroy_logical_type(&bigint);
 		return false;
 	}
-	duckdb_destroy_logical_type(&bigint);
 	return true;
 }
 
@@ -508,8 +521,7 @@ static void tcc_add_host_symbols(TCCState *s) {
 		return;
 	}
 	(void)tcc_add_symbol(s, "duckdb_ext_api", &duckdb_ext_api);
-	(void)tcc_add_symbol(s, "ducktinycc_register_i64_unary", ducktinycc_register_i64_unary);
-	(void)tcc_add_symbol(s, "ducktinycc_register_i64_signature", ducktinycc_register_i64_signature);
+	(void)tcc_add_symbol(s, "ducktinycc_register_signature", ducktinycc_register_signature);
 }
 
 static void tcc_artifact_destroy(void *ptr) {
@@ -517,14 +529,8 @@ static void tcc_artifact_destroy(void *ptr) {
 	if (!artifact) {
 		return;
 	}
-	if (artifact->trampoline.destroy) {
-		artifact->trampoline.destroy(artifact->trampoline.user_data);
-	}
 	if (artifact->tcc) {
 		tcc_delete(artifact->tcc);
-	}
-	if (artifact->signature) {
-		duckdb_free(artifact->signature);
 	}
 	if (artifact->sql_name) {
 		duckdb_free(artifact->sql_name);
@@ -654,19 +660,12 @@ static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_
 	}
 	memset(artifact, 0, sizeof(tcc_registered_artifact_t));
 	artifact->tcc = s;
-	artifact->symbol_ptr = sym;
-	artifact->arg_count = 0;
-	artifact->return_type = TCC_RET_I64;
-	artifact->trampoline.invoke = NULL;
-	artifact->trampoline.destroy = tcc_rt_destroy_noop;
-	artifact->trampoline.user_data = NULL;
 	artifact->is_module = true;
 	artifact->module_init = (tcc_dynamic_init_fn_t)sym;
-	artifact->signature = tcc_strdup("module_init(duckdb_connection)->bool");
 	artifact->sql_name = tcc_strdup(module_name);
 	artifact->symbol = tcc_strdup(module_symbol);
 	artifact->state_id = state->session.state_id;
-	if (!artifact->module_init || !artifact->signature || !artifact->sql_name || !artifact->symbol) {
+	if (!artifact->module_init || !artifact->sql_name || !artifact->symbol) {
 		tcc_artifact_destroy(artifact);
 		tcc_set_error(error_buf, "invalid module artifact or out of memory");
 		return -1;
@@ -683,19 +682,6 @@ static idx_t tcc_registry_find_sql_name(tcc_module_state_t *state, const char *s
 	}
 	for (i = 0; i < state->entry_count; i++) {
 		if (state->entries[i].sql_name && strcmp(state->entries[i].sql_name, sql_name) == 0) {
-			return i;
-		}
-	}
-	return (idx_t)-1;
-}
-
-static idx_t tcc_registry_find_symbol(tcc_module_state_t *state, const char *symbol) {
-	idx_t i;
-	if (!state || !symbol) {
-		return (idx_t)-1;
-	}
-	for (i = 0; i < state->entry_count; i++) {
-		if (state->entries[i].symbol && strcmp(state->entries[i].symbol, symbol) == 0) {
 			return i;
 		}
 	}
@@ -773,21 +759,6 @@ static bool tcc_registry_store_metadata(tcc_module_state_t *state, const char *s
 		tcc_registry_entry_destroy_metadata(entry);
 		return false;
 	}
-	return true;
-}
-
-static bool tcc_registry_remove_metadata(tcc_module_state_t *state, const char *sql_name) {
-	idx_t idx = tcc_registry_find_sql_name(state, sql_name);
-	if (idx == (idx_t)-1) {
-		return false;
-	}
-	tcc_registry_entry_destroy_metadata(&state->entries[idx]);
-	if (idx + 1 < state->entry_count) {
-		memmove(&state->entries[idx], &state->entries[idx + 1],
-		        sizeof(tcc_registered_entry_t) * (state->entry_count - idx - 1));
-	}
-	state->entry_count--;
-	memset(&state->entries[state->entry_count], 0, sizeof(tcc_registered_entry_t));
 	return true;
 }
 
@@ -1054,48 +1025,88 @@ static bool tcc_equals_ci(const char *a, const char *b) {
 	return *a == '\0' && *b == '\0';
 }
 
-static bool tcc_parse_ret_type_token(const char *token, tcc_return_type_t *out_ret) {
-	if (tcc_equals_ci(token, "i64") || tcc_equals_ci(token, "bigint") || tcc_equals_ci(token, "longlong")) {
-		*out_ret = TCC_RET_I64;
+static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_type_t *out_type) {
+	if (!token || token[0] == '\0' || !out_type) {
+		return false;
+	}
+	if (allow_void && tcc_equals_ci(token, "void")) {
+		*out_type = TCC_FFI_VOID;
 		return true;
 	}
-	if (tcc_equals_ci(token, "void")) {
-		*out_ret = TCC_RET_VOID;
+	if (tcc_equals_ci(token, "bool") || tcc_equals_ci(token, "boolean")) {
+		*out_type = TCC_FFI_BOOL;
+		return true;
+	}
+	if (tcc_equals_ci(token, "i8") || tcc_equals_ci(token, "int8") || tcc_equals_ci(token, "tinyint")) {
+		*out_type = TCC_FFI_I8;
+		return true;
+	}
+	if (tcc_equals_ci(token, "u8") || tcc_equals_ci(token, "uint8") || tcc_equals_ci(token, "utinyint")) {
+		*out_type = TCC_FFI_U8;
+		return true;
+	}
+	if (tcc_equals_ci(token, "i16") || tcc_equals_ci(token, "int16") || tcc_equals_ci(token, "smallint")) {
+		*out_type = TCC_FFI_I16;
+		return true;
+	}
+	if (tcc_equals_ci(token, "u16") || tcc_equals_ci(token, "uint16") || tcc_equals_ci(token, "usmallint")) {
+		*out_type = TCC_FFI_U16;
+		return true;
+	}
+	if (tcc_equals_ci(token, "i32") || tcc_equals_ci(token, "int32") || tcc_equals_ci(token, "integer")) {
+		*out_type = TCC_FFI_I32;
+		return true;
+	}
+	if (tcc_equals_ci(token, "u32") || tcc_equals_ci(token, "uint32") || tcc_equals_ci(token, "uinteger")) {
+		*out_type = TCC_FFI_U32;
+		return true;
+	}
+	if (tcc_equals_ci(token, "i64") || tcc_equals_ci(token, "int64") || tcc_equals_ci(token, "bigint") ||
+	    tcc_equals_ci(token, "longlong")) {
+		*out_type = TCC_FFI_I64;
+		return true;
+	}
+	if (tcc_equals_ci(token, "u64") || tcc_equals_ci(token, "uint64") || tcc_equals_ci(token, "ubigint") ||
+	    tcc_equals_ci(token, "ulonglong")) {
+		*out_type = TCC_FFI_U64;
+		return true;
+	}
+	if (tcc_equals_ci(token, "f32") || tcc_equals_ci(token, "float") || tcc_equals_ci(token, "real")) {
+		*out_type = TCC_FFI_F32;
+		return true;
+	}
+	if (tcc_equals_ci(token, "f64") || tcc_equals_ci(token, "double")) {
+		*out_type = TCC_FFI_F64;
 		return true;
 	}
 	return false;
 }
 
-static bool tcc_parse_arg_type_token(const char *token) {
-	return tcc_equals_ci(token, "i64") || tcc_equals_ci(token, "bigint") || tcc_equals_ci(token, "longlong");
-}
-
-static bool tcc_parse_explicit_types(const char *return_type, const char *arg_types, tcc_return_type_t *out_ret,
-                                     int *out_arg_count, tcc_error_buffer_t *error_buf) {
+static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
+                                tcc_ffi_type_t out_arg_types[TCC_MAX_ARGS], int *out_arg_count,
+                                tcc_error_buffer_t *error_buf) {
 	char *args_copy = NULL;
 	char *cur = NULL;
 	int argc = 0;
-	const char *ret_text;
-	tcc_return_type_t ret;
+	tcc_ffi_type_t ret_type = TCC_FFI_I64;
 	if (!return_type || return_type[0] == '\0') {
 		tcc_set_error(error_buf, "return_type is required");
 		return false;
 	}
-	if (!arg_types) {
+	if (!arg_types_csv) {
 		tcc_set_error(error_buf, "arg_types is required (use [] for no args)");
 		return false;
 	}
-	ret_text = return_type;
-	if (!tcc_parse_ret_type_token(ret_text, &ret)) {
-		tcc_set_error(error_buf, "return_type must be i64/bigint/void");
+	if (!tcc_parse_type_token(return_type, true, &ret_type)) {
+		tcc_set_error(error_buf, "return_type contains unsupported type token");
 		return false;
 	}
-	if (arg_types[0] == '\0') {
-		*out_ret = ret;
+	if (arg_types_csv[0] == '\0') {
+		*out_return_type = ret_type;
 		*out_arg_count = 0;
 		return true;
 	}
-	args_copy = tcc_strdup(arg_types);
+	args_copy = tcc_strdup(arg_types_csv);
 	if (!args_copy) {
 		tcc_set_error(error_buf, "out of memory");
 		return false;
@@ -1123,323 +1134,22 @@ static bool tcc_parse_explicit_types(const char *return_type, const char *arg_ty
 			tcc_set_error(error_buf, "arg_types contains empty token");
 			return false;
 		}
-		if (!tcc_parse_arg_type_token(token)) {
-			duckdb_free(args_copy);
-			tcc_set_error(error_buf, "arg_types currently supports only i64/bigint");
-			return false;
-		}
-		argc++;
-		if (argc > TCC_MAX_ARGS) {
+		if (argc >= TCC_MAX_ARGS) {
 			duckdb_free(args_copy);
 			tcc_set_error(error_buf, "too many args (max 10)");
 			return false;
 		}
+		if (!tcc_parse_type_token(token, false, &out_arg_types[argc])) {
+			duckdb_free(args_copy);
+			tcc_set_error(error_buf, "arg_types contains unsupported type token");
+			return false;
+		}
+		argc++;
 	}
 	duckdb_free(args_copy);
-	*out_ret = ret;
+	*out_return_type = ret_type;
 	*out_arg_count = argc;
 	return true;
-}
-
-static bool tcc_rt_invoke_i64_0(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(void);
-	fn_t fn = (fn_t)user_data;
-	(void)args;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn();
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_1(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_2(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_3(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1], args[2]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_4(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1], args[2], args[3]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_5(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1], args[2], args[3], args[4]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_6(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1], args[2], args[3], args[4], args[5]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_7(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_8(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_9(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
-	return true;
-}
-
-static bool tcc_rt_invoke_i64_10(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	if (!fn || !out_i64) {
-		return false;
-	}
-	*out_i64 = fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_0(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(void);
-	fn_t fn = (fn_t)user_data;
-	(void)args;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn();
-	return true;
-}
-
-static bool tcc_rt_invoke_void_1(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_2(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_3(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1], args[2]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_4(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1], args[2], args[3]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_5(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1], args[2], args[3], args[4]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_6(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1], args[2], args[3], args[4], args[5]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_7(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_8(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_9(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
-	return true;
-}
-
-static bool tcc_rt_invoke_void_10(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
-	typedef void (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-	fn_t fn = (fn_t)user_data;
-	(void)out_i64;
-	if (!fn) {
-		return false;
-	}
-	fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9]);
-	return true;
-}
-
-static void tcc_rt_destroy_noop(void *user_data) {
-	(void)user_data;
-}
-
-static tcc_runtime_invoke_fn_t tcc_select_runtime_invoke(tcc_return_type_t ret_type, int argc) {
-	if (argc < 0 || argc > TCC_MAX_ARGS) {
-		return NULL;
-	}
-	switch (ret_type) {
-	case TCC_RET_I64:
-		switch (argc) {
-		case 0:
-			return tcc_rt_invoke_i64_0;
-		case 1:
-			return tcc_rt_invoke_i64_1;
-		case 2:
-			return tcc_rt_invoke_i64_2;
-		case 3:
-			return tcc_rt_invoke_i64_3;
-		case 4:
-			return tcc_rt_invoke_i64_4;
-		case 5:
-			return tcc_rt_invoke_i64_5;
-		case 6:
-			return tcc_rt_invoke_i64_6;
-		case 7:
-			return tcc_rt_invoke_i64_7;
-		case 8:
-			return tcc_rt_invoke_i64_8;
-		case 9:
-			return tcc_rt_invoke_i64_9;
-		case 10:
-			return tcc_rt_invoke_i64_10;
-		default:
-			return NULL;
-		}
-	case TCC_RET_VOID:
-		switch (argc) {
-		case 0:
-			return tcc_rt_invoke_void_0;
-		case 1:
-			return tcc_rt_invoke_void_1;
-		case 2:
-			return tcc_rt_invoke_void_2;
-		case 3:
-			return tcc_rt_invoke_void_3;
-		case 4:
-			return tcc_rt_invoke_void_4;
-		case 5:
-			return tcc_rt_invoke_void_5;
-		case 6:
-			return tcc_rt_invoke_void_6;
-		case 7:
-			return tcc_rt_invoke_void_7;
-		case 8:
-			return tcc_rt_invoke_void_8;
-		case 9:
-			return tcc_rt_invoke_void_9;
-		case 10:
-			return tcc_rt_invoke_void_10;
-		default:
-			return NULL;
-		}
-	default:
-		return NULL;
-	}
 }
 
 static const char *tcc_effective_symbol(tcc_module_state_t *state, tcc_module_bind_data_t *bind) {
@@ -1463,53 +1173,127 @@ static const char *tcc_effective_sql_name(tcc_module_state_t *state, tcc_module_
 	return effective_symbol;
 }
 
+static const char *tcc_ffi_type_to_c_type_name(tcc_ffi_type_t type) {
+	switch (type) {
+	case TCC_FFI_VOID:
+		return "void";
+	case TCC_FFI_BOOL:
+		return "_Bool";
+	case TCC_FFI_I8:
+		return "signed char";
+	case TCC_FFI_U8:
+		return "unsigned char";
+	case TCC_FFI_I16:
+		return "short";
+	case TCC_FFI_U16:
+		return "unsigned short";
+	case TCC_FFI_I32:
+		return "int";
+	case TCC_FFI_U32:
+		return "unsigned int";
+	case TCC_FFI_I64:
+		return "long long";
+	case TCC_FFI_U64:
+		return "unsigned long long";
+	case TCC_FFI_F32:
+		return "float";
+	case TCC_FFI_F64:
+		return "double";
+	default:
+		return NULL;
+	}
+}
+
 static char *tcc_generate_ffi_loader_source(const char *module_symbol, const char *target_symbol, const char *sql_name,
-                                            const char *return_type, const char *arg_types_csv, int arg_count) {
-	char args_decl[512];
-	char src[4096];
-	size_t off = 0;
+                                            const char *return_type, const char *arg_types_csv,
+                                            tcc_ffi_type_t ret_type, const tcc_ffi_type_t arg_types[TCC_MAX_ARGS],
+                                            int arg_count) {
+	char args_decl[1024];
+	char unpack_lines[4096];
+	char call_args[512];
+	char src[32768];
+	size_t args_off = 0;
+	size_t unpack_off = 0;
+	size_t call_off = 0;
+	size_t src_off = 0;
+	const char *ret_c_type = tcc_ffi_type_to_c_type_name(ret_type);
+	const char *wrapper_name_fmt = "__ducktinycc_wrapper_%s";
+	char wrapper_name[256];
 	int i;
-	int n;
+	if (!ret_c_type) {
+		return NULL;
+	}
 	if (!module_symbol || !target_symbol || !sql_name || !return_type || !arg_types_csv || arg_count < 0 ||
 	    arg_count > TCC_MAX_ARGS) {
 		return NULL;
 	}
-	off = 0;
+	if (snprintf(wrapper_name, sizeof(wrapper_name), wrapper_name_fmt, module_symbol) < 0) {
+		return NULL;
+	}
 	for (i = 0; i < arg_count; i++) {
-		n = snprintf(args_decl + off, sizeof(args_decl) - off, "%slong long a%d", i == 0 ? "" : ", ", i);
-		if (n < 0 || (size_t)n >= sizeof(args_decl) - off) {
+		const char *arg_c_type = tcc_ffi_type_to_c_type_name(arg_types[i]);
+		if (!arg_c_type) {
 			return NULL;
 		}
-		off += (size_t)n;
+		if (!tcc_buf_append(args_decl, sizeof(args_decl), &args_off, "%s%s a%d", i == 0 ? "" : ", ", arg_c_type, i) ||
+		    !tcc_buf_append(unpack_lines, sizeof(unpack_lines), &unpack_off, "  %s a%d = *(%s *)args[%d];\n", arg_c_type,
+		                    i, arg_c_type, i) ||
+		    !tcc_buf_append(call_args, sizeof(call_args), &call_off, "%sa%d", i == 0 ? "" : ", ", i)) {
+			return NULL;
+		}
 	}
 	if (arg_count == 0) {
-		n = snprintf(args_decl, sizeof(args_decl), "void");
-		if (n < 0 || (size_t)n >= sizeof(args_decl)) {
+		if (!tcc_buf_append(args_decl, sizeof(args_decl), &args_off, "void")) {
 			return NULL;
 		}
 	}
 
-	n = snprintf(
-	    src, sizeof(src),
-	    "typedef struct _duckdb_connection *duckdb_connection;\n"
-	    "extern _Bool ducktinycc_register_i64_signature(duckdb_connection con, const char *name, void *fn_ptr, const char *return_type, const char *arg_types_csv);\n"
-	    "extern long long %s(%s);\n"
-	    "_Bool %s(duckdb_connection con) {\n"
-	    "  return ducktinycc_register_i64_signature(con, \"%s\", (void*)%s, \"%s\", \"%s\");\n"
-	    "}\n",
-	    target_symbol, args_decl, module_symbol, sql_name, target_symbol, return_type, arg_types_csv);
-	if (n < 0 || (size_t)n >= sizeof(src)) {
+	if (!tcc_buf_append(src, sizeof(src), &src_off,
+	                    "typedef struct _duckdb_connection *duckdb_connection;\n"
+	                    "extern _Bool ducktinycc_register_signature(duckdb_connection con, const char *name, "
+	                    "void *fn_ptr, const char *return_type, const char *arg_types_csv);\n"
+	                    "extern %s %s(%s);\n"
+	                    "static _Bool %s(void **args, void *out_value, _Bool *out_is_null) {\n%s",
+	                    ret_c_type, target_symbol, args_decl, wrapper_name, unpack_lines)) {
+		return NULL;
+	}
+	if (ret_type == TCC_FFI_VOID) {
+		if (!tcc_buf_append(src, sizeof(src), &src_off, "  %s(%s);\n", target_symbol, call_args) ||
+		    !tcc_buf_append(src, sizeof(src), &src_off,
+		                    "  if (out_is_null) { *out_is_null = 1; }\n"
+		                    "  (void)out_value;\n"
+		                    "  return 1;\n"
+		                    "}\n")) {
+			return NULL;
+		}
+	} else {
+		if (!tcc_buf_append(src, sizeof(src), &src_off, "  %s result = %s(%s);\n", ret_c_type, target_symbol, call_args) ||
+		    !tcc_buf_append(src, sizeof(src), &src_off,
+		                    "  *(%s *)out_value = result;\n"
+		                    "  if (out_is_null) { *out_is_null = 0; }\n"
+		                    "  return 1;\n"
+		                    "}\n",
+		                    ret_c_type)) {
+			return NULL;
+		}
+	}
+	if (!tcc_buf_append(src, sizeof(src), &src_off,
+	                    "_Bool %s(duckdb_connection con) {\n"
+	                    "  return ducktinycc_register_signature(con, \"%s\", (void *)%s, \"%s\", \"%s\");\n"
+	                    "}\n",
+	                    module_symbol, sql_name, wrapper_name, return_type, arg_types_csv)) {
 		return NULL;
 	}
 	return tcc_strdup(src);
 }
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
-static int tcc_compile_and_load_ffi_module(const char *runtime_path, tcc_module_state_t *state,
-                                           const tcc_module_bind_data_t *bind, const char *sql_name,
-                                           const char *target_symbol, tcc_registered_artifact_t **out_artifact,
-                                           tcc_error_buffer_t *error_buf, char *out_module_symbol, size_t symbol_len) {
-	tcc_return_type_t ret_type = TCC_RET_I64;
+static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_module_state_t *state,
+                                               const tcc_module_bind_data_t *bind, const char *sql_name,
+                                               const char *target_symbol, tcc_registered_artifact_t **out_artifact,
+                                               tcc_error_buffer_t *error_buf, char *out_module_symbol, size_t symbol_len) {
+	tcc_ffi_type_t ret_type = TCC_FFI_I64;
+	tcc_ffi_type_t arg_types[TCC_MAX_ARGS];
 	int arg_count = 0;
 	char *loader_src = NULL;
 	char *combined_src = NULL;
@@ -1518,18 +1302,14 @@ static int tcc_compile_and_load_ffi_module(const char *runtime_path, tcc_module_
 
 	if (!state || !bind || !sql_name || !target_symbol || !out_artifact || !error_buf || !out_module_symbol ||
 	    symbol_len == 0) {
-		tcc_set_error(error_buf, "invalid ffi_load arguments");
+		tcc_set_error(error_buf, "invalid codegen compile arguments");
 		return -1;
 	}
 	if (!state->connection) {
 		tcc_set_error(error_buf, "no persistent extension connection available");
 		return -1;
 	}
-	if (!tcc_parse_explicit_types(bind->return_type, bind->arg_types, &ret_type, &arg_count, error_buf)) {
-		return -1;
-	}
-	if (ret_type != TCC_RET_I64) {
-		tcc_set_error(error_buf, "ffi loader currently supports only i64 return type");
+	if (!tcc_parse_signature(bind->return_type, bind->arg_types, &ret_type, arg_types, &arg_count, error_buf)) {
 		return -1;
 	}
 
@@ -1537,9 +1317,9 @@ static int tcc_compile_and_load_ffi_module(const char *runtime_path, tcc_module_
 	         (unsigned long long)state->session.config_version);
 	loader_src = tcc_generate_ffi_loader_source(out_module_symbol, target_symbol, sql_name,
 	                                            bind->return_type ? bind->return_type : "i64",
-	                                            bind->arg_types ? bind->arg_types : "", arg_count);
+	                                            bind->arg_types ? bind->arg_types : "", ret_type, arg_types, arg_count);
 	if (!loader_src) {
-		tcc_set_error(error_buf, "failed to generate ffi loader");
+		tcc_set_error(error_buf, "failed to generate codegen wrapper");
 		return -1;
 	}
 
@@ -1579,7 +1359,7 @@ static int tcc_compile_and_load_ffi_module(const char *runtime_path, tcc_module_
 
 	if (!artifact->module_init(state->connection)) {
 		tcc_artifact_destroy(artifact);
-		tcc_set_error(error_buf, "ffi loader init returned false");
+		tcc_set_error(error_buf, "generated module init returned false");
 		return -1;
 	}
 	*out_artifact = artifact;
@@ -1724,11 +1504,10 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		tcc_write_row(output, true, bind->mode, "registry", "OK", "session summary", detail, NULL, NULL, NULL,
 		              "connection");
 		} else if (strcmp(bind->mode, "compile") == 0 || strcmp(bind->mode, "tinycc_compile") == 0 ||
-		           strcmp(bind->mode, "register") == 0 || strcmp(bind->mode, "ffi_load") == 0 ||
-		           strcmp(bind->mode, "tinycc_ffi_load") == 0) {
+		           strcmp(bind->mode, "quick_compile") == 0) {
 #ifdef DUCKTINYCC_WASM_UNSUPPORTED
 			tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-			              "TinyCC compile/register/ffi_load not supported for WASM build", NULL, bind->sql_name,
+			              "TinyCC compile codegen path not supported for WASM build", NULL, bind->sql_name,
 			              bind->symbol, NULL, "connection");
 #else
 			const char *target_symbol = tcc_effective_symbol(state, bind);
@@ -1742,6 +1521,14 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			const char *message = "compile failed";
 			memset(&err, 0, sizeof(err));
 
+			if (strcmp(bind->mode, "quick_compile") == 0 && (!bind->source || bind->source[0] == '\0')) {
+				tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS",
+				              "source is required in quick_compile mode", NULL, sql_name, target_symbol, NULL,
+				              "connection");
+				init->emitted = true;
+				return;
+			}
+
 			if (!target_symbol || target_symbol[0] == '\0') {
 				tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required (bind or argument)",
 				              NULL, sql_name, target_symbol, NULL, "connection");
@@ -1749,18 +1536,14 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 				return;
 			}
 
-			if (tcc_compile_and_load_ffi_module(runtime_path, state, bind, sql_name, target_symbol, &artifact, &err,
-			                                    module_symbol, sizeof(module_symbol)) != 0) {
+			if (tcc_compile_and_load_codegen_module(runtime_path, state, bind, sql_name, target_symbol, &artifact, &err,
+			                                        module_symbol, sizeof(module_symbol)) != 0) {
 				if (strstr(err.message, "return_type") || strstr(err.message, "arg_types") ||
 				    strstr(err.message, "too many args")) {
 					phase = "bind";
 					code = "E_BAD_SIGNATURE";
 					message = "invalid return_type/arg_types";
-				} else if (strstr(err.message, "only i64 return type")) {
-					phase = "bind";
-					code = "E_UNSUPPORTED_SIGNATURE";
-					message = "unsupported return_type/arg_types";
-				} else if (strstr(err.message, "failed to generate ffi loader") || strstr(err.message, "out of memory")) {
+				} else if (strstr(err.message, "failed to generate codegen wrapper") || strstr(err.message, "out of memory")) {
 					phase = "codegen";
 					code = "E_CODEGEN_FAILED";
 					message = "ffi codegen failed";
@@ -1768,10 +1551,10 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 					phase = "load";
 					code = "E_NO_CONNECTION";
 					message = "no persistent extension connection available";
-				} else if (strstr(err.message, "ffi loader init returned false")) {
+				} else if (strstr(err.message, "generated module init returned false")) {
 					phase = "load";
 					code = "E_INIT_FAILED";
-					message = "ffi loader init returned false";
+					message = "generated module init returned false";
 				}
 				tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL, sql_name,
 				              target_symbol, NULL, "connection");
@@ -1791,89 +1574,6 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			tcc_write_row(output, true, bind->mode, "load", "OK", "compiled and registered SQL function via codegen",
 			              runtime_path, sql_name, target_symbol, artifact_id, "connection");
 #endif
-		} else if (strcmp(bind->mode, "load") == 0 || strcmp(bind->mode, "tinycc_load") == 0) {
-#ifdef DUCKTINYCC_WASM_UNSUPPORTED
-			tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-			              "TinyCC load not supported for WASM build", NULL, bind->sql_name, bind->symbol, NULL,
-			              "connection");
-#else
-				const char *module_symbol = bind->symbol && bind->symbol[0] != '\0' ? bind->symbol : "ducktinycc_init";
-				const char *module_name = bind->sql_name && bind->sql_name[0] != '\0' ? bind->sql_name : module_symbol;
-				tcc_error_buffer_t err;
-				tcc_registered_artifact_t *artifact = NULL;
-				char artifact_id[256];
-				bool ok;
-				memset(&err, 0, sizeof(err));
-
-				if (!state->connection) {
-					tcc_write_row(output, false, bind->mode, "load", "E_NO_CONNECTION",
-					              "no persistent extension connection available", NULL, module_name, module_symbol, NULL,
-					              "connection");
-					init->emitted = true;
-					return;
-				}
-
-			if (tcc_build_module_artifact(runtime_path, state, bind, module_symbol, module_name, &artifact, &err) != 0) {
-				tcc_write_row(output, false, bind->mode, "compile", "E_COMPILE_FAILED", "compile failed",
-				              err.message[0] ? err.message : NULL, module_name, module_symbol, NULL, "connection");
-				init->emitted = true;
-				return;
-			}
-
-				ok = artifact->module_init(state->connection);
-				if (!ok) {
-					tcc_artifact_destroy(artifact);
-					tcc_write_row(output, false, bind->mode, "load", "E_INIT_FAILED",
-				              "dynamic module init returned false", NULL, module_name, module_symbol, NULL,
-				              "connection");
-				init->emitted = true;
-				return;
-			}
-
-			if (!tcc_registry_store_metadata(state, module_name, module_symbol, artifact->state_id, artifact)) {
-				tcc_artifact_destroy(artifact);
-				tcc_write_row(output, false, bind->mode, "register", "E_STORE_FAILED",
-				              "failed to store module artifact metadata", NULL, module_name, module_symbol, NULL,
-				              "connection");
-				init->emitted = true;
-				return;
-			}
-
-			snprintf(artifact_id, sizeof(artifact_id), "%s@module_state_%llu", module_name,
-			         (unsigned long long)artifact->state_id);
-			tcc_write_row(output, true, bind->mode, "load", "OK", "compiled and initialized dynamic module", runtime_path,
-			              module_name, module_symbol, artifact_id, "connection");
-#endif
-		} else if (strcmp(bind->mode, "unregister") == 0) {
-			if (!bind->sql_name || bind->sql_name[0] == '\0') {
-				tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "sql_name is required", NULL,
-				              bind->sql_name, bind->symbol, NULL, "connection");
-			} else {
-				idx_t idx = tcc_registry_find_sql_name(state, bind->sql_name);
-				if (idx == (idx_t)-1) {
-					tcc_write_row(output, false, bind->mode, "register", "E_NOT_FOUND", "no matching artifact metadata", NULL,
-					              bind->sql_name, bind->symbol, NULL, "connection");
-					init->emitted = true;
-					return;
-				}
-	#ifndef DUCKTINYCC_WASM_UNSUPPORTED
-				if (state->entries[idx].artifact && state->entries[idx].artifact->is_module) {
-					tcc_write_row(output, false, bind->mode, "register", "E_UNSAFE_UNLOAD",
-					              "cannot unregister loaded dynamic module while SQL functions may still reference it", NULL,
-					              bind->sql_name, bind->symbol, NULL, "connection");
-					init->emitted = true;
-					return;
-				}
-	#endif
-				if (tcc_registry_remove_metadata(state, bind->sql_name)) {
-				tcc_write_row(output, true, bind->mode, "register", "OK",
-				              "metadata removed from session (DuckDB function remains registered)", NULL, bind->sql_name,
-				              bind->symbol, NULL, "connection");
-				} else {
-					tcc_write_row(output, false, bind->mode, "register", "E_NOT_FOUND", "no matching artifact metadata", NULL,
-					              bind->sql_name, bind->symbol, NULL, "connection");
-				}
-			}
 		} else {
 		tcc_write_row(output, false, bind->mode, "bind", "E_BAD_MODE", "unknown mode", NULL, NULL, NULL, NULL,
 		              "connection");

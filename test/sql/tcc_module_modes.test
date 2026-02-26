@@ -1,5 +1,5 @@
 # name: test/sql/tcc_module_modes.test
-# description: mode coverage for tcc_module
+# description: clean codegen API coverage for tcc_module
 # group: [ducktinycc]
 
 require ducktinycc
@@ -32,43 +32,31 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(mode := 'register');
 ----
-false	register	E_MISSING_ARGS
+false	register	E_BAD_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'ffi_load');
+----
+false	ffi_load	E_BAD_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'load');
+----
+false	load	E_BAD_MODE
 
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(mode := 'unregister');
 ----
-false	unregister	E_MISSING_ARGS
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(mode := 'call');
-----
-false	call	E_BAD_MODE
+false	unregister	E_BAD_MODE
 
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(mode := 'nonsense');
 ----
 false	nonsense	E_BAD_MODE
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'register',
-  source := 'long long tcc_add1(long long x){ return x + 1; }',
-  symbol := 'tcc_add1',
-  sql_name := 'tcc_add1',
-  return_type := 'i64',
-  arg_types := ['i64']
-);
-----
-true	register	OK
-
-query I
-SELECT tcc_add1(41);
-----
-42
 
 query TTT
 SELECT ok, mode, code
@@ -80,7 +68,7 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'add_source',
-  source := 'long long tcc_add2(long long x){ return x + 2; }'
+  source := 'long long add2(long long x){ return x + 2; }'
 );
 ----
 true	add_source	OK
@@ -89,8 +77,8 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'tinycc_bind',
-  symbol := 'tcc_add2',
-  sql_name := 'tcc_add2'
+  symbol := 'add2',
+  sql_name := 'add2'
 );
 ----
 true	tinycc_bind	OK
@@ -102,82 +90,147 @@ FROM tcc_module(mode := 'tinycc_compile', return_type := 'i64', arg_types := ['i
 true	tinycc_compile	OK
 
 query I
-SELECT tcc_add2(40);
+SELECT add2(40);
 ----
 42
 
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(
-  mode := 'register',
-  source := 'long long tcc_add3(long long a,long long b,long long c){ return a+b+c; }',
-  symbol := 'tcc_add3',
-  sql_name := 'tcc_add3',
-  return_type := 'i64',
-  arg_types := ['i64','i64','i64']
+  mode := 'quick_compile',
+  source := 'int add_i32(int a, int b){ return a + b; }',
+  symbol := 'add_i32',
+  sql_name := 'add_i32',
+  return_type := 'i32',
+  arg_types := ['i32', 'i32']
 );
 ----
-true	register	OK
+true	quick_compile	OK
 
 query I
-SELECT tcc_add3(1, 2, 3);
+SELECT add_i32(20, 22);
 ----
-6
+42
 
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(
-  mode := 'load',
-  sql_name := 'jit_module_add100',
-  symbol := 'jit_mod_init',
-  source := '
-    typedef struct _duckdb_connection *duckdb_connection;
-    extern _Bool ducktinycc_register_i64_unary(duckdb_connection con, const char *name, void *fn_ptr);
-    long long jit_add100_impl(long long x) { return x + 100; }
-    _Bool jit_mod_init(duckdb_connection con) {
-      return ducktinycc_register_i64_unary(con, "jit_add100", (void *)jit_add100_impl);
-    }
-  '
-);
-----
-true	load	OK
-
-query I
-SELECT jit_add100(7);
-----
-107
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'unregister',
-  sql_name := 'jit_module_add100'
-);
-----
-false	unregister	E_UNSAFE_UNLOAD
-
-query TTT
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'register',
-  source := 'long long tcc_badret(long long x){ return x; }',
-  symbol := 'tcc_badret',
-  sql_name := 'tcc_badret',
-  return_type := 'f64',
+  mode := 'quick_compile',
+  source := '_Bool gt0(long long x){ return x > 0; }',
+  symbol := 'gt0',
+  sql_name := 'gt0',
+  return_type := 'bool',
   arg_types := ['i64']
 );
 ----
-false	register	E_BAD_SIGNATURE
+true	quick_compile	OK
+
+query TT
+SELECT gt0(3), gt0(-1);
+----
+true	false
 
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(
-  mode := 'register',
-  source := 'long long tcc_toomany(long long a0,long long a1,long long a2,long long a3,long long a4,long long a5,long long a6,long long a7,long long a8,long long a9,long long a10){ return a0+a10; }',
-  symbol := 'tcc_toomany',
-  sql_name := 'tcc_toomany',
+  mode := 'quick_compile',
+  source := 'double half(double x){ return x / 2.0; }',
+  symbol := 'half',
+  sql_name := 'half',
+  return_type := 'f64',
+  arg_types := ['f64']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT CAST(half(8.0) AS BIGINT);
+----
+4
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'void touch(int x){ (void)x; }',
+  symbol := 'touch',
+  sql_name := 'touch',
+  return_type := 'void',
+  arg_types := ['i32']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT touch(5);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tcc_new_state');
+----
+true	tcc_new_state	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'add_library', library := 'm');
+----
+true	add_library	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_source',
+  source := '#include <math.h>
+double pwr(double x, double y){ return pow(x, y); }'
+);
+----
+true	add_source	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'tinycc_bind',
+  symbol := 'pwr',
+  sql_name := 'pwr'
+);
+----
+true	tinycc_bind	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'compile', return_type := 'f64', arg_types := ['f64', 'f64']);
+----
+true	compile	OK
+
+query I
+SELECT CAST(pwr(2.0, 5.0) AS BIGINT);
+----
+32
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad(long long x){ return x; }',
+  symbol := 'bad',
+  sql_name := 'bad',
+  return_type := 'blob',
+  arg_types := ['i64']
+);
+----
+false	quick_compile	E_BAD_SIGNATURE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long too_many(long long a0,long long a1,long long a2,long long a3,long long a4,long long a5,long long a6,long long a7,long long a8,long long a9,long long a10){ return a0 + a10; }',
+  symbol := 'too_many',
+  sql_name := 'too_many',
   return_type := 'i64',
   arg_types := ['i64','i64','i64','i64','i64','i64','i64','i64','i64','i64','i64']
 );
 ----
-false	register	E_BAD_SIGNATURE
+false	quick_compile	E_BAD_SIGNATURE
