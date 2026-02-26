@@ -18,23 +18,64 @@ knitr::opts_chunk$set(
 DuckTinyCC is a DuckDB C extension with a `tcc_*` SQL surface for TinyCC-based
 in-process C scripting workflows.
 
-## Functions
+## API Surface
 
-| Function | Description | Notes |
+All functionality is exposed through `tcc_module(...)` and selected with
+`mode := ...`.  
+Every mode returns one diagnostics row with `ok`, `code`, `message`, and
+context columns.
+
+### Session and Configuration
+
+| Mode | Purpose | Notes |
 |---|---|---|
-| `tcc_module(mode := 'config_get', ...)` | Show current session configuration | Returns diagnostics table |
-| `tcc_module(mode := 'config_set', runtime_path := ... )` | Set session runtime path | Connection-scoped state |
-| `tcc_module(mode := 'config_reset', ...)` | Reset session configuration | Falls back to default runtime path |
-| `tcc_module(mode := 'tcc_new_state', ...)` | Start a fresh TinyCC build state | Keeps connection/runtime scope |
-| `tcc_module(mode := 'add_include'/'add_sysinclude'/'add_library_path'/'add_library', ...)` | Add TinyCC include/library inputs | Session-scoped build inputs |
-| `tcc_module(mode := 'add_option'/'add_define'/'add_header'/'add_source', ...)` | Add compile options/defines/code units | Session-scoped build inputs |
-| `tcc_module(mode := 'tinycc_bind', symbol := ..., sql_name := ...)` | Bind symbol + sql alias for next compile | Rtinycc-style bind step |
-| `tcc_module(mode := 'list', ...)` | Show current registry/session counters | Diagnostics table |
-| `tcc_module(mode := 'compile'/'tinycc_compile', ...)` | Compile + relocate from current session and store callable artifact | Fresh `tcc_new` per compile |
-| `tcc_module(mode := 'load', source := ..., symbol := ..., sql_name := ...)` | Compile and run a dynamic module init entrypoint on the extension-owned connection | Keeps compiled module alive in registry |
-| `tcc_module(mode := 'ffi_load', source := ..., symbol := ..., sql_name := ..., return_type := ..., arg_types := [...])` | Generate and load a TinyCC FFI module that registers a real DuckDB SQL function | C codegen path |
-| `tcc_module(mode := 'register', source := ..., symbol := ..., sql_name := ...)` | Compile unit and store callable artifact in session registry | Uses fresh TinyCC state per registration |
-| `tcc_module(mode := 'unregister', sql_name := ...)` | Remove a registered artifact from session registry | Frees TinyCC state |
+| `config_get` | Show current session configuration | Includes runtime path and counters |
+| `config_set` | Set session runtime path | Connection-scoped |
+| `config_reset` | Reset runtime path and build state | Keeps extension loaded |
+| `tcc_new_state` | Start a fresh build state | Drops staged build inputs |
+| `list` | Show session registry/build counters | Diagnostics only |
+
+### Build Inputs
+
+| Mode | Purpose |
+|---|---|
+| `add_include`, `add_sysinclude` | Add include paths |
+| `add_library_path`, `add_library` | Add library paths/libraries |
+| `add_option`, `add_define` | Add compiler flags and defines |
+| `add_header`, `add_source` | Stage C code units in session |
+| `tinycc_bind` | Stage `symbol` + `sql_name` for next compile |
+
+### Compile, Load, and Registry
+
+| Mode | Purpose | Notes |
+|---|---|---|
+| `compile`, `tinycc_compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name` |
+| `register` | Compile provided `source` and register SQL UDF | One-shot registration |
+| `ffi_load` | Generate C loader + register SQL UDF | Rtinycc-style dynamic codegen path |
+| `load` | Compile and execute module init symbol | Manual dynamic module path |
+| `unregister` | Remove artifact metadata from session registry | Loaded/codegen modules are pinned (`E_UNSAFE_UNLOAD`) |
+
+## Supported Types
+
+Type metadata is explicit for `compile`, `tinycc_compile`, `register`, and
+`ffi_load`:
+
+- `return_type := ...` is required
+- `arg_types := [...]` is required (use `[]` for zero arguments)
+
+Current executable SQL registration support:
+
+| Signature Piece | Accepted Tokens | DuckDB Type |
+|---|---|---|
+| `return_type` | `i64`, `bigint`, `longlong` | `BIGINT` |
+| each `arg_types` element | `i64`, `bigint`, `longlong` | `BIGINT` |
+
+Additional limits and behavior:
+
+- Arity: `0..10` arguments
+- NULL handling: NULL-in/NULL-out on the generated BIGINT wrappers
+- `return_type := 'void'` is parsed but not currently executable in the SQL
+  registration path (`E_UNSUPPORTED_SIGNATURE`)
 
 ## Build
 
@@ -96,7 +137,7 @@ dbGetQuery(con, "
 ### Build State 1: Session Build Inputs
 
 This chunk starts a fresh state, adds include/sysinclude/library paths, options, defines, headers, and source code.  
-It then binds and compiles two different functions from the same state.
+It then binds and compiles two different functions from the same state and calls both via plain SQL.
 
 ```{r eval=TRUE}
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state')")
@@ -137,6 +178,7 @@ dbGetQuery(con, "
     arg_types := ['i64']
   )
 ")
+dbGetQuery(con, "SELECT tcc_add_shift(39) AS value")
 
 dbGetQuery(con, "
   SELECT ok, mode, code
@@ -150,6 +192,7 @@ dbGetQuery(con, "
     arg_types := ['i64']
   )
 ")
+dbGetQuery(con, "SELECT tcc_times2(21) AS value")
 ```
 
 ### Build State 2: FFI Codegen and SQL Invocation
@@ -175,6 +218,7 @@ dbGetQuery(con, "SELECT tcc_add10(32) AS value")
 ### Unregister and Reset
 
 This final chunk exercises `unregister`, `list`, and `config_reset`.
+Because loaded/codegen modules are pinned for safety, `unregister` returns `E_UNSAFE_UNLOAD`.
 
 ```{r eval=TRUE}
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add_shift')")
@@ -192,7 +236,7 @@ dbDisconnect(con, shutdown = TRUE)
 
 ## Notes
 
-- Function invocation is plain SQL (`SELECT my_udf(...)`) after `load`/`ffi_load`.
+- Function invocation is plain SQL (`SELECT my_udf(...)`) after `compile`/`register`/`load`/`ffi_load`.
 - Dynamic module mode (`mode := 'load'`) keeps compiled TinyCC state alive and can use host helper symbols such as `ducktinycc_register_i64_unary`.
 - Dynamic FFI codegen mode (`mode := 'ffi_load'`) generates a C loader module and registers SQL functions via host helpers.
 - All outputs are returned as a diagnostics table for SQL-native observability.

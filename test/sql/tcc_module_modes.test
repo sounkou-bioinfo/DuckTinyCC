@@ -65,6 +65,11 @@ FROM tcc_module(
 ----
 true	register	OK
 
+query I
+SELECT tcc_add1(41);
+----
+42
+
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(mode := 'tcc_new_state');
@@ -96,6 +101,11 @@ FROM tcc_module(mode := 'tinycc_compile', return_type := 'i64', arg_types := ['i
 ----
 true	tinycc_compile	OK
 
+query I
+SELECT tcc_add2(40);
+----
+42
+
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(
@@ -108,6 +118,11 @@ FROM tcc_module(
 );
 ----
 true	register	OK
+
+query I
+SELECT tcc_add3(1, 2, 3);
+----
+6
 
 query TTT
 SELECT ok, mode, code
@@ -152,7 +167,7 @@ FROM tcc_module(
   arg_types := ['i64']
 );
 ----
-false	register	E_COMPILE_FAILED
+false	register	E_BAD_SIGNATURE
 
 query TTT
 SELECT ok, mode, code
@@ -165,4 +180,4 @@ FROM tcc_module(
   arg_types := ['i64','i64','i64','i64','i64','i64','i64','i64','i64','i64','i64']
 );
 ----
-false	register	E_COMPILE_FAILED
+false	register	E_BAD_SIGNATURE

@@ -116,7 +116,6 @@ typedef struct {
 
 static bool tcc_parse_explicit_types(const char *return_type, const char *arg_types, tcc_return_type_t *out_ret,
                                      int *out_arg_count, tcc_error_buffer_t *error_buf);
-static char *tcc_build_canonical_signature(tcc_return_type_t ret, int arg_count);
 static void tcc_rt_destroy_noop(void *user_data);
 static tcc_runtime_invoke_fn_t tcc_select_runtime_invoke(tcc_return_type_t ret_type, int argc);
 
@@ -584,106 +583,6 @@ static int tcc_apply_session_to_state(TCCState *s, const tcc_session_t *session,
 			return -1;
 		}
 	}
-	return 0;
-}
-
-static int tcc_build_artifact(const char *runtime_path, tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
-                              const char *effective_symbol, const char *effective_sql_name,
-                              tcc_registered_artifact_t **out_artifact, tcc_error_buffer_t *error_buf) {
-	TCCState *s;
-	void *sym;
-	tcc_registered_artifact_t *artifact;
-	tcc_return_type_t ret_type = TCC_RET_I64;
-	int arg_count = 0;
-	char *canonical_signature = NULL;
-	if (!effective_symbol || effective_symbol[0] == '\0') {
-		tcc_set_error(error_buf, "symbol is required");
-		return -1;
-	}
-	if (!effective_sql_name || effective_sql_name[0] == '\0') {
-		tcc_set_error(error_buf, "sql_name is required");
-		return -1;
-	}
-	if (state->session.sources.count == 0 && (!bind->source || bind->source[0] == '\0')) {
-		tcc_set_error(error_buf, "no source provided (use add_source/source)");
-		return -1;
-	}
-
-	s = tcc_new();
-	if (!s) {
-		tcc_set_error(error_buf, "tcc_new failed");
-		return -1;
-	}
-	tcc_set_error_func(s, error_buf, tcc_append_error);
-	if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) != 0) {
-		tcc_set_error(error_buf, "tcc_set_output_type failed");
-		tcc_delete(s);
-		return -1;
-	}
-	tcc_configure_runtime_paths(s, runtime_path);
-	tcc_add_host_symbols(s);
-	if (tcc_apply_session_to_state(s, &state->session, error_buf) != 0) {
-		tcc_delete(s);
-		return -1;
-	}
-	if (bind->source && bind->source[0] != '\0') {
-		if (tcc_compile_string(s, bind->source) != 0) {
-			if (error_buf->message[0] == '\0') {
-				tcc_set_error(error_buf, "source compile failed");
-			}
-			tcc_delete(s);
-			return -1;
-		}
-	}
-	if (tcc_relocate(s) != 0) {
-		if (error_buf->message[0] == '\0') {
-			tcc_set_error(error_buf, "tcc_relocate failed");
-		}
-		tcc_delete(s);
-		return -1;
-	}
-	sym = tcc_get_symbol(s, effective_symbol);
-	if (!sym) {
-		tcc_set_error(error_buf, "symbol not found after relocation");
-		tcc_delete(s);
-		return -1;
-	}
-	if (!tcc_parse_explicit_types(bind->return_type, bind->arg_types, &ret_type, &arg_count, error_buf)) {
-		tcc_delete(s);
-		return -1;
-	}
-	canonical_signature = tcc_build_canonical_signature(ret_type, arg_count);
-	if (!canonical_signature) {
-		tcc_set_error(error_buf, "failed to build canonical signature");
-		tcc_delete(s);
-		return -1;
-	}
-
-	artifact = (tcc_registered_artifact_t *)duckdb_malloc(sizeof(tcc_registered_artifact_t));
-	if (!artifact) {
-		tcc_set_error(error_buf, "out of memory");
-		tcc_delete(s);
-		duckdb_free(canonical_signature);
-		return -1;
-	}
-	memset(artifact, 0, sizeof(tcc_registered_artifact_t));
-	artifact->tcc = s;
-	artifact->symbol_ptr = sym;
-	artifact->arg_count = arg_count;
-	artifact->return_type = ret_type;
-	artifact->trampoline.invoke = tcc_select_runtime_invoke(ret_type, arg_count);
-	artifact->trampoline.destroy = tcc_rt_destroy_noop;
-	artifact->trampoline.user_data = sym;
-	artifact->signature = canonical_signature;
-	artifact->sql_name = tcc_strdup(effective_sql_name);
-	artifact->symbol = tcc_strdup(effective_symbol);
-	artifact->state_id = state->session.state_id;
-	if (!artifact->trampoline.invoke || !artifact->sql_name || !artifact->symbol || !artifact->signature) {
-		tcc_artifact_destroy(artifact);
-		tcc_set_error(error_buf, "invalid trampoline or out of memory");
-		return -1;
-	}
-	*out_artifact = artifact;
 	return 0;
 }
 
@@ -1242,22 +1141,6 @@ static bool tcc_parse_explicit_types(const char *return_type, const char *arg_ty
 	return true;
 }
 
-static char *tcc_build_canonical_signature(tcc_return_type_t ret, int arg_count) {
-	char buf[256];
-	size_t off = 0;
-	int i;
-	const char *ret_txt = ret == TCC_RET_VOID ? "void" : "i64";
-	if (arg_count < 0 || arg_count > TCC_MAX_ARGS) {
-		return NULL;
-	}
-	off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s(", ret_txt);
-	for (i = 0; i < arg_count; i++) {
-		off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s%s", i == 0 ? "" : ",", "i64");
-	}
-	(void)snprintf(buf + off, sizeof(buf) - off, ")");
-	return tcc_strdup(buf);
-}
-
 static bool tcc_rt_invoke_i64_0(void *user_data, const int64_t args[TCC_MAX_ARGS], int64_t *out_i64) {
 	typedef int64_t (*fn_t)(void);
 	fn_t fn = (fn_t)user_data;
@@ -1621,6 +1504,89 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 	return tcc_strdup(src);
 }
 
+#ifndef DUCKTINYCC_WASM_UNSUPPORTED
+static int tcc_compile_and_load_ffi_module(const char *runtime_path, tcc_module_state_t *state,
+                                           const tcc_module_bind_data_t *bind, const char *sql_name,
+                                           const char *target_symbol, tcc_registered_artifact_t **out_artifact,
+                                           tcc_error_buffer_t *error_buf, char *out_module_symbol, size_t symbol_len) {
+	tcc_return_type_t ret_type = TCC_RET_I64;
+	int arg_count = 0;
+	char *loader_src = NULL;
+	char *combined_src = NULL;
+	tcc_module_bind_data_t bind_copy;
+	tcc_registered_artifact_t *artifact = NULL;
+
+	if (!state || !bind || !sql_name || !target_symbol || !out_artifact || !error_buf || !out_module_symbol ||
+	    symbol_len == 0) {
+		tcc_set_error(error_buf, "invalid ffi_load arguments");
+		return -1;
+	}
+	if (!state->connection) {
+		tcc_set_error(error_buf, "no persistent extension connection available");
+		return -1;
+	}
+	if (!tcc_parse_explicit_types(bind->return_type, bind->arg_types, &ret_type, &arg_count, error_buf)) {
+		return -1;
+	}
+	if (ret_type != TCC_RET_I64) {
+		tcc_set_error(error_buf, "ffi loader currently supports only i64 return type");
+		return -1;
+	}
+
+	snprintf(out_module_symbol, symbol_len, "__ducktinycc_ffi_init_%llu_%llu", (unsigned long long)state->session.state_id,
+	         (unsigned long long)state->session.config_version);
+	loader_src = tcc_generate_ffi_loader_source(out_module_symbol, target_symbol, sql_name,
+	                                            bind->return_type ? bind->return_type : "i64",
+	                                            bind->arg_types ? bind->arg_types : "", arg_count);
+	if (!loader_src) {
+		tcc_set_error(error_buf, "failed to generate ffi loader");
+		return -1;
+	}
+
+	if (bind->source && bind->source[0] != '\0') {
+		size_t n1 = strlen(bind->source);
+		size_t n2 = strlen(loader_src);
+		combined_src = (char *)duckdb_malloc(n1 + n2 + 3);
+		if (!combined_src) {
+			duckdb_free(loader_src);
+			tcc_set_error(error_buf, "out of memory");
+			return -1;
+		}
+		memcpy(combined_src, bind->source, n1);
+		combined_src[n1] = '\n';
+		memcpy(combined_src + n1 + 1, loader_src, n2);
+		combined_src[n1 + 1 + n2] = '\0';
+	} else {
+		combined_src = loader_src;
+		loader_src = NULL;
+	}
+
+	memset(&bind_copy, 0, sizeof(bind_copy));
+	bind_copy = *bind;
+	bind_copy.source = combined_src;
+	if (tcc_build_module_artifact(runtime_path, state, &bind_copy, out_module_symbol, sql_name, &artifact, error_buf) !=
+	    0) {
+		if (loader_src) {
+			duckdb_free(loader_src);
+		}
+		duckdb_free(combined_src);
+		return -1;
+	}
+	if (loader_src) {
+		duckdb_free(loader_src);
+	}
+	duckdb_free(combined_src);
+
+	if (!artifact->module_init(state->connection)) {
+		tcc_artifact_destroy(artifact);
+		tcc_set_error(error_buf, "ffi loader init returned false");
+		return -1;
+	}
+	*out_artifact = artifact;
+	return 0;
+}
+#endif
+
 static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk output) {
 	tcc_module_state_t *state = (tcc_module_state_t *)duckdb_function_get_extra_info(info);
 	tcc_module_bind_data_t *bind = (tcc_module_bind_data_t *)duckdb_function_get_bind_data(info);
@@ -1758,135 +1724,57 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		tcc_write_row(output, true, bind->mode, "registry", "OK", "session summary", detail, NULL, NULL, NULL,
 		              "connection");
 		} else if (strcmp(bind->mode, "compile") == 0 || strcmp(bind->mode, "tinycc_compile") == 0 ||
-		           strcmp(bind->mode, "register") == 0) {
-#ifdef DUCKTINYCC_WASM_UNSUPPORTED
-		tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-	              "TinyCC compile/register not supported for WASM build", NULL, bind->sql_name, bind->symbol, NULL,
-	              "connection");
-#else
-		const char *effective_symbol = tcc_effective_symbol(state, bind);
-		const char *effective_sql_name = tcc_effective_sql_name(state, bind, effective_symbol);
-		tcc_error_buffer_t err;
-		tcc_registered_artifact_t *artifact = NULL;
-		char artifact_id[256];
-
-		memset(&err, 0, sizeof(err));
-
-		if (!effective_symbol || effective_symbol[0] == '\0') {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required (bind or argument)",
-	              NULL, effective_sql_name, effective_symbol, NULL, "connection");
-			init->emitted = true;
-			return;
-		}
-
-		if (tcc_build_artifact(runtime_path, state, bind, effective_symbol, effective_sql_name, &artifact, &err) != 0) {
-			tcc_write_row(output, false, bind->mode, "compile", "E_COMPILE_FAILED", "compile failed",
-	              err.message[0] ? err.message : NULL, effective_sql_name, effective_symbol, NULL, "connection");
-			init->emitted = true;
-			return;
-		}
-
-		if (!tcc_registry_store_metadata(state, effective_sql_name, effective_symbol, artifact->state_id, artifact)) {
-			tcc_artifact_destroy(artifact);
-			tcc_write_row(output, false, bind->mode, "register", "E_STORE_FAILED",
-	                      "failed to store session metadata", NULL, effective_sql_name,
-	                      effective_symbol, NULL, "connection");
-			init->emitted = true;
-			return;
-		}
-			snprintf(artifact_id, sizeof(artifact_id), "%s@state_%llu", effective_sql_name,
-		         (unsigned long long)artifact->state_id);
-			tcc_write_row(output, true, bind->mode, "register", "OK", "compiled, relocated and registered in session",
-		              runtime_path, effective_sql_name, effective_symbol, artifact_id, "connection");
-	#endif
-		} else if (strcmp(bind->mode, "ffi_load") == 0 || strcmp(bind->mode, "tinycc_ffi_load") == 0) {
+		           strcmp(bind->mode, "register") == 0 || strcmp(bind->mode, "ffi_load") == 0 ||
+		           strcmp(bind->mode, "tinycc_ffi_load") == 0) {
 #ifdef DUCKTINYCC_WASM_UNSUPPORTED
 			tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-			              "TinyCC ffi_load not supported for WASM build", NULL, bind->sql_name, bind->symbol, NULL,
-			              "connection");
+			              "TinyCC compile/register/ffi_load not supported for WASM build", NULL, bind->sql_name,
+			              bind->symbol, NULL, "connection");
 #else
 			const char *target_symbol = tcc_effective_symbol(state, bind);
 			const char *sql_name = tcc_effective_sql_name(state, bind, target_symbol);
-			tcc_return_type_t ret_type = TCC_RET_I64;
-			int arg_count = 0;
 			char module_symbol[128];
-			char *loader_src = NULL;
-			char *combined_src = NULL;
-			tcc_module_bind_data_t bind_copy;
 			tcc_error_buffer_t err;
 			tcc_registered_artifact_t *artifact = NULL;
 			char artifact_id[256];
-			bool ok;
+			const char *phase = "compile";
+			const char *code = "E_COMPILE_FAILED";
+			const char *message = "compile failed";
 			memset(&err, 0, sizeof(err));
 
 			if (!target_symbol || target_symbol[0] == '\0') {
-				tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required", NULL, sql_name,
-				              target_symbol, NULL, "connection");
-				init->emitted = true;
-				return;
-			}
-			if (!tcc_parse_explicit_types(bind->return_type, bind->arg_types, &ret_type, &arg_count, &err)) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_SIGNATURE",
-				              err.message[0] ? err.message : "invalid return_type/arg_types", NULL, sql_name, target_symbol,
-				              NULL, "connection");
-				init->emitted = true;
-				return;
-			}
-			if (ret_type != TCC_RET_I64) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_UNSUPPORTED_SIGNATURE",
-				              "ffi_load currently supports only i64 return type", NULL, sql_name, target_symbol, NULL,
-				              "connection");
-				init->emitted = true;
-				return;
-			}
-			snprintf(module_symbol, sizeof(module_symbol), "__ducktinycc_ffi_init_%llu",
-			         (unsigned long long)state->session.state_id);
-			loader_src = tcc_generate_ffi_loader_source(module_symbol, target_symbol, sql_name,
-			                                            bind->return_type ? bind->return_type : "i64",
-			                                            bind->arg_types ? bind->arg_types : "", arg_count);
-			if (!loader_src) {
-				tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED", "failed to generate ffi loader",
+				tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required (bind or argument)",
 				              NULL, sql_name, target_symbol, NULL, "connection");
 				init->emitted = true;
 				return;
 			}
-			if (bind->source && bind->source[0] != '\0') {
-				size_t n1 = strlen(bind->source);
-				size_t n2 = strlen(loader_src);
-				combined_src = (char *)duckdb_malloc(n1 + n2 + 3);
-				if (!combined_src) {
-					duckdb_free(loader_src);
-					tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED", "out of memory", NULL, sql_name,
-					              target_symbol, NULL, "connection");
-					init->emitted = true;
-					return;
+
+			if (tcc_compile_and_load_ffi_module(runtime_path, state, bind, sql_name, target_symbol, &artifact, &err,
+			                                    module_symbol, sizeof(module_symbol)) != 0) {
+				if (strstr(err.message, "return_type") || strstr(err.message, "arg_types") ||
+				    strstr(err.message, "too many args")) {
+					phase = "bind";
+					code = "E_BAD_SIGNATURE";
+					message = "invalid return_type/arg_types";
+				} else if (strstr(err.message, "only i64 return type")) {
+					phase = "bind";
+					code = "E_UNSUPPORTED_SIGNATURE";
+					message = "unsupported return_type/arg_types";
+				} else if (strstr(err.message, "failed to generate ffi loader") || strstr(err.message, "out of memory")) {
+					phase = "codegen";
+					code = "E_CODEGEN_FAILED";
+					message = "ffi codegen failed";
+				} else if (strstr(err.message, "no persistent extension connection")) {
+					phase = "load";
+					code = "E_NO_CONNECTION";
+					message = "no persistent extension connection available";
+				} else if (strstr(err.message, "ffi loader init returned false")) {
+					phase = "load";
+					code = "E_INIT_FAILED";
+					message = "ffi loader init returned false";
 				}
-				memcpy(combined_src, bind->source, n1);
-				combined_src[n1] = '\n';
-				memcpy(combined_src + n1 + 1, loader_src, n2);
-				combined_src[n1 + 1 + n2] = '\0';
-			} else {
-				combined_src = loader_src;
-				loader_src = NULL;
-			}
-			memset(&bind_copy, 0, sizeof(bind_copy));
-			bind_copy = *bind;
-			bind_copy.source = combined_src;
-			if (tcc_build_module_artifact(runtime_path, state, &bind_copy, module_symbol, sql_name, &artifact, &err) != 0) {
-				if (loader_src) duckdb_free(loader_src);
-				duckdb_free(combined_src);
-				tcc_write_row(output, false, bind->mode, "compile", "E_COMPILE_FAILED", "compile failed",
-				              err.message[0] ? err.message : NULL, sql_name, target_symbol, NULL, "connection");
-				init->emitted = true;
-				return;
-			}
-			if (loader_src) duckdb_free(loader_src);
-			duckdb_free(combined_src);
-			ok = artifact->module_init(state->connection);
-			if (!ok) {
-				tcc_artifact_destroy(artifact);
-				tcc_write_row(output, false, bind->mode, "load", "E_INIT_FAILED",
-				              "ffi loader init returned false", NULL, sql_name, target_symbol, NULL, "connection");
+				tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL, sql_name,
+				              target_symbol, NULL, "connection");
 				init->emitted = true;
 				return;
 			}
@@ -1900,7 +1788,7 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			}
 			snprintf(artifact_id, sizeof(artifact_id), "%s@ffi_state_%llu", sql_name,
 			         (unsigned long long)artifact->state_id);
-			tcc_write_row(output, true, bind->mode, "load", "OK", "generated ffi loader and registered SQL function",
+			tcc_write_row(output, true, bind->mode, "load", "OK", "compiled and registered SQL function via codegen",
 			              runtime_path, sql_name, target_symbol, artifact_id, "connection");
 #endif
 		} else if (strcmp(bind->mode, "load") == 0 || strcmp(bind->mode, "tinycc_load") == 0) {

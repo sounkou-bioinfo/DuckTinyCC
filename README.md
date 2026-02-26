@@ -18,10 +18,10 @@ TinyCC-based in-process C scripting workflows.
 | `tcc_module(mode := 'add_option'/'add_define'/'add_header'/'add_source', ...)`                                          | Add compile options/defines/code units                                             | Session-scoped build inputs              |
 | `tcc_module(mode := 'tinycc_bind', symbol := ..., sql_name := ...)`                                                     | Bind symbol + sql alias for next compile                                           | Rtinycc-style bind step                  |
 | `tcc_module(mode := 'list', ...)`                                                                                       | Show current registry/session counters                                             | Diagnostics table                        |
-| `tcc_module(mode := 'compile'/'tinycc_compile', ...)`                                                                   | Compile + relocate from current session and store callable artifact                | Fresh `tcc_new` per compile              |
+| `tcc_module(mode := 'compile'/'tinycc_compile', ...)`                                                                   | Compile and register a real DuckDB SQL function from current session + bind        | Fresh `tcc_new` per compile              |
 | `tcc_module(mode := 'load', source := ..., symbol := ..., sql_name := ...)`                                             | Compile and run a dynamic module init entrypoint on the extension-owned connection | Keeps compiled module alive in registry  |
 | `tcc_module(mode := 'ffi_load', source := ..., symbol := ..., sql_name := ..., return_type := ..., arg_types := [...])` | Generate and load a TinyCC FFI module that registers a real DuckDB SQL function    | C codegen path                           |
-| `tcc_module(mode := 'register', source := ..., symbol := ..., sql_name := ...)`                                         | Compile unit and store callable artifact in session registry                       | Uses fresh TinyCC state per registration |
+| `tcc_module(mode := 'register', source := ..., symbol := ..., sql_name := ...)`                                         | Compile unit and register a real DuckDB SQL function                               | Uses fresh TinyCC state per registration |
 | `tcc_module(mode := 'unregister', sql_name := ...)`                                                                     | Remove a registered artifact from session registry                                 | Frees TinyCC state                       |
 
 ## Build
@@ -98,7 +98,8 @@ dbGetQuery(con, "
 
 This chunk starts a fresh state, adds include/sysinclude/library paths,
 options, defines, headers, and source code.  
-It then binds and compiles two different functions from the same state.
+It then binds and compiles two different functions from the same state
+and calls both via plain SQL.
 
 ``` r
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state')")
@@ -159,6 +160,9 @@ dbGetQuery(con, "
 ")
 #>     ok           mode code
 #> 1 TRUE tinycc_compile   OK
+dbGetQuery(con, "SELECT tcc_add_shift(39) AS value")
+#>   value
+#> 1    42
 
 dbGetQuery(con, "
   SELECT ok, mode, code
@@ -176,6 +180,9 @@ dbGetQuery(con, "
 ")
 #>     ok    mode code
 #> 1 TRUE compile   OK
+dbGetQuery(con, "SELECT tcc_times2(21) AS value")
+#>   value
+#> 1    42
 ```
 
 ### Build State 2: FFI Codegen and SQL Invocation
@@ -206,14 +213,16 @@ dbGetQuery(con, "SELECT tcc_add10(32) AS value")
 ### Unregister and Reset
 
 This final chunk exercises `unregister`, `list`, and `config_reset`.
+Because loaded/codegen modules are pinned for safety, `unregister`
+returns `E_UNSAFE_UNLOAD`.
 
 ``` r
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add_shift')")
-#>     ok       mode code
-#> 1 TRUE unregister   OK
+#>      ok       mode            code
+#> 1 FALSE unregister E_UNSAFE_UNLOAD
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'list')")
 #>     ok mode code                                                        detail
-#> 1 TRUE list   OK registered=2 sources=1 headers=1 includes=1 libs=0 state_id=1
+#> 1 TRUE list   OK registered=3 sources=1 headers=1 includes=1 libs=0 state_id=1
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 #>     ok         mode code
 #> 1 TRUE config_reset   OK
@@ -230,7 +239,7 @@ dbDisconnect(con, shutdown = TRUE)
 ## Notes
 
 - Function invocation is plain SQL (`SELECT my_udf(...)`) after
-  `load`/`ffi_load`.
+  `compile`/`register`/`load`/`ffi_load`.
 - Dynamic module mode (`mode := 'load'`) keeps compiled TinyCC state
   alive and can use host helper symbols such as
   `ducktinycc_register_i64_unary`.
