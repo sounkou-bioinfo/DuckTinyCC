@@ -93,9 +93,9 @@ make test_release
 
 ## Examples
 
-The examples below use `DBI` + `duckdb` and run end-to-end against the built extension.
+The examples below use `DBI` + `duckdb` and focus on one workflow at a time.
 
-### Setup
+### 1) Setup
 
 This chunk connects to DuckDB in-memory and loads the extension artifact.
 
@@ -109,10 +109,9 @@ ext_path <- normalizePath("build/release/ducktinycc.duckdb_extension", mustWork 
 dbExecute(con, sprintf("LOAD '%s'", ext_path))
 ```
 
-### Session Configuration
+### 2) Session Configuration
 
-This chunk exercises `config_set`, `config_get`, and `list` before compilation work starts.  
-It intentionally sets `runtime_path := ''` so TinyCC uses the extension-managed default runtime location.
+This chunk initializes a clean session and inspects the current state.
 
 ```{r eval=TRUE}
 dbGetQuery(con, "
@@ -134,10 +133,9 @@ dbGetQuery(con, "
 ")
 ```
 
-### Build State 1: Session Build Inputs
+### 3) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
 
-This chunk starts a fresh state, adds include/sysinclude/library paths, options, defines, headers, and source code.  
-It then binds and compiles two different functions from the same state and calls both via plain SQL.
+This example stages shared build inputs once, compiles two symbols, and calls both SQL functions.
 
 ```{r eval=TRUE}
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state')")
@@ -195,7 +193,26 @@ dbGetQuery(con, "
 dbGetQuery(con, "SELECT tcc_times2(21) AS value")
 ```
 
-### Build State 2: FFI Codegen and SQL Invocation
+### 4) Example B: One-Shot `register`
+
+This example compiles inline source and registers immediately without staged state reuse.
+
+```{r eval=TRUE}
+dbGetQuery(con, "
+  SELECT ok, mode, code
+  FROM tcc_module(
+    mode := 'register',
+    source := 'long long tcc_add3(long long a,long long b,long long c){ return a + b + c; }',
+    symbol := 'tcc_add3',
+    sql_name := 'tcc_add3',
+    return_type := 'i64',
+    arg_types := ['i64', 'i64', 'i64']
+  )
+")
+dbGetQuery(con, "SELECT tcc_add3(1, 2, 3) AS value")
+```
+
+### 5) Example C: `ffi_load` Codegen Path
 
 This chunk exercises the dynamic C codegen path (`ffi_load`) and then calls the registered SQL function normally.
 
@@ -215,18 +232,42 @@ dbGetQuery(con, "
 dbGetQuery(con, "SELECT tcc_add10(32) AS value")
 ```
 
-### Unregister and Reset
+### 6) Example D: `load` Module Init Path
 
-This final chunk exercises `unregister`, `list`, and `config_reset`.
-Because loaded/codegen modules are pinned for safety, `unregister` returns `E_UNSAFE_UNLOAD`.
+This example loads a manual module init symbol that registers a SQL function through host helpers.
 
 ```{r eval=TRUE}
-dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add_shift')")
+dbGetQuery(con, "
+  SELECT ok, mode, code
+  FROM tcc_module(
+    mode := 'load',
+    sql_name := 'jit_module_add100',
+    symbol := 'jit_mod_init',
+    source := '
+      typedef struct _duckdb_connection *duckdb_connection;
+      extern _Bool ducktinycc_register_i64_unary(duckdb_connection con, const char *name, void *fn_ptr);
+      long long jit_add100_impl(long long x) { return x + 100; }
+      _Bool jit_mod_init(duckdb_connection con) {
+        return ducktinycc_register_i64_unary(con, \"jit_add100\", (void *)jit_add100_impl);
+      }
+    '
+  )
+")
+dbGetQuery(con, "SELECT jit_add100(7) AS value")
+```
+
+### 7) Reset and Unregister Notes
+
+This chunk shows the current registry and reset behavior.
+Loaded/codegen modules are pinned for safety, so `unregister` returns `E_UNSAFE_UNLOAD`.
+
+```{r eval=TRUE}
+dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'unregister', sql_name := 'tcc_add10')")
 dbGetQuery(con, "SELECT ok, mode, code, detail FROM tcc_module(mode := 'list')")
 dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 ```
 
-### Cleanup
+### 8) Cleanup
 
 This chunk closes the database connection.
 
