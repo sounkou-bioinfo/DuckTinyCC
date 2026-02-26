@@ -60,11 +60,18 @@ if (NOT DUCKDB_WASM_EXTENSION)
 
     set(TINYCC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinycc")
     set(TINYCC_BUILD_DIR "${CMAKE_BINARY_DIR}/tinycc_build")
+    set(TINYCC_CONFIGURE_ARGS
+        --source-path=${TINYCC_SRC_DIR}
+        --extra-cflags=-fPIC
+    )
+    if("$ENV{DUCKDB_PLATFORM}" MATCHES "musl")
+        list(APPEND TINYCC_CONFIGURE_ARGS --config-musl --config-bcheck=no)
+    endif()
     ExternalProject_Add(tinycc_build
         SOURCE_DIR        "${TINYCC_SRC_DIR}"
         BINARY_DIR        "${TINYCC_BUILD_DIR}"
         BUILD_IN_SOURCE   FALSE
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "CC=${CMAKE_C_COMPILER}" "${TINYCC_SRC_DIR}/configure" --source-path=${TINYCC_SRC_DIR} --extra-cflags=-fPIC
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "CC=${CMAKE_C_COMPILER}" "${TINYCC_SRC_DIR}/configure" ${TINYCC_CONFIGURE_ARGS}
         BUILD_COMMAND     ${CMAKE_COMMAND} -E env "CC=${CMAKE_C_COMPILER}" ${MAKE_COMMAND} libtcc.a libtcc1.a
         INSTALL_COMMAND   ""
         BUILD_BYPRODUCTS  "${TINYCC_BUILD_DIR}/libtcc.a" "${TINYCC_BUILD_DIR}/libtcc1.a"
