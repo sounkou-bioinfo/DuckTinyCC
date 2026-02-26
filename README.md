@@ -432,7 +432,31 @@ dbGetQuery(con, "SELECT ok, mode, code FROM tcc_module(mode := 'config_reset')")
 #> 1 TRUE config_reset   OK
 ```
 
-### 8) Cleanup
+### 8) CLI Benchmark Snippet
+
+Use the DuckDB CLI timer to benchmark compile and call latency quickly:
+
+``` sh
+duckdb -unsigned <<'SQL'
+.timer on
+LOAD 'build/release/ducktinycc.duckdb_extension';
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'int add_i32(int a, int b){ return a + b; }',
+  symbol := 'add_i32',
+  sql_name := 'add_i32',
+  return_type := 'i32',
+  arg_types := ['i32', 'i32']
+);
+SELECT add_i32(20, 22);
+SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
+SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
+SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
+SQL
+```
+
+### 9) Cleanup
 
 This chunk closes the database connection.
 
