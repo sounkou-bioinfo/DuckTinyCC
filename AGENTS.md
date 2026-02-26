@@ -35,7 +35,7 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Implemented modes:
   - Session/config: `config_get`, `config_set`, `config_reset`, `list`, `tcc_new_state`
   - Build staging: `add_include`, `add_sysinclude`, `add_library_path`, `add_library`, `add_option`, `add_define`, `add_header`, `add_source`, `tinycc_bind`
-  - Compile/codegen registration: `compile`, `quick_compile`
+  - Compile/codegen: `compile`, `quick_compile`, `codegen_preview`
   - Discovery helpers (separate table functions): `tcc_system_paths(...)`, `tcc_library_probe(...)`
 - Wrapper/runtime model (Rtinycc-style API-mode codegen):
   - DuckTinyCC generates C wrappers during compile that unpack typed args, call target C symbols, and re-pack result for DuckDB scalar UDF execution.

@@ -1073,7 +1073,6 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	duckdb_scalar_function_set_extra_info(fn, ctx, tcc_host_sig_ctx_destroy);
 	rc = duckdb_register_scalar_function(con, fn);
 	if (rc != DuckDBSuccess) {
-		tcc_host_sig_ctx_destroy(ctx);
 		duckdb_destroy_scalar_function(&fn);
 		return false;
 	}
@@ -1898,6 +1897,29 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 	return tcc_strdup(src);
 }
 
+static char *tcc_build_codegen_unit_source(const char *user_source, const char *loader_source) {
+	char *combined_src;
+	size_t n1;
+	size_t n2;
+	if (!loader_source) {
+		return NULL;
+	}
+	if (!user_source || user_source[0] == '\0') {
+		return tcc_strdup(loader_source);
+	}
+	n1 = strlen(user_source);
+	n2 = strlen(loader_source);
+	combined_src = (char *)duckdb_malloc(n1 + n2 + 3);
+	if (!combined_src) {
+		return NULL;
+	}
+	memcpy(combined_src, user_source, n1);
+	combined_src[n1] = '\n';
+	memcpy(combined_src + n1 + 1, loader_source, n2);
+	combined_src[n1 + 1 + n2] = '\0';
+	return combined_src;
+}
+
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
 static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_module_state_t *state,
                                                const tcc_module_bind_data_t *bind, const char *sql_name,
@@ -1933,23 +1955,11 @@ static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_mod
 		tcc_set_error(error_buf, "failed to generate codegen wrapper");
 		return -1;
 	}
-
-	if (bind->source && bind->source[0] != '\0') {
-		size_t n1 = strlen(bind->source);
-		size_t n2 = strlen(loader_src);
-		combined_src = (char *)duckdb_malloc(n1 + n2 + 3);
-		if (!combined_src) {
-			duckdb_free(loader_src);
-			tcc_set_error(error_buf, "out of memory");
-			return -1;
-		}
-		memcpy(combined_src, bind->source, n1);
-		combined_src[n1] = '\n';
-		memcpy(combined_src + n1 + 1, loader_src, n2);
-		combined_src[n1 + 1 + n2] = '\0';
-	} else {
-		combined_src = loader_src;
-		loader_src = NULL;
+	combined_src = tcc_build_codegen_unit_source(bind->source, loader_src);
+	duckdb_free(loader_src);
+	if (!combined_src) {
+		tcc_set_error(error_buf, "out of memory");
+		return -1;
 	}
 
 	memset(&bind_copy, 0, sizeof(bind_copy));
@@ -1957,14 +1967,8 @@ static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_mod
 	bind_copy.source = combined_src;
 	if (tcc_build_module_artifact(runtime_path, state, &bind_copy, out_module_symbol, sql_name, &artifact, error_buf) !=
 	    0) {
-		if (loader_src) {
-			duckdb_free(loader_src);
-		}
 		duckdb_free(combined_src);
 		return -1;
-	}
-	if (loader_src) {
-		duckdb_free(loader_src);
 	}
 	duckdb_free(combined_src);
 
@@ -2114,7 +2118,52 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		         (unsigned long long)state->session.libraries.count, (unsigned long long)state->session.state_id);
 		tcc_write_row(output, true, bind->mode, "registry", "OK", "session summary", detail, NULL, NULL, NULL,
 		              "connection");
-		} else if (strcmp(bind->mode, "compile") == 0 || strcmp(bind->mode, "quick_compile") == 0) {
+	} else if (strcmp(bind->mode, "codegen_preview") == 0) {
+		const char *target_symbol = tcc_effective_symbol(state, bind);
+		const char *sql_name = tcc_effective_sql_name(state, bind, target_symbol);
+		tcc_ffi_type_t ret_type = TCC_FFI_I64;
+		tcc_ffi_type_t arg_types[TCC_MAX_ARGS];
+		int arg_count = 0;
+		tcc_error_buffer_t err;
+		char module_symbol[128];
+		char *loader_src = NULL;
+		char *preview_src = NULL;
+		memset(&err, 0, sizeof(err));
+		if (!target_symbol || target_symbol[0] == '\0') {
+			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required (bind or argument)",
+			              NULL, sql_name, target_symbol, NULL, "connection");
+			init->emitted = true;
+			return;
+		}
+		if (!tcc_parse_signature(bind->return_type, bind->arg_types, &ret_type, arg_types, &arg_count, &err)) {
+			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_SIGNATURE", "invalid return_type/arg_types",
+			              err.message[0] ? err.message : NULL, sql_name, target_symbol, NULL, "connection");
+			init->emitted = true;
+			return;
+		}
+		snprintf(module_symbol, sizeof(module_symbol), "__ducktinycc_ffi_init_%llu_%llu",
+		         (unsigned long long)state->session.state_id, (unsigned long long)state->session.config_version);
+		loader_src = tcc_generate_ffi_loader_source(module_symbol, target_symbol, sql_name,
+		                                            bind->return_type ? bind->return_type : "i64",
+		                                            bind->arg_types ? bind->arg_types : "", ret_type, arg_types, arg_count);
+		if (!loader_src) {
+			tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED", "ffi codegen failed",
+			              "failed to generate codegen wrapper", sql_name, target_symbol, NULL, "connection");
+			init->emitted = true;
+			return;
+		}
+		preview_src = tcc_build_codegen_unit_source(bind->source, loader_src);
+		duckdb_free(loader_src);
+		if (!preview_src) {
+			tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED", "ffi codegen failed",
+			              "out of memory", sql_name, target_symbol, NULL, "connection");
+			init->emitted = true;
+			return;
+		}
+		tcc_write_row(output, true, bind->mode, "codegen", "OK", "generated codegen source", preview_src, sql_name,
+		              target_symbol, module_symbol, "connection");
+		duckdb_free(preview_src);
+	} else if (strcmp(bind->mode, "compile") == 0 || strcmp(bind->mode, "quick_compile") == 0) {
 #ifdef DUCKTINYCC_WASM_UNSUPPORTED
 			tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
 			              "TinyCC compile codegen path not supported for WASM build", NULL, bind->sql_name,
