@@ -113,6 +113,7 @@ LOAD 'build/release/ducktinycc.duckdb_extension';
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
 SELECT ok, mode, code, detail
 FROM tcc_module(
   mode := 'config_set',
@@ -132,6 +133,7 @@ SQL
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
 SELECT kind, key, exists, value
 FROM tcc_system_paths()
 LIMIT 12;
@@ -148,6 +150,7 @@ This example stages shared build inputs once, compiles two symbols, and calls bo
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
 SELECT ok, mode, code, detail
 FROM tcc_module(mode := 'tcc_new_state');
 SELECT ok, mode, code, detail
@@ -222,6 +225,7 @@ This example compiles and registers directly from one SQL call, including
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -247,6 +251,7 @@ The required C header is included in the source unit.
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
 SELECT ok, mode, code
 FROM tcc_module(mode := 'tcc_new_state');
 SELECT ok, mode, code
@@ -273,6 +278,7 @@ SQL
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
 SELECT ok, mode, code, detail
 FROM tcc_module(mode := 'list');
 SELECT ok, mode, code
