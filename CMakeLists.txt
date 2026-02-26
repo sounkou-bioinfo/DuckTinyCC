@@ -9,6 +9,15 @@ if(NOT DEFINED EXTENSION_NAME)
 endif()
 add_definitions(-DDUCKDB_EXTENSION_NAME=${EXTENSION_NAME})
 
+# Avoid "manually-specified variables were not used" warnings when CI passes
+# TARGET_DUCKDB_VERSION_* for header fetching.
+if(DEFINED TARGET_DUCKDB_VERSION_MAJOR OR DEFINED TARGET_DUCKDB_VERSION_MINOR OR DEFINED TARGET_DUCKDB_VERSION_PATCH)
+    set(_duckdb_target_release_version
+        "${TARGET_DUCKDB_VERSION_MAJOR}.${TARGET_DUCKDB_VERSION_MINOR}.${TARGET_DUCKDB_VERSION_PATCH}"
+        CACHE INTERNAL "DuckDB release version passed by CI"
+    )
+endif()
+
 if (DEFINED DUCKDB_EXTENSION_API_VERSION_UNSTABLE)
     add_definitions(-DDUCKDB_EXTENSION_API_VERSION_UNSTABLE=${DUCKDB_EXTENSION_API_VERSION_UNSTABLE})
 endif()
@@ -48,7 +57,7 @@ if (NOT DUCKDB_WASM_EXTENSION)
     include(ExternalProject)
     find_program(MAKE_COMMAND NAMES gmake make REQUIRED)
 
-    set(TINYCC_SRC_DIR "${CMAKE_SOURCE_DIR}/third_party/tinycc")
+    set(TINYCC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinycc")
     set(TINYCC_BUILD_DIR "${CMAKE_BINARY_DIR}/tinycc_build")
 
     ExternalProject_Add(tinycc_build
