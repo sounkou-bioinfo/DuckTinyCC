@@ -69,17 +69,33 @@ if (NOT DUCKDB_WASM_EXTENSION)
 
     set(TINYCC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinycc")
     set(TINYCC_BUILD_DIR "${CMAKE_BINARY_DIR}/tinycc_build")
-    set(TINYCC_CONFIGURE_BIN "${TINYCC_SRC_DIR}/configure")
+    set(TINYCC_SOURCE_PATH "${TINYCC_SRC_DIR}")
+    set(TINYCC_CONFIGURE_SCRIPT "${TINYCC_SRC_DIR}/configure")
+    set(TINYCC_CONFIGURE_BIN "${TINYCC_CONFIGURE_SCRIPT}")
     if (WIN32)
         if (MSVC)
             message(FATAL_ERROR "TinyCC build requires MinGW/MSYS on Windows; MSVC is not supported.")
         endif()
         # On Windows, run TinyCC's POSIX configure script via sh (Rtools/MSYS).
         find_program(SH_COMMAND NAMES sh bash REQUIRED)
-        set(TINYCC_CONFIGURE_BIN "${SH_COMMAND}" "${TINYCC_SRC_DIR}/configure")
+        if (MINGW)
+            # GNU make treats ':' as VPATH separator; convert drive paths to POSIX.
+            find_program(CYGPATH_COMMAND NAMES cygpath REQUIRED)
+            execute_process(
+                COMMAND "${CYGPATH_COMMAND}" -u "${TINYCC_SRC_DIR}"
+                OUTPUT_VARIABLE TINYCC_SOURCE_PATH
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            execute_process(
+                COMMAND "${CYGPATH_COMMAND}" -u "${TINYCC_CONFIGURE_SCRIPT}"
+                OUTPUT_VARIABLE TINYCC_CONFIGURE_SCRIPT
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+        endif()
+        set(TINYCC_CONFIGURE_BIN "${SH_COMMAND}" "${TINYCC_CONFIGURE_SCRIPT}")
     endif()
     set(TINYCC_CONFIGURE_ARGS
-        --source-path=${TINYCC_SRC_DIR}
+        --source-path=${TINYCC_SOURCE_PATH}
     )
     if (NOT WIN32)
         list(APPEND TINYCC_CONFIGURE_ARGS --extra-cflags=-fPIC)
