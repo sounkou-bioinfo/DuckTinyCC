@@ -592,6 +592,54 @@ static int tcc_apply_session_to_state(TCCState *s, const tcc_session_t *session,
 	return 0;
 }
 
+static int tcc_apply_bind_overrides_to_state(TCCState *s, const tcc_module_bind_data_t *bind,
+                                             tcc_error_buffer_t *error_buf) {
+	const char *define_value;
+	if (!s || !bind) {
+		return 0;
+	}
+	if (bind->include_path && bind->include_path[0] != '\0') {
+		if (tcc_add_include_path(s, bind->include_path) != 0) {
+			tcc_set_error(error_buf, "tcc_add_include_path failed");
+			return -1;
+		}
+	}
+	if (bind->sysinclude_path && bind->sysinclude_path[0] != '\0') {
+		if (tcc_add_sysinclude_path(s, bind->sysinclude_path) != 0) {
+			tcc_set_error(error_buf, "tcc_add_sysinclude_path failed");
+			return -1;
+		}
+	}
+	if (bind->library_path && bind->library_path[0] != '\0') {
+		if (tcc_add_library_path(s, bind->library_path) != 0) {
+			tcc_set_error(error_buf, "tcc_add_library_path failed");
+			return -1;
+		}
+	}
+	if (bind->option && bind->option[0] != '\0') {
+		tcc_set_options(s, bind->option);
+	}
+	if (bind->define_name && bind->define_name[0] != '\0') {
+		define_value = bind->define_value ? bind->define_value : "1";
+		tcc_define_symbol(s, bind->define_name, define_value);
+	}
+	if (bind->header && bind->header[0] != '\0') {
+		if (tcc_compile_string(s, bind->header) != 0) {
+			if (error_buf->message[0] == '\0') {
+				tcc_set_error(error_buf, "header compile failed");
+			}
+			return -1;
+		}
+	}
+	if (bind->library && bind->library[0] != '\0') {
+		if (tcc_add_library(s, bind->library) != 0) {
+			tcc_set_error(error_buf, "tcc_add_library failed");
+			return -1;
+		}
+	}
+	return 0;
+}
+
 static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_t *state,
                                      const tcc_module_bind_data_t *bind, const char *module_symbol,
                                      const char *module_name, tcc_registered_artifact_t **out_artifact,
@@ -626,6 +674,10 @@ static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_
 	tcc_configure_runtime_paths(s, runtime_path);
 	tcc_add_host_symbols(s);
 	if (tcc_apply_session_to_state(s, &state->session, error_buf) != 0) {
+		tcc_delete(s);
+		return -1;
+	}
+	if (tcc_apply_bind_overrides_to_state(s, bind, error_buf) != 0) {
 		tcc_delete(s);
 		return -1;
 	}

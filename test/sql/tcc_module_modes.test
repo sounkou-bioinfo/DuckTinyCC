@@ -116,6 +116,28 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := '#include <math.h>
+double qpow(double x, double y){ return pow(x, y); }',
+  symbol := 'qpow',
+  sql_name := 'qpow',
+  return_type := 'f64',
+  arg_types := ['f64', 'f64'],
+  include_path := 'third_party/tinycc/include',
+  library_path := 'third_party/tinycc',
+  library := 'm'
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT CAST(qpow(2.0, 5.0) AS BIGINT);
+----
+32
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := '_Bool gt0(long long x){ return x > 0; }',
   symbol := 'gt0',
   sql_name := 'gt0',

@@ -35,10 +35,10 @@ context columns.
 
 ### Compile and Register
 
-| Mode                        | Purpose                                          | Notes                                                               |
-|-----------------------------|--------------------------------------------------|---------------------------------------------------------------------|
-| `compile`, `tinycc_compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name`                  |
-| `quick_compile`             | One-shot fast lane compile + register            | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types` |
+| Mode                        | Purpose                                          | Notes                                                                                                                                                                                    |
+|-----------------------------|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `compile`, `tinycc_compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name`                                                                                                                                       |
+| `quick_compile`             | One-shot fast lane compile + register            | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types`; can also pass per-call `include_path`, `sysinclude_path`, `library_path`, `library`, `option`, `define_*`, `header` |
 
 ## Supported Types
 
@@ -217,28 +217,32 @@ dbGetQuery(con, "SELECT tcc_times2(21) AS value")
 #> 1    42
 ```
 
-### 4) Example B: Fast Lane `quick_compile`
+### 4) Example B: Fast Lane `quick_compile` (with include/library inputs)
 
-This example compiles and registers directly from one SQL call, without
-staged state.
+This example compiles and registers directly from one SQL call,
+including `include_path`, `library_path`, and `library`.
 
 ``` r
 dbGetQuery(con, "
   SELECT ok, mode, code
   FROM tcc_module(
     mode := 'quick_compile',
-    source := 'int add_i32(int a, int b){ return a + b; }',
-    symbol := 'add_i32',
-    sql_name := 'add_i32',
-    return_type := 'i32',
-    arg_types := ['i32', 'i32']
+    source := '#include <math.h>
+double qpow(double x, double y){ return pow(x, y); }',
+    symbol := 'qpow',
+    sql_name := 'qpow',
+    return_type := 'f64',
+    arg_types := ['f64', 'f64'],
+    include_path := 'third_party/tinycc/include',
+    library_path := 'third_party/tinycc',
+    library := 'm'
   )
 ")
 #>     ok          mode code
 #> 1 TRUE quick_compile   OK
-dbGetQuery(con, "SELECT add_i32(20, 22) AS value")
+dbGetQuery(con, "SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value")
 #>   value
-#> 1    42
+#> 1    32
 ```
 
 ### 5) Example C: Libraries (`add_library`)
