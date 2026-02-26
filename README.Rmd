@@ -110,7 +110,9 @@ LOAD 'build/release/ducktinycc.duckdb_extension';
 
 ### 2) Session Configuration
 
-```sql
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
 SELECT ok, mode, code, detail
 FROM tcc_module(
   mode := 'config_set',
@@ -122,30 +124,58 @@ FROM tcc_module(mode := 'config_get');
 
 SELECT ok, mode, code, detail
 FROM tcc_module(mode := 'list');
+SQL
 ```
 
 ### 3) System Paths and Library Probe Helpers
 
-```sql
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
 SELECT kind, key, exists, value
 FROM tcc_system_paths()
 LIMIT 12;
 
 SELECT kind, key, exists, value, detail
 FROM tcc_library_probe(library := 'libtcc1.a');
+SQL
 ```
 
 ### 4) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
 
 This example stages shared build inputs once, compiles two symbols, and calls both SQL functions.
 
-```sql
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_include', include_path := 'third_party/tinycc/include');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_sysinclude', sysinclude_path := 'third_party/tinycc/include');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library_path', library_path := 'third_party/tinycc');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_option', option := '-O2');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_define', define_name := 'TCC_SHIFT', define_value := '3');
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'tcc_new_state');
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_include',
+  include_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_sysinclude',
+  sysinclude_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_library_path',
+  library_path := 'third_party/tinycc'
+);
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_option',
+  option := '-O2'
+);
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_define',
+  define_name := 'TCC_SHIFT',
+  define_value := '3'
+);
 
 SELECT ok, mode, code, detail
 FROM tcc_module(
@@ -181,6 +211,7 @@ FROM tcc_module(
   arg_types := ['i64']
 );
 SELECT tcc_times2(21) AS value;
+SQL
 ```
 
 ### 5) Example B: Fast Lane `quick_compile` (with include/library inputs)
@@ -188,7 +219,9 @@ SELECT tcc_times2(21) AS value;
 This example compiles and registers directly from one SQL call, including
 `include_path`, `library_path`, and `library`.
 
-```sql
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -203,6 +236,7 @@ double qpow(double x, double y){ return pow(x, y); }',
   library := 'm'
 );
 SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
+SQL
 ```
 
 ### 6) Example C: Libraries (`add_library`)
@@ -210,9 +244,16 @@ SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
 This example links `libm`, compiles a function that uses `pow`, then calls it.
 The required C header is included in the source unit.
 
-```sql
-SELECT ok, mode, code FROM tcc_module(mode := 'tcc_new_state');
-SELECT ok, mode, code FROM tcc_module(mode := 'add_library', library := 'm');
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tcc_new_state');
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_library',
+  library := 'm'
+);
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'add_source',
@@ -224,13 +265,19 @@ FROM tcc_module(mode := 'tinycc_bind', symbol := 'pwr', sql_name := 'pwr');
 SELECT ok, mode, code
 FROM tcc_module(mode := 'compile', return_type := 'f64', arg_types := ['f64', 'f64']);
 SELECT CAST(pwr(2.0, 5.0) AS BIGINT) AS value;
+SQL
 ```
 
 ### 7) Reset Session
 
-```sql
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'list');
-SELECT ok, mode, code FROM tcc_module(mode := 'config_reset');
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'list');
+SELECT ok, mode, code
+FROM tcc_module(mode := 'config_reset');
+SQL
 ```
 
 ### 8) CLI Benchmark Snippet

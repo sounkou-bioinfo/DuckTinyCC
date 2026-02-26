@@ -98,7 +98,9 @@ LOAD 'build/release/ducktinycc.duckdb_extension';
 
 ### 2) Session Configuration
 
-``` sql
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
 SELECT ok, mode, code, detail
 FROM tcc_module(
   mode := 'config_set',
@@ -110,31 +112,132 @@ FROM tcc_module(mode := 'config_get');
 
 SELECT ok, mode, code, detail
 FROM tcc_module(mode := 'list');
+SQL
 ```
+
+    ┌─────────┬────────────┬─────────┬─────────┐
+    │   ok    │    mode    │  code   │ detail  │
+    │ boolean │  varchar   │ varchar │ varchar │
+    ├─────────┼────────────┼─────────┼─────────┤
+    │ true    │ config_set │ OK      │ (empty) │
+    └─────────┴────────────┴─────────┴─────────┘
+    ┌─────────┬────────────┬─────────┬───────────────────────────────────────────────────────────────────────────────────────┐
+    │   ok    │    mode    │  code   │                                        detail                                         │
+    │ boolean │  varchar   │ varchar │                                        varchar                                        │
+    ├─────────┼────────────┼─────────┼───────────────────────────────────────────────────────────────────────────────────────┤
+    │ true    │ config_get │ OK      │ runtime=/root/DuckTinyCC/cmake_build/release/tinycc_build state_id=0 config_version=1 │
+    └─────────┴────────────┴─────────┴───────────────────────────────────────────────────────────────────────────────────────┘
+    ┌─────────┬─────────┬─────────┬───────────────────────────────────────────────────────────────┐
+    │   ok    │  mode   │  code   │                            detail                             │
+    │ boolean │ varchar │ varchar │                            varchar                            │
+    ├─────────┼─────────┼─────────┼───────────────────────────────────────────────────────────────┤
+    │ true    │ list    │ OK      │ registered=0 sources=0 headers=0 includes=0 libs=0 state_id=0 │
+    └─────────┴─────────┴─────────┴───────────────────────────────────────────────────────────────┘
 
 ### 3) System Paths and Library Probe Helpers
 
-``` sql
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
 SELECT kind, key, exists, value
 FROM tcc_system_paths()
 LIMIT 12;
 
 SELECT kind, key, exists, value, detail
 FROM tcc_library_probe(library := 'libtcc1.a');
+SQL
 ```
+
+    ┌──────────────┬──────────────┬─────────┬───────────────────────────────────────────────────────────────────┐
+    │     kind     │     key      │ exists  │                               value                               │
+    │   varchar    │   varchar    │ boolean │                              varchar                              │
+    ├──────────────┼──────────────┼─────────┼───────────────────────────────────────────────────────────────────┤
+    │ runtime      │ runtime_path │ true    │ /root/DuckTinyCC/cmake_build/release/tinycc_build                 │
+    │ include_path │ path         │ false   │ /root/DuckTinyCC/cmake_build/release/tinycc_build/include         │
+    │ include_path │ path         │ false   │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc/include │
+    │ library_path │ path         │ true    │ /root/DuckTinyCC/cmake_build/release/tinycc_build                 │
+    │ library_path │ path         │ true    │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib             │
+    │ library_path │ path         │ false   │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc         │
+    │ library_path │ path         │ true    │ /usr/lib                                                          │
+    │ library_path │ path         │ true    │ /usr/lib64                                                        │
+    │ library_path │ path         │ true    │ /usr/local/lib                                                    │
+    │ library_path │ path         │ true    │ /lib                                                              │
+    │ library_path │ path         │ true    │ /lib64                                                            │
+    │ library_path │ path         │ true    │ /lib32                                                            │
+    ├──────────────┴──────────────┴─────────┴───────────────────────────────────────────────────────────────────┤
+    │ 12 rows                                                                                         4 columns │
+    └───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+    ┌─────────────┬──────────────┬─────────┬─────────────────────────────────────────────────────────────┬──────────────────────────────────┐
+    │    kind     │     key      │ exists  │                            value                            │              detail              │
+    │   varchar   │   varchar    │ boolean │                           varchar                           │             varchar              │
+    ├─────────────┼──────────────┼─────────┼─────────────────────────────────────────────────────────────┼──────────────────────────────────┤
+    │ input       │ library      │ false   │ libtcc1.a                                                   │ library probe request            │
+    │ runtime     │ runtime_path │ true    │ /root/DuckTinyCC/cmake_build/release/tinycc_build           │ effective runtime path           │
+    │ search_path │ path         │ true    │ /root/DuckTinyCC/cmake_build/release/tinycc_build           │ searched path                    │
+    │ search_path │ path         │ true    │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib       │ searched path                    │
+    │ search_path │ path         │ false   │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc   │ searched path                    │
+    │ search_path │ path         │ true    │ /usr/lib                                                    │ searched path                    │
+    │ search_path │ path         │ true    │ /usr/lib64                                                  │ searched path                    │
+    │ search_path │ path         │ true    │ /usr/local/lib                                              │ searched path                    │
+    │ search_path │ path         │ true    │ /lib                                                        │ searched path                    │
+    │ search_path │ path         │ true    │ /lib64                                                      │ searched path                    │
+    │ search_path │ path         │ true    │ /lib32                                                      │ searched path                    │
+    │ search_path │ path         │ false   │ /usr/local/lib64                                            │ searched path                    │
+    │ search_path │ path         │ true    │ /usr/lib/x86_64-linux-gnu                                   │ searched path                    │
+    │ search_path │ path         │ false   │ /usr/lib/i386-linux-gnu                                     │ searched path                    │
+    │ search_path │ path         │ true    │ /lib/x86_64-linux-gnu                                       │ searched path                    │
+    │ search_path │ path         │ false   │ /lib32/x86_64-linux-gnu                                     │ searched path                    │
+    │ search_path │ path         │ false   │ /usr/lib/x86_64-linux-musl                                  │ searched path                    │
+    │ search_path │ path         │ false   │ /usr/lib/i386-linux-musl                                    │ searched path                    │
+    │ search_path │ path         │ false   │ /lib/x86_64-linux-musl                                      │ searched path                    │
+    │ search_path │ path         │ false   │ /lib32/x86_64-linux-musl                                    │ searched path                    │
+    │ search_path │ path         │ false   │ /usr/lib/amd64-linux-gnu                                    │ searched path                    │
+    │ search_path │ path         │ false   │ /usr/lib/aarch64-linux-gnu                                  │ searched path                    │
+    │ search_path │ path         │ true    │ /usr/lib/R/lib                                              │ searched path                    │
+    │ search_path │ path         │ true    │ /usr/lib/jvm/default-java/lib/server                        │ searched path                    │
+    │ candidate   │ libtcc1.a    │ true    │ /root/DuckTinyCC/cmake_build/release/tinycc_build/libtcc1.a │ resolved                         │
+    │ resolved    │ path         │ true    │ /root/DuckTinyCC/cmake_build/release/tinycc_build/libtcc1.a │ resolved library path            │
+    │ resolved    │ link_name    │ true    │ tcc1                                                        │ normalized tcc_add_library value │
+    ├─────────────┴──────────────┴─────────┴─────────────────────────────────────────────────────────────┴──────────────────────────────────┤
+    │ 27 rows                                                                                                                     5 columns │
+    └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ### 4) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
 
 This example stages shared build inputs once, compiles two symbols, and
 calls both SQL functions.
 
-``` sql
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'tcc_new_state');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_include', include_path := 'third_party/tinycc/include');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_sysinclude', sysinclude_path := 'third_party/tinycc/include');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_library_path', library_path := 'third_party/tinycc');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_option', option := '-O2');
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'add_define', define_name := 'TCC_SHIFT', define_value := '3');
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'tcc_new_state');
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_include',
+  include_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_sysinclude',
+  sysinclude_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_library_path',
+  library_path := 'third_party/tinycc'
+);
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_option',
+  option := '-O2'
+);
+SELECT ok, mode, code, detail
+FROM tcc_module(
+  mode := 'add_define',
+  define_name := 'TCC_SHIFT',
+  define_value := '3'
+);
 
 SELECT ok, mode, code, detail
 FROM tcc_module(
@@ -170,14 +273,102 @@ FROM tcc_module(
   arg_types := ['i64']
 );
 SELECT tcc_times2(21) AS value;
+SQL
 ```
+
+    ┌─────────┬───────────────┬─────────┬────────────┐
+    │   ok    │     mode      │  code   │   detail   │
+    │ boolean │    varchar    │ varchar │  varchar   │
+    ├─────────┼───────────────┼─────────┼────────────┤
+    │ true    │ tcc_new_state │ OK      │ state_id=1 │
+    └─────────┴───────────────┴─────────┴────────────┘
+    ┌─────────┬─────────────┬─────────┬────────────────────────────┐
+    │   ok    │    mode     │  code   │           detail           │
+    │ boolean │   varchar   │ varchar │          varchar           │
+    ├─────────┼─────────────┼─────────┼────────────────────────────┤
+    │ true    │ add_include │ OK      │ third_party/tinycc/include │
+    └─────────┴─────────────┴─────────┴────────────────────────────┘
+    ┌─────────┬────────────────┬─────────┬────────────────────────────┐
+    │   ok    │      mode      │  code   │           detail           │
+    │ boolean │    varchar     │ varchar │          varchar           │
+    ├─────────┼────────────────┼─────────┼────────────────────────────┤
+    │ true    │ add_sysinclude │ OK      │ third_party/tinycc/include │
+    └─────────┴────────────────┴─────────┴────────────────────────────┘
+    ┌─────────┬──────────────────┬─────────┬────────────────────┐
+    │   ok    │       mode       │  code   │       detail       │
+    │ boolean │     varchar      │ varchar │      varchar       │
+    ├─────────┼──────────────────┼─────────┼────────────────────┤
+    │ true    │ add_library_path │ OK      │ third_party/tinycc │
+    └─────────┴──────────────────┴─────────┴────────────────────┘
+    ┌─────────┬────────────┬─────────┬─────────┐
+    │   ok    │    mode    │  code   │ detail  │
+    │ boolean │  varchar   │ varchar │ varchar │
+    ├─────────┼────────────┼─────────┼─────────┤
+    │ true    │ add_option │ OK      │ -O2     │
+    └─────────┴────────────┴─────────┴─────────┘
+    ┌─────────┬────────────┬─────────┬───────────┐
+    │   ok    │    mode    │  code   │  detail   │
+    │ boolean │  varchar   │ varchar │  varchar  │
+    ├─────────┼────────────┼─────────┼───────────┤
+    │ true    │ add_define │ OK      │ TCC_SHIFT │
+    └─────────┴────────────┴─────────┴───────────┘
+    ┌─────────┬────────────┬─────────┬─────────────────┐
+    │   ok    │    mode    │  code   │     detail      │
+    │ boolean │  varchar   │ varchar │     varchar     │
+    ├─────────┼────────────┼─────────┼─────────────────┤
+    │ true    │ add_header │ OK      │ header appended │
+    └─────────┴────────────┴─────────┴─────────────────┘
+    ┌─────────┬────────────┬─────────┬─────────────────┐
+    │   ok    │    mode    │  code   │     detail      │
+    │ boolean │  varchar   │ varchar │     varchar     │
+    ├─────────┼────────────┼─────────┼─────────────────┤
+    │ true    │ add_source │ OK      │ source appended │
+    └─────────┴────────────┴─────────┴─────────────────┘
+    ┌─────────┬─────────────┬─────────┐
+    │   ok    │    mode     │  code   │
+    │ boolean │   varchar   │ varchar │
+    ├─────────┼─────────────┼─────────┤
+    │ true    │ tinycc_bind │ OK      │
+    └─────────┴─────────────┴─────────┘
+    ┌─────────┬────────────────┬─────────┐
+    │   ok    │      mode      │  code   │
+    │ boolean │    varchar     │ varchar │
+    ├─────────┼────────────────┼─────────┤
+    │ true    │ tinycc_compile │ OK      │
+    └─────────┴────────────────┴─────────┘
+    ┌───────┐
+    │ value │
+    │ int64 │
+    ├───────┤
+    │    42 │
+    └───────┘
+    ┌─────────┬─────────────┬─────────┐
+    │   ok    │    mode     │  code   │
+    │ boolean │   varchar   │ varchar │
+    ├─────────┼─────────────┼─────────┤
+    │ true    │ tinycc_bind │ OK      │
+    └─────────┴─────────────┴─────────┘
+    ┌─────────┬─────────┬─────────┐
+    │   ok    │  mode   │  code   │
+    │ boolean │ varchar │ varchar │
+    ├─────────┼─────────┼─────────┤
+    │ true    │ compile │ OK      │
+    └─────────┴─────────┴─────────┘
+    ┌───────┐
+    │ value │
+    │ int64 │
+    ├───────┤
+    │    42 │
+    └───────┘
 
 ### 5) Example B: Fast Lane `quick_compile` (with include/library inputs)
 
 This example compiles and registers directly from one SQL call,
 including `include_path`, `library_path`, and `library`.
 
-``` sql
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -192,16 +383,37 @@ double qpow(double x, double y){ return pow(x, y); }',
   library := 'm'
 );
 SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
+SQL
 ```
+
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    ┌───────┐
+    │ value │
+    │ int64 │
+    ├───────┤
+    │    32 │
+    └───────┘
 
 ### 6) Example C: Libraries (`add_library`)
 
 This example links `libm`, compiles a function that uses `pow`, then
 calls it. The required C header is included in the source unit.
 
-``` sql
-SELECT ok, mode, code FROM tcc_module(mode := 'tcc_new_state');
-SELECT ok, mode, code FROM tcc_module(mode := 'add_library', library := 'm');
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tcc_new_state');
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_library',
+  library := 'm'
+);
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'add_source',
@@ -213,14 +425,70 @@ FROM tcc_module(mode := 'tinycc_bind', symbol := 'pwr', sql_name := 'pwr');
 SELECT ok, mode, code
 FROM tcc_module(mode := 'compile', return_type := 'f64', arg_types := ['f64', 'f64']);
 SELECT CAST(pwr(2.0, 5.0) AS BIGINT) AS value;
+SQL
 ```
+
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ tcc_new_state │ OK      │
+    └─────────┴───────────────┴─────────┘
+    ┌─────────┬─────────────┬─────────┐
+    │   ok    │    mode     │  code   │
+    │ boolean │   varchar   │ varchar │
+    ├─────────┼─────────────┼─────────┤
+    │ true    │ add_library │ OK      │
+    └─────────┴─────────────┴─────────┘
+    ┌─────────┬────────────┬─────────┐
+    │   ok    │    mode    │  code   │
+    │ boolean │  varchar   │ varchar │
+    ├─────────┼────────────┼─────────┤
+    │ true    │ add_source │ OK      │
+    └─────────┴────────────┴─────────┘
+    ┌─────────┬─────────────┬─────────┐
+    │   ok    │    mode     │  code   │
+    │ boolean │   varchar   │ varchar │
+    ├─────────┼─────────────┼─────────┤
+    │ true    │ tinycc_bind │ OK      │
+    └─────────┴─────────────┴─────────┘
+    ┌─────────┬─────────┬─────────┐
+    │   ok    │  mode   │  code   │
+    │ boolean │ varchar │ varchar │
+    ├─────────┼─────────┼─────────┤
+    │ true    │ compile │ OK      │
+    └─────────┴─────────┴─────────┘
+    ┌───────┐
+    │ value │
+    │ int64 │
+    ├───────┤
+    │    32 │
+    └───────┘
 
 ### 7) Reset Session
 
-``` sql
-SELECT ok, mode, code, detail FROM tcc_module(mode := 'list');
-SELECT ok, mode, code FROM tcc_module(mode := 'config_reset');
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'list');
+SELECT ok, mode, code
+FROM tcc_module(mode := 'config_reset');
+SQL
 ```
+
+    ┌─────────┬─────────┬─────────┬───────────────────────────────────────────────────────────────┐
+    │   ok    │  mode   │  code   │                            detail                             │
+    │ boolean │ varchar │ varchar │                            varchar                            │
+    ├─────────┼─────────┼─────────┼───────────────────────────────────────────────────────────────┤
+    │ true    │ list    │ OK      │ registered=0 sources=0 headers=0 includes=0 libs=0 state_id=0 │
+    └─────────┴─────────┴─────────┴───────────────────────────────────────────────────────────────┘
+    ┌─────────┬──────────────┬─────────┐
+    │   ok    │     mode     │  code   │
+    │ boolean │   varchar    │ varchar │
+    ├─────────┼──────────────┼─────────┤
+    │ true    │ config_reset │ OK      │
+    └─────────┴──────────────┴─────────┘
 
 ### 8) CLI Benchmark Snippet
 
@@ -246,42 +514,42 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
 
-    Run Time (s): real 0.000 user 0.000908 sys 0.000303
+    Run Time (s): real 0.000 user 0.000385 sys 0.000000
     ┌─────────┬───────────────┬─────────┐
     │   ok    │     mode      │  code   │
     │ boolean │    varchar    │ varchar │
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.001 user 0.001182 sys 0.000033
+    Run Time (s): real 0.001 user 0.001585 sys 0.000000
     ┌─────────────────┐
     │ add_i32(20, 22) │
     │      int32      │
     ├─────────────────┤
     │              42 │
     └─────────────────┘
-    Run Time (s): real 0.001 user 0.000606 sys 0.000000
+    Run Time (s): real 0.000 user 0.000254 sys 0.000000
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.013 user 0.013558 sys 0.000000
+    Run Time (s): real 0.008 user 0.007869 sys 0.000000
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.009 user 0.008444 sys 0.000000
+    Run Time (s): real 0.008 user 0.016084 sys 0.000000
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.008 user 0.007025 sys 0.001461
+    Run Time (s): real 0.008 user 0.008182 sys 0.000000
 
 ### 9) Cleanup
 
