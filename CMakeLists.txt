@@ -56,7 +56,16 @@ target_include_directories(${EXTENSION_NAME} PRIVATE third_party/tinycc)
 if (NOT DUCKDB_WASM_EXTENSION)
     include(ExternalProject)
     # TinyCC uses GNU Makefiles; force make even when outer build uses Ninja.
-    find_program(MAKE_COMMAND NAMES gmake make REQUIRED)
+    if (MINGW)
+        # Prefer make from the active MinGW toolchain bin dir (avoids unrelated gmake on PATH).
+        get_filename_component(C_COMPILER_BIN_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
+        find_program(MAKE_COMMAND NAMES make gmake HINTS "${C_COMPILER_BIN_DIR}")
+    else()
+        find_program(MAKE_COMMAND NAMES gmake make REQUIRED)
+    endif()
+    if (NOT MAKE_COMMAND)
+        message(FATAL_ERROR "GNU make was not found for TinyCC build")
+    endif()
 
     set(TINYCC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinycc")
     set(TINYCC_BUILD_DIR "${CMAKE_BINARY_DIR}/tinycc_build")
@@ -83,6 +92,10 @@ if (NOT DUCKDB_WASM_EXTENSION)
         list(APPEND TINYCC_CONFIGURE_ARGS --config-musl --config-bcheck=no)
     endif()
     set(TINYCC_MAKE_ARGS libtcc.a libtcc1.a)
+    if (MINGW)
+        # Avoid Windows cmd quoting issues in TinyCC's DEF_GITHASH for tcc.o rule.
+        list(PREPEND TINYCC_MAKE_ARGS GITHASH=no)
+    endif()
     if (APPLE)
         # Equivalent effect to stripping -flat_namespace from upstream Makefile.
         list(PREPEND TINYCC_MAKE_ARGS CC_NAME=tcc)
