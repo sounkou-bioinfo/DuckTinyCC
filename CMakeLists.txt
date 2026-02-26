@@ -60,19 +60,39 @@ if (NOT DUCKDB_WASM_EXTENSION)
 
     set(TINYCC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinycc")
     set(TINYCC_BUILD_DIR "${CMAKE_BINARY_DIR}/tinycc_build")
+    set(TINYCC_CONFIGURE_BIN "${TINYCC_SRC_DIR}/configure")
+    if (WIN32)
+        if (MSVC)
+            message(FATAL_ERROR "TinyCC build requires MinGW/MSYS on Windows; MSVC is not supported.")
+        endif()
+        # On Windows, run TinyCC's POSIX configure script via sh (Rtools/MSYS).
+        find_program(SH_COMMAND NAMES sh bash REQUIRED)
+        set(TINYCC_CONFIGURE_BIN "${SH_COMMAND}" "${TINYCC_SRC_DIR}/configure")
+    endif()
     set(TINYCC_CONFIGURE_ARGS
         --source-path=${TINYCC_SRC_DIR}
-        --extra-cflags=-fPIC
     )
+    if (NOT WIN32)
+        list(APPEND TINYCC_CONFIGURE_ARGS --extra-cflags=-fPIC)
+    endif()
+    if (MINGW)
+        # Match TinyCC's documented Windows configure mode.
+        list(APPEND TINYCC_CONFIGURE_ARGS --config-mingw32)
+    endif()
     if("$ENV{DUCKDB_PLATFORM}" MATCHES "musl")
         list(APPEND TINYCC_CONFIGURE_ARGS --config-musl --config-bcheck=no)
+    endif()
+    set(TINYCC_MAKE_ARGS libtcc.a libtcc1.a)
+    if (APPLE)
+        # Equivalent effect to stripping -flat_namespace from upstream Makefile.
+        list(PREPEND TINYCC_MAKE_ARGS CC_NAME=tcc)
     endif()
     ExternalProject_Add(tinycc_build
         SOURCE_DIR        "${TINYCC_SRC_DIR}"
         BINARY_DIR        "${TINYCC_BUILD_DIR}"
         BUILD_IN_SOURCE   FALSE
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "CC=${CMAKE_C_COMPILER}" "${TINYCC_SRC_DIR}/configure" ${TINYCC_CONFIGURE_ARGS}
-        BUILD_COMMAND     ${CMAKE_COMMAND} -E env "CC=${CMAKE_C_COMPILER}" ${MAKE_COMMAND} libtcc.a libtcc1.a
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "CC=${CMAKE_C_COMPILER}" ${TINYCC_CONFIGURE_BIN} ${TINYCC_CONFIGURE_ARGS}
+        BUILD_COMMAND     ${CMAKE_COMMAND} -E env "CC=${CMAKE_C_COMPILER}" ${MAKE_COMMAND} ${TINYCC_MAKE_ARGS}
         INSTALL_COMMAND   ""
         BUILD_BYPRODUCTS  "${TINYCC_BUILD_DIR}/libtcc.a" "${TINYCC_BUILD_DIR}/libtcc1.a"
         LOG_CONFIGURE     TRUE
