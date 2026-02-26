@@ -84,6 +84,24 @@ false	nonsense	E_BAD_MODE
 
 query TTT
 SELECT ok, mode, code
+FROM tcc_module(mode := 'new_state');
+----
+false	new_state	E_BAD_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'bind');
+----
+false	bind	E_BAD_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tinycc_compile');
+----
+false	tinycc_compile	E_BAD_MODE
+
+query TTT
+SELECT ok, mode, code
 FROM tcc_module(mode := 'tcc_new_state');
 ----
 true	tcc_new_state	OK
@@ -109,9 +127,9 @@ true	tinycc_bind	OK
 
 query TTT
 SELECT ok, mode, code
-FROM tcc_module(mode := 'tinycc_compile', return_type := 'i64', arg_types := ['i64']);
+FROM tcc_module(mode := 'compile', return_type := 'i64', arg_types := ['i64']);
 ----
-true	tinycc_compile	OK
+true	compile	OK
 
 query I
 SELECT add2(40);

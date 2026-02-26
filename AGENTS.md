@@ -33,9 +33,9 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Extension artifact/name: `ducktinycc`
 - Public SQL entrypoint: `tcc_module(...)`
 - Implemented modes:
-  - Session/config: `config_get`, `config_set`, `config_reset`, `list`, `tcc_new_state` (`new_state` alias)
-  - Build staging: `add_include`, `add_sysinclude`, `add_library_path`, `add_library`, `add_option`, `add_define`, `add_header`, `add_source`, `tinycc_bind` (`bind` alias)
-  - Compile/codegen registration: `compile`, `tinycc_compile`, `quick_compile`
+  - Session/config: `config_get`, `config_set`, `config_reset`, `list`, `tcc_new_state`
+  - Build staging: `add_include`, `add_sysinclude`, `add_library_path`, `add_library`, `add_option`, `add_define`, `add_header`, `add_source`, `tinycc_bind`
+  - Compile/codegen registration: `compile`, `quick_compile`
   - Discovery helpers (separate table functions): `tcc_system_paths(...)`, `tcc_library_probe(...)`
 - Wrapper/runtime model (Rtinycc-style API-mode codegen):
   - DuckTinyCC generates C wrappers during compile that unpack typed args, call target C symbols, and re-pack result for DuckDB scalar UDF execution.

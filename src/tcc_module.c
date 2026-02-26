@@ -1522,8 +1522,6 @@ static void tcc_bind_read_named_arg_types(duckdb_bind_info info, char **out_csv)
 
 static void tcc_module_bind(duckdb_bind_info info) {
 	tcc_module_bind_data_t *bind;
-	tcc_module_state_t *state;
-	const char *runtime_path;
 	duckdb_logical_type varchar_type;
 	duckdb_logical_type bool_type;
 
@@ -1552,9 +1550,6 @@ static void tcc_module_bind(duckdb_bind_info info) {
 	tcc_bind_read_named_varchar(info, "header", &bind->header);
 	tcc_bind_read_named_varchar(info, "define_name", &bind->define_name);
 	tcc_bind_read_named_varchar(info, "define_value", &bind->define_value);
-	state = (tcc_module_state_t *)duckdb_bind_get_extra_info(info);
-	runtime_path = state ? tcc_session_runtime_path(state, bind->runtime_path) : NULL;
-	(void)runtime_path;
 
 	bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
 	varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
@@ -2012,7 +2007,7 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		tcc_session_clear_build_state(&state->session);
 		tcc_write_row(output, true, bind->mode, "config", "OK", "session reset", "runtime/build state cleared",
 		              NULL, NULL, NULL, "connection");
-	} else if (strcmp(bind->mode, "tcc_new_state") == 0 || strcmp(bind->mode, "new_state") == 0) {
+	} else if (strcmp(bind->mode, "tcc_new_state") == 0) {
 		char detail[128];
 		tcc_session_clear_build_state(&state->session);
 		snprintf(detail, sizeof(detail), "state_id=%llu", (unsigned long long)state->session.state_id);
@@ -2097,7 +2092,7 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "define_name is required", NULL, NULL,
 			              NULL, NULL, "connection");
 		}
-	} else if (strcmp(bind->mode, "tinycc_bind") == 0 || strcmp(bind->mode, "bind") == 0) {
+	} else if (strcmp(bind->mode, "tinycc_bind") == 0) {
 		if (!bind->symbol || bind->symbol[0] == '\0') {
 			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required", NULL,
 			              bind->sql_name, bind->symbol, NULL, "connection");
@@ -2119,8 +2114,7 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		         (unsigned long long)state->session.libraries.count, (unsigned long long)state->session.state_id);
 		tcc_write_row(output, true, bind->mode, "registry", "OK", "session summary", detail, NULL, NULL, NULL,
 		              "connection");
-		} else if (strcmp(bind->mode, "compile") == 0 || strcmp(bind->mode, "tinycc_compile") == 0 ||
-		           strcmp(bind->mode, "quick_compile") == 0) {
+		} else if (strcmp(bind->mode, "compile") == 0 || strcmp(bind->mode, "quick_compile") == 0) {
 #ifdef DUCKTINYCC_WASM_UNSUPPORTED
 			tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
 			              "TinyCC compile codegen path not supported for WASM build", NULL, bind->sql_name,

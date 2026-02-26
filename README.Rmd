@@ -49,7 +49,7 @@ context columns.
 
 | Mode | Purpose | Notes |
 |---|---|---|
-| `compile`, `tinycc_compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name` |
+| `compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name` |
 | `quick_compile` | One-shot fast lane compile + register | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types`; can also pass per-call `include_path`, `sysinclude_path`, `library_path`, `library`, `option`, `define_*`, `header` |
 
 ### Discovery Helpers
@@ -61,8 +61,7 @@ context columns.
 
 ## Supported Types
 
-Type metadata is explicit for `compile`, `tinycc_compile`, and
-`quick_compile`:
+Type metadata is explicit for `compile` and `quick_compile`:
 
 - `return_type := ...` is required
 - `arg_types := [...]` is required (use `[]` for zero arguments)
@@ -82,7 +81,7 @@ Additional limits and behavior:
 
 ## How It Works (Current)
 
-- `compile`, `tinycc_compile`, and `quick_compile` generate C wrapper code around the target `symbol`.
+- `compile` and `quick_compile` generate C wrapper code around the target `symbol`.
 - Generated wrappers use a typed row ABI (`void **args`, `out_value`, `out_is_null`), unpack inputs, call the C symbol, and write back the result.
 - A generated module init function calls `ducktinycc_register_signature(...)` to register the SQL scalar UDF in the active DuckDB connection.
 - TinyCC compile + relocate is fully in-memory (no shared library file is emitted).
@@ -159,7 +158,7 @@ FROM tcc_library_probe(library := 'libtcc1.a');
 SQL
 ```
 
-### 4) Example A: Staged Build + `tinycc_bind` + `tinycc_compile`
+### 4) Example A: Staged Build + `tinycc_bind` + `compile`
 
 This example stages shared build inputs once, compiles two symbols, and calls both SQL functions.
 
@@ -215,7 +214,7 @@ SELECT ok, mode, code
 FROM tcc_module(mode := 'tinycc_bind', symbol := 'tcc_add_shift', sql_name := 'tcc_add_shift');
 SELECT ok, mode, code
 FROM tcc_module(
-  mode := 'tinycc_compile',
+  mode := 'compile',
   return_type := 'i64',
   arg_types := ['i64']
 );
