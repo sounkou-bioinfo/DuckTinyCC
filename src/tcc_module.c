@@ -1879,47 +1879,47 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 		while (len > 0 && isspace((unsigned char)token[len - 1])) {
 			token[--len] = '\0';
 		}
-			if (len == 0) {
-				duckdb_free(args_copy);
-				if (arg_types) {
-					duckdb_free(arg_types);
-				}
-				tcc_set_error(error_buf, "arg_types contains empty token");
-				return false;
+		if (len == 0) {
+			duckdb_free(args_copy);
+			if (arg_types) {
+				duckdb_free(arg_types);
 			}
-			if (argc >= cap) {
-				int new_cap = cap == 0 ? 8 : cap * 2;
-				tcc_ffi_type_t *new_types = (tcc_ffi_type_t *)duckdb_malloc(sizeof(tcc_ffi_type_t) * (size_t)new_cap);
-				if (!new_types) {
-					duckdb_free(args_copy);
-					if (arg_types) {
-						duckdb_free(arg_types);
-					}
-					tcc_set_error(error_buf, "out of memory");
-					return false;
-				}
-				if (arg_types && argc > 0) {
-					memcpy(new_types, arg_types, sizeof(tcc_ffi_type_t) * (size_t)argc);
-					duckdb_free(arg_types);
-				}
-				arg_types = new_types;
-				cap = new_cap;
-			}
-			if (!tcc_parse_type_token(token, false, &arg_types[argc])) {
-				duckdb_free(args_copy);
-				if (arg_types) {
-					duckdb_free(arg_types);
-				}
-				tcc_set_error(error_buf, "arg_types contains unsupported type token");
-				return false;
-			}
-			argc++;
+			tcc_set_error(error_buf, "arg_types contains empty token");
+			return false;
 		}
-		duckdb_free(args_copy);
-		*out_return_type = ret_type;
-		*out_arg_types = arg_types;
-		*out_arg_count = argc;
-		return true;
+		if (argc >= cap) {
+			int new_cap = cap == 0 ? 8 : cap * 2;
+			tcc_ffi_type_t *new_types = (tcc_ffi_type_t *)duckdb_malloc(sizeof(tcc_ffi_type_t) * (size_t)new_cap);
+			if (!new_types) {
+				duckdb_free(args_copy);
+				if (arg_types) {
+					duckdb_free(arg_types);
+				}
+				tcc_set_error(error_buf, "out of memory");
+				return false;
+			}
+			if (arg_types && argc > 0) {
+				memcpy(new_types, arg_types, sizeof(tcc_ffi_type_t) * (size_t)argc);
+				duckdb_free(arg_types);
+			}
+			arg_types = new_types;
+			cap = new_cap;
+		}
+		if (!tcc_parse_type_token(token, false, &arg_types[argc])) {
+			duckdb_free(args_copy);
+			if (arg_types) {
+				duckdb_free(arg_types);
+			}
+			tcc_set_error(error_buf, "arg_types contains unsupported type token");
+			return false;
+		}
+		argc++;
+	}
+	duckdb_free(args_copy);
+	*out_return_type = ret_type;
+	*out_arg_types = arg_types;
+	*out_arg_count = argc;
+	return true;
 }
 
 static const char *tcc_effective_symbol(tcc_module_state_t *state, tcc_module_bind_data_t *bind) {
