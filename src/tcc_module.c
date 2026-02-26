@@ -2372,13 +2372,13 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 				if (tcc_compile_and_load_codegen_module(runtime_path, state, bind, sql_name, target_symbol, &artifact, &err,
 				                                        module_symbol, sizeof(module_symbol)) != 0) {
 					if (strstr(err.message, "return_type") || strstr(err.message, "arg_types")) {
-					phase = "bind";
-					code = "E_BAD_SIGNATURE";
-					message = "invalid return_type/arg_types";
-				} else if (strstr(err.message, "failed to generate codegen wrapper") || strstr(err.message, "out of memory")) {
-					phase = "codegen";
-					code = "E_CODEGEN_FAILED";
-					message = "ffi codegen failed";
+						phase = "bind";
+						code = "E_BAD_SIGNATURE";
+						message = "invalid return_type/arg_types";
+					} else if (strstr(err.message, "failed to generate codegen wrapper") || strstr(err.message, "out of memory")) {
+						phase = "codegen";
+						code = "E_CODEGEN_FAILED";
+						message = "ffi codegen failed";
 				} else if (strstr(err.message, "no persistent extension connection")) {
 					phase = "load";
 					code = "E_NO_CONNECTION";
