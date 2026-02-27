@@ -70,8 +70,8 @@ Current executable SQL registration support:
 
 | Signature Piece | Accepted Tokens | DuckDB Type |
 |---|---|---|
-| `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring` | `BIGINT` for `void`; otherwise matching scalar type |
-| each `arg_types` element | `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring` | matching scalar type |
+| `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes` | `BIGINT` for `void`; otherwise matching scalar type |
+| each `arg_types` element | `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes` | matching scalar type |
 
 Additional limits and behavior:
 
@@ -80,6 +80,7 @@ Additional limits and behavior:
 - NULL handling: NULL-in/NULL-out
 - `void` return registers as a SQL function that emits `NULL` values
 - `varchar`/`cstring` bridge to C `const char *`; returned `NULL` pointers produce SQL `NULL`
+- `blob`/`buffer` bridge to C `ducktinycc_blob_t { const void *ptr; uint64_t len }`; returned `ptr == NULL` produces SQL `NULL`
 
 ## How It Works (Current)
 
@@ -91,12 +92,14 @@ Additional limits and behavior:
 - Host symbols injected into each TinyCC state are currently fixed: `duckdb_ext_api` and `ducktinycc_register_signature`.
 - DuckDB still owns all vectors/buffers; wrappers operate on borrowed chunk memory and should not retain pointers past the call.
 - VARCHAR inputs are read from DuckDB `duckdb_string_t` vectors and passed to wrappers as C `const char *`.
+- BLOB inputs are presented as `ducktinycc_blob_t` views over DuckDB buffers.
 
 ## Memory Ownership and Lifecycle
 
 - Input argument memory is borrowed from DuckDB vectors for the duration of a scalar callback only.
 - Output memory is DuckDB-managed; wrappers write directly into DuckDB output buffers.
 - VARCHAR outputs are copied into DuckDB-owned storage with `duckdb_vector_assign_string_element`.
+- BLOB outputs are copied into DuckDB-owned storage with `duckdb_vector_assign_string_element_len`.
 - Host-side marshalling scratch buffers (`arg_ptrs`, column pointer arrays) are allocated with `duckdb_malloc` and freed before callback return.
 - Compiled code and symbols live inside each TinyCC relocated state (`TCCState`) and are released when that artifact is destroyed.
 - `config_reset` and `tcc_new_state` clear staged build/session inputs, but do not remove already registered SQL UDF catalog entries.
