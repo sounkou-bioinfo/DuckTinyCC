@@ -8199,10 +8199,8 @@ static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t
 			tcc_set_error(error_buf, "struct field type token is unsupported");
 			goto fail;
 		}
-		if (field_type == TCC_FFI_VOID || field_type == TCC_FFI_VARCHAR || field_type == TCC_FFI_BLOB ||
-		    field_type == TCC_FFI_UNION) {
-			tcc_set_error(error_buf,
-			              "struct fields currently support scalar/list/array/struct/map/ptr tokens (no void/varchar/blob/union)");
+		if (field_type == TCC_FFI_VOID) {
+			tcc_set_error(error_buf, "struct fields cannot use void");
 			goto fail;
 		}
 		field_size = tcc_ffi_type_size(field_type);
@@ -9097,7 +9095,7 @@ static void tcc_codegen_classify_error_message(const char *error_message, const 
 		*message = "invalid wrapper_mode";
 	} else if (strstr(error_message, "return_type") || strstr(error_message, "arg_types") ||
 	           strstr(error_message, "struct token") || strstr(error_message, "map token") ||
-	           strstr(error_message, "fixed-width scalar tokens only") || strstr(error_message, "union tokens are parsed")) {
+	           strstr(error_message, "fixed-width scalar tokens only")) {
 		*phase = "bind";
 		*code = "E_BAD_SIGNATURE";
 		*message = "invalid return_type/arg_types";
@@ -10366,8 +10364,7 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 					message = "invalid wrapper_mode";
 				} else if (strstr(err.message, "return_type") || strstr(err.message, "arg_types") ||
 				           strstr(err.message, "struct token") || strstr(err.message, "map token") ||
-				           strstr(err.message, "fixed-width scalar tokens only") ||
-				           strstr(err.message, "union tokens are parsed")) {
+				           strstr(err.message, "fixed-width scalar tokens only")) {
 					phase = "bind";
 					code = "E_BAD_SIGNATURE";
 					message = "invalid helper signature";

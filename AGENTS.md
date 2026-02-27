@@ -59,7 +59,10 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - legacy list/array tokens (`list_i64`, `i64[]`, `i64[3]`) are still accepted.
   - descriptor semantics for list/map/array keep `ptr` as row-sliced base with `offset` retained for validity/global indexing (matching existing helper behavior).
 - Validation:
-  - `make debug`, `make release`, `make test_debug`, and `make test_release` pass.
+  - `make debug` and `make release` pass.
+  - With `TARGET_DUCKDB_VERSION=v1.4.3`, extension loading currently requires ABI-mode/runtime matching:
+    - stable ABI (`C_STRUCT`) is capped by current DuckDB loader policy (`v1.2.0` and lower),
+    - unstable ABI (`USE_UNSTABLE_C_API=1`) requires an exact DuckDB runtime version match (`v1.4.3`).
 
 ## Working Rules for This Repo
 - API is intentionally evolving; document and implement the current surface, not backward-compatibility shims.

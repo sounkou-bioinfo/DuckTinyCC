@@ -1520,7 +1520,7 @@ FROM tcc_module(
   arg_types := ['struct<a:varchar>']
 );
 ----
-false	quick_compile	E_BAD_SIGNATURE
+true	quick_compile	OK
 
 query TTT
 SELECT ok, mode, code

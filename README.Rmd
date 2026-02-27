@@ -107,8 +107,7 @@ Additional limits and behavior:
 - struct arguments/returns use `ducktinycc_struct_t { const void *const *field_ptrs; const uint64_t *const *field_validity; uint64_t field_count; uint64_t offset }`
 - map arguments/returns use `ducktinycc_map_t { key_ptr, key_validity, value_ptr, value_validity, offset, len }`
 - `i64[]` means variable-length `LIST`; `i64[3]` means fixed-size `ARRAY`
-- current `struct<...>` and `map<...>` members support fixed-width scalar families only (`bool/i8/u8/i16/u16/i32/u32/i64/u64/ptr/f32/f64/uuid/date/time/timestamp/interval/decimal`)
-- `union<name:type;...>` tokens are parsed but SQL runtime marshalling is not enabled yet (currently returns `E_BAD_SIGNATURE`)
+- `struct<...>`, `map<...>`, and `union<...>` members are recursively typed and can include nested composites and string/blob tokens
 - `struct<...>` and `map<...>` use `;` separators in tokens to avoid ambiguity inside `arg_types := [...]`
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
 ## Get Started 
@@ -167,7 +166,8 @@ SQL
 
 - Host symbol registration mode: feasible and aligned with Rtinycc-style embedding; prefer an allow-listed registry (name -> host address) over raw SQL-provided addresses.
 - Arrow to reduce marshalling: not used directly; batch wrappers already consume DuckDB vectors column-wise and avoid per-row host-wrapper crossings.
-- DuckDB nested types: `LIST`, `ARRAY`, `STRUCT`, and `MAP` are first-class SQL argument/return tokens with C descriptors; `UNION` tokens are parsed but runtime-marshalling is still blocked on C API vector access; nested/non-fixed-width members remain future work.
+- DuckDB nested types: `LIST`, `ARRAY`, `STRUCT`, `MAP`, and `UNION` are first-class SQL argument/return tokens with recursive C descriptors and recursive bridge marshalling.
+- Union bridge note: DuckDB C API exposes union logical/value APIs, but no dedicated `union_vector_*` helpers; bridge code uses tag-buffer + member child vectors.
 - Host helper ABI: wrappers now expose typed/bounds-checked buffer helpers (`ducktinycc_read_*`, `ducktinycc_write_*`, `ducktinycc_read_bytes`, `ducktinycc_write_bytes`, `ducktinycc_span_fits`) in addition to list/array/struct/map descriptor helpers.
 - SQL pointer helpers: `tcc_alloc`, `tcc_free_ptr`, `tcc_dataptr`, `tcc_ptr_size`, `tcc_ptr_add`, typed `tcc_read_*`/`tcc_write_*`, and `tcc_read_bytes`/`tcc_write_bytes` are registered at extension load.
 - Pointer representation: SQL uses `UBIGINT` handles backed by a per-database in-memory pointer registry.
