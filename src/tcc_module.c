@@ -70,6 +70,8 @@ typedef enum {
 	TCC_FFI_TIMESTAMP = 17,
 	TCC_FFI_INTERVAL = 18,
 	TCC_FFI_DECIMAL = 19,
+	TCC_FFI_STRUCT = 20,
+	TCC_FFI_MAP = 21,
 	TCC_FFI_LIST_BOOL = 64,
 	TCC_FFI_LIST_I8 = 65,
 	TCC_FFI_LIST_U8 = 66,
@@ -154,6 +156,22 @@ typedef struct {
 	uint64_t len;
 } ducktinycc_array_t;
 
+typedef struct {
+	const void *const *field_ptrs;
+	const uint64_t *const *field_validity;
+	uint64_t field_count;
+	uint64_t offset;
+} ducktinycc_struct_t;
+
+typedef struct {
+	const void *key_ptr;
+	const uint64_t *key_validity;
+	const void *value_ptr;
+	const uint64_t *value_validity;
+	uint64_t offset;
+	uint64_t len;
+} ducktinycc_map_t;
+
 typedef enum {
 	TCC_WRAPPER_MODE_ROW = 0,
 	TCC_WRAPPER_MODE_BATCH = 1
@@ -221,6 +239,20 @@ typedef struct {
 } tcc_error_buffer_t;
 
 typedef struct {
+	int field_count;
+	char **field_names;
+	tcc_ffi_type_t *field_types;
+	size_t *field_sizes;
+} tcc_ffi_struct_meta_t;
+
+typedef struct {
+	tcc_ffi_type_t key_type;
+	tcc_ffi_type_t value_type;
+	size_t key_size;
+	size_t value_size;
+} tcc_ffi_map_meta_t;
+
+typedef struct {
 	tcc_wrapper_mode_t wrapper_mode;
 	tcc_host_row_wrapper_fn_t row_wrapper;
 	tcc_host_batch_wrapper_fn_t batch_wrapper;
@@ -230,6 +262,10 @@ typedef struct {
 	size_t *arg_sizes;
 	size_t return_array_size;
 	size_t *arg_array_sizes;
+	tcc_ffi_struct_meta_t return_struct_meta;
+	tcc_ffi_map_meta_t return_map_meta;
+	tcc_ffi_struct_meta_t *arg_struct_metas;
+	tcc_ffi_map_meta_t *arg_map_metas;
 } tcc_host_sig_ctx_t;
 
 typedef struct {
@@ -256,17 +292,26 @@ typedef struct {
 
 static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
 	                                size_t *out_return_array_size, tcc_ffi_type_t **out_arg_types,
-	                                size_t **out_arg_array_sizes, int *out_arg_count, tcc_error_buffer_t *error_buf);
+	                                size_t **out_arg_array_sizes, tcc_ffi_struct_meta_t *out_return_struct_meta,
+	                                tcc_ffi_map_meta_t *out_return_map_meta,
+	                                tcc_ffi_struct_meta_t **out_arg_struct_metas,
+	                                tcc_ffi_map_meta_t **out_arg_map_metas, int *out_arg_count,
+	                                tcc_error_buffer_t *error_buf);
 static bool tcc_equals_ci(const char *a, const char *b);
 static bool tcc_parse_wrapper_mode(const char *wrapper_mode, tcc_wrapper_mode_t *out_mode,
                                    tcc_error_buffer_t *error_buf);
-static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type, size_t array_size);
+static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type, size_t array_size,
+                                                             const tcc_ffi_struct_meta_t *struct_meta,
+                                                             const tcc_ffi_map_meta_t *map_meta);
 static bool tcc_ffi_type_is_list(tcc_ffi_type_t type);
 static bool tcc_ffi_list_child_type(tcc_ffi_type_t list_type, tcc_ffi_type_t *out_child);
 static bool tcc_ffi_list_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type_t *out_list_type);
 static bool tcc_ffi_type_is_array(tcc_ffi_type_t type);
 static bool tcc_ffi_array_child_type(tcc_ffi_type_t array_type, tcc_ffi_type_t *out_child);
 static bool tcc_ffi_array_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type_t *out_array_type);
+static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type);
+static void tcc_struct_meta_destroy(tcc_ffi_struct_meta_t *meta);
+static void tcc_struct_meta_array_destroy(tcc_ffi_struct_meta_t *metas, int count);
 
 static char *tcc_strdup(const char *value) {
 	size_t len;
@@ -1067,6 +1112,13 @@ static void tcc_host_sig_ctx_destroy(void *ptr) {
 	if (ctx->arg_array_sizes) {
 		duckdb_free(ctx->arg_array_sizes);
 	}
+	if (ctx->arg_struct_metas && ctx->arg_count > 0) {
+		tcc_struct_meta_array_destroy(ctx->arg_struct_metas, ctx->arg_count);
+	}
+	if (ctx->arg_map_metas) {
+		duckdb_free(ctx->arg_map_metas);
+	}
+	tcc_struct_meta_destroy(&ctx->return_struct_meta);
 	duckdb_free(ctx);
 }
 
@@ -1093,6 +1145,67 @@ static bool tcc_ffi_type_is_list(tcc_ffi_type_t type) {
 	default:
 		return false;
 	}
+}
+
+static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type) {
+	switch (type) {
+	case TCC_FFI_BOOL:
+	case TCC_FFI_I8:
+	case TCC_FFI_U8:
+	case TCC_FFI_I16:
+	case TCC_FFI_U16:
+	case TCC_FFI_I32:
+	case TCC_FFI_U32:
+	case TCC_FFI_I64:
+	case TCC_FFI_U64:
+	case TCC_FFI_F32:
+	case TCC_FFI_F64:
+	case TCC_FFI_UUID:
+	case TCC_FFI_DATE:
+	case TCC_FFI_TIME:
+	case TCC_FFI_TIMESTAMP:
+	case TCC_FFI_INTERVAL:
+	case TCC_FFI_DECIMAL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void tcc_struct_meta_destroy(tcc_ffi_struct_meta_t *meta) {
+	int i;
+	if (!meta) {
+		return;
+	}
+	if (meta->field_names) {
+		for (i = 0; i < meta->field_count; i++) {
+			if (meta->field_names[i]) {
+				duckdb_free(meta->field_names[i]);
+			}
+		}
+		duckdb_free(meta->field_names);
+	}
+	if (meta->field_types) {
+		duckdb_free(meta->field_types);
+	}
+	if (meta->field_sizes) {
+		duckdb_free(meta->field_sizes);
+	}
+	memset(meta, 0, sizeof(*meta));
+}
+
+static void tcc_struct_meta_array_destroy(tcc_ffi_struct_meta_t *metas, int count) {
+	int i;
+	if (!metas || count <= 0) {
+		if (metas) {
+			duckdb_free(metas);
+		}
+		return;
+	}
+	for (i = 0; i < count; i++) {
+		tcc_struct_meta_destroy(&metas[i]);
+	}
+	duckdb_free(metas);
 }
 
 static bool tcc_ffi_list_child_type(tcc_ffi_type_t list_type, tcc_ffi_type_t *out_child) {
@@ -1240,6 +1353,14 @@ static bool tcc_ffi_type_is_array(tcc_ffi_type_t type) {
 	default:
 		return false;
 	}
+}
+
+static bool tcc_ffi_type_is_struct(tcc_ffi_type_t type) {
+	return type == TCC_FFI_STRUCT;
+}
+
+static bool tcc_ffi_type_is_map(tcc_ffi_type_t type) {
+	return type == TCC_FFI_MAP;
 }
 
 static bool tcc_ffi_array_child_type(tcc_ffi_type_t array_type, tcc_ffi_type_t *out_child) {
@@ -1397,6 +1518,10 @@ static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
 		return sizeof(ducktinycc_interval_t);
 	case TCC_FFI_DECIMAL:
 		return sizeof(ducktinycc_decimal_t);
+	case TCC_FFI_STRUCT:
+		return sizeof(ducktinycc_struct_t);
+	case TCC_FFI_MAP:
+		return sizeof(ducktinycc_map_t);
 	case TCC_FFI_LIST_BOOL:
 	case TCC_FFI_LIST_I8:
 	case TCC_FFI_LIST_U8:
@@ -1482,6 +1607,10 @@ static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 		return DUCKDB_TYPE_INTERVAL;
 	case TCC_FFI_DECIMAL:
 		return DUCKDB_TYPE_DECIMAL;
+	case TCC_FFI_STRUCT:
+		return DUCKDB_TYPE_STRUCT;
+	case TCC_FFI_MAP:
+		return DUCKDB_TYPE_MAP;
 	case TCC_FFI_LIST_BOOL:
 	case TCC_FFI_LIST_I8:
 	case TCC_FFI_LIST_U8:
@@ -1523,7 +1652,9 @@ static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 	}
 }
 
-static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type, size_t array_size) {
+static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type, size_t array_size,
+                                                             const tcc_ffi_struct_meta_t *struct_meta,
+                                                             const tcc_ffi_map_meta_t *map_meta) {
 	duckdb_type base_type;
 	if (tcc_ffi_type_is_list(type)) {
 		tcc_ffi_type_t child_type = TCC_FFI_VOID;
@@ -1532,7 +1663,7 @@ static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type,
 		if (!tcc_ffi_list_child_type(type, &child_type)) {
 			return NULL;
 		}
-		child_logical = tcc_ffi_type_create_logical_type(child_type, 0);
+		child_logical = tcc_ffi_type_create_logical_type(child_type, 0, NULL, NULL);
 		if (!child_logical) {
 			return NULL;
 		}
@@ -1547,13 +1678,78 @@ static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type,
 		if (array_size == 0 || !tcc_ffi_array_child_type(type, &child_type)) {
 			return NULL;
 		}
-		child_logical = tcc_ffi_type_create_logical_type(child_type, 0);
+		child_logical = tcc_ffi_type_create_logical_type(child_type, 0, NULL, NULL);
 		if (!child_logical) {
 			return NULL;
 		}
 		array_logical = duckdb_create_array_type(child_logical, (idx_t)array_size);
 		duckdb_destroy_logical_type(&child_logical);
 		return array_logical;
+	}
+	if (type == TCC_FFI_STRUCT) {
+		duckdb_logical_type struct_type = NULL;
+		duckdb_logical_type *child_types = NULL;
+		const char **child_names = NULL;
+		int i;
+		if (!struct_meta || struct_meta->field_count <= 0 || !struct_meta->field_names || !struct_meta->field_types) {
+			return NULL;
+		}
+		child_types = (duckdb_logical_type *)duckdb_malloc(sizeof(duckdb_logical_type) * (size_t)struct_meta->field_count);
+		child_names = (const char **)duckdb_malloc(sizeof(const char *) * (size_t)struct_meta->field_count);
+		if (!child_types || !child_names) {
+			if (child_types) {
+				duckdb_free(child_types);
+			}
+			if (child_names) {
+				duckdb_free((void *)child_names);
+			}
+			return NULL;
+		}
+		for (i = 0; i < struct_meta->field_count; i++) {
+			child_types[i] = NULL;
+			child_names[i] = struct_meta->field_names[i];
+			child_types[i] = tcc_ffi_type_create_logical_type(struct_meta->field_types[i], 0, NULL, NULL);
+			if (!child_types[i]) {
+				int j;
+				for (j = 0; j < i; j++) {
+					duckdb_destroy_logical_type(&child_types[j]);
+				}
+				duckdb_free(child_types);
+				duckdb_free((void *)child_names);
+				return NULL;
+			}
+		}
+		struct_type = duckdb_create_struct_type(child_types, child_names, (idx_t)struct_meta->field_count);
+		for (i = 0; i < struct_meta->field_count; i++) {
+			duckdb_destroy_logical_type(&child_types[i]);
+		}
+		duckdb_free(child_types);
+		duckdb_free((void *)child_names);
+		return struct_type;
+	}
+	if (type == TCC_FFI_MAP) {
+		duckdb_logical_type key_type = NULL;
+		duckdb_logical_type value_type = NULL;
+		duckdb_logical_type map_type = NULL;
+		if (!map_meta || !tcc_ffi_type_is_fixed_width_scalar(map_meta->key_type) ||
+		    !tcc_ffi_type_is_fixed_width_scalar(map_meta->value_type)) {
+			return NULL;
+		}
+		key_type = tcc_ffi_type_create_logical_type(map_meta->key_type, 0, NULL, NULL);
+		value_type = tcc_ffi_type_create_logical_type(map_meta->value_type, 0, NULL, NULL);
+		if (!key_type || !value_type) {
+			if (key_type) {
+				duckdb_destroy_logical_type(&key_type);
+			}
+			if (value_type) {
+				duckdb_destroy_logical_type(&value_type);
+			}
+			return NULL;
+		}
+		map_type = duckdb_create_map_type(key_type, value_type);
+		duckdb_destroy_logical_type(&key_type);
+		duckdb_destroy_logical_type(&value_type);
+		return map_type;
 	}
 	if (type == TCC_FFI_DECIMAL) {
 		/* Keep a stable default until typed signatures accept precision/scale parameters. */
@@ -1621,6 +1817,7 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 	uint64_t *out_validity;
 	uint8_t **in_data = NULL;
 	uint64_t **in_validity = NULL;
+	uint64_t **synthetic_validity_columns = NULL;
 	size_t ret_size;
 	void **arg_ptrs = NULL;
 	void **batch_arg_data = NULL;
@@ -1631,9 +1828,13 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 	ducktinycc_blob_t *row_blob_values = NULL;
 	ducktinycc_list_t *row_list_values = NULL;
 	ducktinycc_array_t *row_array_values = NULL;
+	ducktinycc_struct_t *row_struct_values = NULL;
+	ducktinycc_map_t *row_map_values = NULL;
 	ducktinycc_blob_t **batch_blob_columns = NULL;
 	ducktinycc_list_t **batch_list_columns = NULL;
 	ducktinycc_array_t **batch_array_columns = NULL;
+	ducktinycc_struct_t **batch_struct_columns = NULL;
+	ducktinycc_map_t **batch_map_columns = NULL;
 	const char ***batch_varchar_columns = NULL;
 	char ***batch_varchar_owned = NULL;
 	duckdb_list_entry **list_entries_columns = NULL;
@@ -1643,10 +1844,23 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 	uint8_t **array_child_data_columns = NULL;
 	uint64_t **array_child_validity_columns = NULL;
 	size_t *array_child_sizes = NULL;
+	uint8_t ***struct_child_data_columns = NULL;
+	uint64_t ***struct_child_validity_columns = NULL;
+	size_t **struct_child_sizes = NULL;
+	idx_t *struct_field_counts = NULL;
+	duckdb_list_entry **map_entries_columns = NULL;
+	uint8_t **map_key_data_columns = NULL;
+	uint64_t **map_key_validity_columns = NULL;
+	size_t *map_key_sizes = NULL;
+	uint8_t **map_value_data_columns = NULL;
+	uint64_t **map_value_validity_columns = NULL;
+	size_t *map_value_sizes = NULL;
 	const char **batch_out_varchar = NULL;
 	ducktinycc_blob_t *batch_out_blob = NULL;
 	ducktinycc_list_t *batch_out_list = NULL;
 	ducktinycc_array_t *batch_out_array = NULL;
+	ducktinycc_struct_t *batch_out_struct = NULL;
+	ducktinycc_map_t *batch_out_map = NULL;
 	duckdb_list_entry *out_list_entries = NULL;
 	duckdb_vector out_list_child_vector = NULL;
 	size_t out_list_child_size = 0;
@@ -1654,11 +1868,24 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 	duckdb_vector out_array_child_vector = NULL;
 	size_t out_array_child_size = 0;
 	size_t out_array_len = 0;
+	uint8_t **out_struct_child_data = NULL;
+	uint64_t **out_struct_child_validity = NULL;
+	size_t *out_struct_child_sizes = NULL;
+	idx_t out_struct_field_count = 0;
+	duckdb_list_entry *out_map_entries = NULL;
+	duckdb_vector out_map_struct_vector = NULL;
+	duckdb_vector out_map_key_vector = NULL;
+	duckdb_vector out_map_value_vector = NULL;
+	size_t out_map_key_size = 0;
+	size_t out_map_value_size = 0;
+	idx_t out_map_child_count = 0;
 	uint8_t out_value[64];
 	const char *out_varchar_value = NULL;
 	ducktinycc_blob_t out_blob_value;
 	ducktinycc_list_t out_list_value;
 	ducktinycc_array_t out_array_value;
+	ducktinycc_struct_t out_struct_value;
+	ducktinycc_map_t out_map_value;
 	idx_t row;
 	int col;
 	const char *error = NULL;
@@ -1685,12 +1912,16 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 		if (ctx->arg_count > 0) {
 			in_data = (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)ctx->arg_count);
 			in_validity = (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			synthetic_validity_columns = (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)ctx->arg_count);
 			if (ctx->wrapper_mode == TCC_WRAPPER_MODE_ROW) {
 				arg_ptrs = (void **)duckdb_malloc(sizeof(void *) * (size_t)ctx->arg_count);
 				row_varchar_values = (const char **)duckdb_malloc(sizeof(const char *) * (size_t)ctx->arg_count);
 				row_blob_values = (ducktinycc_blob_t *)duckdb_malloc(sizeof(ducktinycc_blob_t) * (size_t)ctx->arg_count);
 				row_list_values = (ducktinycc_list_t *)duckdb_malloc(sizeof(ducktinycc_list_t) * (size_t)ctx->arg_count);
 				row_array_values = (ducktinycc_array_t *)duckdb_malloc(sizeof(ducktinycc_array_t) * (size_t)ctx->arg_count);
+				row_struct_values =
+				    (ducktinycc_struct_t *)duckdb_malloc(sizeof(ducktinycc_struct_t) * (size_t)ctx->arg_count);
+				row_map_values = (ducktinycc_map_t *)duckdb_malloc(sizeof(ducktinycc_map_t) * (size_t)ctx->arg_count);
 			} else {
 				batch_arg_data = (void **)duckdb_malloc(sizeof(void *) * (size_t)ctx->arg_count);
 				batch_varchar_columns = (const char ***)duckdb_malloc(sizeof(const char **) * (size_t)ctx->arg_count);
@@ -1701,6 +1932,10 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 				    (ducktinycc_list_t **)duckdb_malloc(sizeof(ducktinycc_list_t *) * (size_t)ctx->arg_count);
 				batch_array_columns =
 				    (ducktinycc_array_t **)duckdb_malloc(sizeof(ducktinycc_array_t *) * (size_t)ctx->arg_count);
+				batch_struct_columns =
+				    (ducktinycc_struct_t **)duckdb_malloc(sizeof(ducktinycc_struct_t *) * (size_t)ctx->arg_count);
+				batch_map_columns =
+				    (ducktinycc_map_t **)duckdb_malloc(sizeof(ducktinycc_map_t *) * (size_t)ctx->arg_count);
 			}
 			list_entries_columns =
 			    (duckdb_list_entry **)duckdb_malloc(sizeof(duckdb_list_entry *) * (size_t)ctx->arg_count);
@@ -1710,14 +1945,30 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 			array_child_data_columns = (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)ctx->arg_count);
 			array_child_validity_columns = (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)ctx->arg_count);
 			array_child_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)ctx->arg_count);
-			if (!in_data || !in_validity ||
+			struct_child_data_columns = (uint8_t ***)duckdb_malloc(sizeof(uint8_t **) * (size_t)ctx->arg_count);
+			struct_child_validity_columns =
+			    (uint64_t ***)duckdb_malloc(sizeof(uint64_t **) * (size_t)ctx->arg_count);
+			struct_child_sizes = (size_t **)duckdb_malloc(sizeof(size_t *) * (size_t)ctx->arg_count);
+			struct_field_counts = (idx_t *)duckdb_malloc(sizeof(idx_t) * (size_t)ctx->arg_count);
+			map_entries_columns = (duckdb_list_entry **)duckdb_malloc(sizeof(duckdb_list_entry *) * (size_t)ctx->arg_count);
+			map_key_data_columns = (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)ctx->arg_count);
+			map_key_validity_columns = (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			map_key_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)ctx->arg_count);
+			map_value_data_columns = (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)ctx->arg_count);
+			map_value_validity_columns = (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			map_value_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)ctx->arg_count);
+			if (!in_data || !in_validity || !synthetic_validity_columns ||
 			    (ctx->wrapper_mode == TCC_WRAPPER_MODE_ROW &&
-			     (!arg_ptrs || !row_varchar_values || !row_blob_values || !row_list_values || !row_array_values)) ||
+			     (!arg_ptrs || !row_varchar_values || !row_blob_values || !row_list_values || !row_array_values ||
+			      !row_struct_values || !row_map_values)) ||
 			    (ctx->wrapper_mode == TCC_WRAPPER_MODE_BATCH &&
 			     (!batch_arg_data || !batch_varchar_columns || !batch_varchar_owned || !batch_blob_columns ||
-			      !batch_list_columns || !batch_array_columns)) ||
+			      !batch_list_columns || !batch_array_columns || !batch_struct_columns || !batch_map_columns)) ||
 			    !list_entries_columns || !list_child_data_columns || !list_child_validity_columns || !list_child_sizes ||
-			    !array_child_data_columns || !array_child_validity_columns || !array_child_sizes) {
+			    !array_child_data_columns || !array_child_validity_columns || !array_child_sizes ||
+			    !struct_child_data_columns || !struct_child_validity_columns || !struct_child_sizes ||
+			    !struct_field_counts || !map_entries_columns || !map_key_data_columns || !map_key_validity_columns ||
+			    !map_key_sizes || !map_value_data_columns || !map_value_validity_columns || !map_value_sizes) {
 				error = "ducktinycc out of memory";
 				goto cleanup;
 			}
@@ -1736,6 +1987,12 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 			if (batch_array_columns) {
 				memset(batch_array_columns, 0, sizeof(ducktinycc_array_t *) * (size_t)ctx->arg_count);
 			}
+			if (batch_struct_columns) {
+				memset(batch_struct_columns, 0, sizeof(ducktinycc_struct_t *) * (size_t)ctx->arg_count);
+			}
+			if (batch_map_columns) {
+				memset(batch_map_columns, 0, sizeof(ducktinycc_map_t *) * (size_t)ctx->arg_count);
+			}
 			memset(list_entries_columns, 0, sizeof(duckdb_list_entry *) * (size_t)ctx->arg_count);
 			memset(list_child_data_columns, 0, sizeof(uint8_t *) * (size_t)ctx->arg_count);
 			memset(list_child_validity_columns, 0, sizeof(uint64_t *) * (size_t)ctx->arg_count);
@@ -1743,6 +2000,18 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 			memset(array_child_data_columns, 0, sizeof(uint8_t *) * (size_t)ctx->arg_count);
 			memset(array_child_validity_columns, 0, sizeof(uint64_t *) * (size_t)ctx->arg_count);
 			memset(array_child_sizes, 0, sizeof(size_t) * (size_t)ctx->arg_count);
+			memset(synthetic_validity_columns, 0, sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			memset(struct_child_data_columns, 0, sizeof(uint8_t **) * (size_t)ctx->arg_count);
+			memset(struct_child_validity_columns, 0, sizeof(uint64_t **) * (size_t)ctx->arg_count);
+			memset(struct_child_sizes, 0, sizeof(size_t *) * (size_t)ctx->arg_count);
+			memset(struct_field_counts, 0, sizeof(idx_t) * (size_t)ctx->arg_count);
+			memset(map_entries_columns, 0, sizeof(duckdb_list_entry *) * (size_t)ctx->arg_count);
+			memset(map_key_data_columns, 0, sizeof(uint8_t *) * (size_t)ctx->arg_count);
+			memset(map_key_validity_columns, 0, sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			memset(map_key_sizes, 0, sizeof(size_t) * (size_t)ctx->arg_count);
+			memset(map_value_data_columns, 0, sizeof(uint8_t *) * (size_t)ctx->arg_count);
+			memset(map_value_validity_columns, 0, sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			memset(map_value_sizes, 0, sizeof(size_t) * (size_t)ctx->arg_count);
 		}
 	ret_size = tcc_ffi_type_size(ctx->return_type);
 
@@ -1786,6 +2055,88 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 				child_vector = duckdb_array_vector_get_child(v);
 				array_child_data_columns[col] = (uint8_t *)duckdb_vector_get_data(child_vector);
 				array_child_validity_columns[col] = duckdb_vector_get_validity(child_vector);
+			} else if (tcc_ffi_type_is_struct(ctx->arg_types[col])) {
+				const tcc_ffi_struct_meta_t *meta = ctx->arg_struct_metas ? &ctx->arg_struct_metas[col] : NULL;
+				idx_t field_idx;
+				if (!meta || meta->field_count <= 0 || !meta->field_sizes) {
+					error = "ducktinycc invalid struct metadata";
+					goto cleanup;
+				}
+				struct_field_counts[col] = (idx_t)meta->field_count;
+				struct_child_data_columns[col] =
+				    (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)meta->field_count);
+				struct_child_validity_columns[col] =
+				    (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)meta->field_count);
+				struct_child_sizes[col] = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)meta->field_count);
+				if (!struct_child_data_columns[col] || !struct_child_validity_columns[col] || !struct_child_sizes[col]) {
+					error = "ducktinycc out of memory";
+					goto cleanup;
+				}
+				for (field_idx = 0; field_idx < (idx_t)meta->field_count; field_idx++) {
+					duckdb_vector child_vector = duckdb_struct_vector_get_child(v, field_idx);
+					if (!child_vector) {
+						error = "ducktinycc struct child vector missing";
+						goto cleanup;
+					}
+					struct_child_data_columns[col][field_idx] = (uint8_t *)duckdb_vector_get_data(child_vector);
+					struct_child_validity_columns[col][field_idx] = duckdb_vector_get_validity(child_vector);
+					struct_child_sizes[col][field_idx] = meta->field_sizes[field_idx];
+					if (struct_child_sizes[col][field_idx] == 0) {
+						error = "ducktinycc invalid struct child type size";
+						goto cleanup;
+					}
+				}
+				if (!in_validity[col] && n > 0) {
+					idx_t words = (n + 63) / 64;
+					uint64_t *mask = (uint64_t *)duckdb_malloc(sizeof(uint64_t) * (size_t)words);
+					if (!mask) {
+						error = "ducktinycc out of memory";
+						goto cleanup;
+					}
+					tcc_validity_set_all(mask, n, true);
+					for (row = 0; row < n; row++) {
+						bool any_valid = false;
+						for (field_idx = 0; field_idx < (idx_t)meta->field_count; field_idx++) {
+							if (!struct_child_validity_columns[col][field_idx] ||
+							    duckdb_validity_row_is_valid(struct_child_validity_columns[col][field_idx], row)) {
+								any_valid = true;
+								break;
+							}
+						}
+						if (!any_valid) {
+							duckdb_validity_set_row_validity(mask, row, false);
+						}
+					}
+					synthetic_validity_columns[col] = mask;
+					in_validity[col] = mask;
+				}
+			} else if (tcc_ffi_type_is_map(ctx->arg_types[col])) {
+				const tcc_ffi_map_meta_t *meta = ctx->arg_map_metas ? &ctx->arg_map_metas[col] : NULL;
+				duckdb_vector map_struct_vector;
+				duckdb_vector map_key_vector;
+				duckdb_vector map_value_vector;
+				if (!meta || meta->key_size == 0 || meta->value_size == 0) {
+					error = "ducktinycc invalid map metadata";
+					goto cleanup;
+				}
+				map_entries_columns[col] = (duckdb_list_entry *)in_data[col];
+				map_key_sizes[col] = meta->key_size;
+				map_value_sizes[col] = meta->value_size;
+				map_struct_vector = duckdb_list_vector_get_child(v);
+				if (!map_struct_vector) {
+					error = "ducktinycc map child vector missing";
+					goto cleanup;
+				}
+				map_key_vector = duckdb_struct_vector_get_child(map_struct_vector, 0);
+				map_value_vector = duckdb_struct_vector_get_child(map_struct_vector, 1);
+				if (!map_key_vector || !map_value_vector) {
+					error = "ducktinycc map key/value child vector missing";
+					goto cleanup;
+				}
+				map_key_data_columns[col] = (uint8_t *)duckdb_vector_get_data(map_key_vector);
+				map_key_validity_columns[col] = duckdb_vector_get_validity(map_key_vector);
+				map_value_data_columns[col] = (uint8_t *)duckdb_vector_get_data(map_value_vector);
+				map_value_validity_columns[col] = duckdb_vector_get_validity(map_value_vector);
 			}
 		}
 
@@ -1835,6 +2186,63 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 			error = "ducktinycc array return child vector missing";
 			goto cleanup;
 		}
+	}
+	if (tcc_ffi_type_is_struct(ctx->return_type)) {
+		const tcc_ffi_struct_meta_t *meta = &ctx->return_struct_meta;
+		idx_t field_idx;
+		if (!meta || meta->field_count <= 0 || !meta->field_sizes) {
+			error = "ducktinycc invalid struct return metadata";
+			goto cleanup;
+		}
+		out_struct_field_count = (idx_t)meta->field_count;
+		out_struct_child_data = (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)out_struct_field_count);
+		out_struct_child_validity =
+		    (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)out_struct_field_count);
+		out_struct_child_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)out_struct_field_count);
+		if (!out_struct_child_data || !out_struct_child_validity || !out_struct_child_sizes) {
+			error = "ducktinycc out of memory";
+			goto cleanup;
+		}
+		for (field_idx = 0; field_idx < out_struct_field_count; field_idx++) {
+			duckdb_vector child_vector = duckdb_struct_vector_get_child(output, field_idx);
+			if (!child_vector) {
+				error = "ducktinycc struct return child vector missing";
+				goto cleanup;
+			}
+			out_struct_child_data[field_idx] = (uint8_t *)duckdb_vector_get_data(child_vector);
+			out_struct_child_validity[field_idx] = duckdb_vector_get_validity(child_vector);
+			out_struct_child_sizes[field_idx] = meta->field_sizes[field_idx];
+			if (out_struct_child_sizes[field_idx] == 0) {
+				error = "ducktinycc invalid struct return child size";
+				goto cleanup;
+			}
+		}
+	}
+	if (tcc_ffi_type_is_map(ctx->return_type)) {
+		const tcc_ffi_map_meta_t *meta = &ctx->return_map_meta;
+		if (!meta || meta->key_size == 0 || meta->value_size == 0) {
+			error = "ducktinycc invalid map return metadata";
+			goto cleanup;
+		}
+		out_map_entries = (duckdb_list_entry *)out_data;
+		out_map_struct_vector = duckdb_list_vector_get_child(output);
+		if (!out_map_struct_vector) {
+			error = "ducktinycc map return child vector missing";
+			goto cleanup;
+		}
+		out_map_key_vector = duckdb_struct_vector_get_child(out_map_struct_vector, 0);
+		out_map_value_vector = duckdb_struct_vector_get_child(out_map_struct_vector, 1);
+		if (!out_map_key_vector || !out_map_value_vector) {
+			error = "ducktinycc map return key/value child vector missing";
+			goto cleanup;
+		}
+		out_map_key_size = meta->key_size;
+		out_map_value_size = meta->value_size;
+		if (duckdb_list_vector_set_size(output, 0) != DuckDBSuccess) {
+			error = "ducktinycc failed to initialize map return vector";
+			goto cleanup;
+		}
+		out_map_child_count = 0;
 	}
 
 	if (ctx->wrapper_mode == TCC_WRAPPER_MODE_BATCH) {
@@ -1955,6 +2363,69 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 					}
 					batch_array_columns[col] = decoded;
 					batch_arg_data[col] = (void *)decoded;
+				} else if (tcc_ffi_type_is_struct(ctx->arg_types[col])) {
+					ducktinycc_struct_t *decoded = NULL;
+					idx_t field_count = struct_field_counts[col];
+					if (n > 0) {
+						decoded = (ducktinycc_struct_t *)duckdb_malloc(sizeof(ducktinycc_struct_t) * (size_t)n);
+						if (!decoded) {
+							error = "ducktinycc out of memory";
+							goto cleanup;
+						}
+						for (row = 0; row < n; row++) {
+							if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
+								decoded[row].field_ptrs = NULL;
+								decoded[row].field_validity = NULL;
+								decoded[row].field_count = 0;
+								decoded[row].offset = 0;
+							} else {
+								decoded[row].field_ptrs = (const void *const *)struct_child_data_columns[col];
+								decoded[row].field_validity =
+								    (const uint64_t *const *)struct_child_validity_columns[col];
+								decoded[row].field_count = (uint64_t)field_count;
+								decoded[row].offset = (uint64_t)row;
+							}
+						}
+					}
+					batch_struct_columns[col] = decoded;
+					batch_arg_data[col] = (void *)decoded;
+				} else if (tcc_ffi_type_is_map(ctx->arg_types[col])) {
+					ducktinycc_map_t *decoded = NULL;
+					if (n > 0) {
+						decoded = (ducktinycc_map_t *)duckdb_malloc(sizeof(ducktinycc_map_t) * (size_t)n);
+						if (!decoded) {
+							error = "ducktinycc out of memory";
+							goto cleanup;
+						}
+						for (row = 0; row < n; row++) {
+							if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
+								decoded[row].key_ptr = NULL;
+								decoded[row].key_validity = NULL;
+								decoded[row].value_ptr = NULL;
+								decoded[row].value_validity = NULL;
+								decoded[row].offset = 0;
+								decoded[row].len = 0;
+							} else {
+								duckdb_list_entry entry = map_entries_columns[col][row];
+								decoded[row].key_ptr =
+								    map_key_data_columns[col]
+								        ? (const void *)(map_key_data_columns[col] +
+								                         ((size_t)entry.offset * map_key_sizes[col]))
+								        : NULL;
+								decoded[row].key_validity = map_key_validity_columns[col];
+								decoded[row].value_ptr =
+								    map_value_data_columns[col]
+								        ? (const void *)(map_value_data_columns[col] +
+								                         ((size_t)entry.offset * map_value_sizes[col]))
+								        : NULL;
+								decoded[row].value_validity = map_value_validity_columns[col];
+								decoded[row].offset = (uint64_t)entry.offset;
+								decoded[row].len = (uint64_t)entry.length;
+							}
+						}
+					}
+					batch_map_columns[col] = decoded;
+					batch_arg_data[col] = (void *)decoded;
 				} else {
 					batch_arg_data[col] = (void *)in_data[col];
 				}
@@ -1987,6 +2458,20 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 					goto cleanup;
 				}
 				memset((void *)batch_out_array, 0, sizeof(ducktinycc_array_t) * (size_t)n);
+			} else if (tcc_ffi_type_is_struct(ctx->return_type) && n > 0) {
+				batch_out_struct = (ducktinycc_struct_t *)duckdb_malloc(sizeof(ducktinycc_struct_t) * (size_t)n);
+				if (!batch_out_struct) {
+					error = "ducktinycc out of memory";
+					goto cleanup;
+				}
+				memset((void *)batch_out_struct, 0, sizeof(ducktinycc_struct_t) * (size_t)n);
+			} else if (tcc_ffi_type_is_map(ctx->return_type) && n > 0) {
+				batch_out_map = (ducktinycc_map_t *)duckdb_malloc(sizeof(ducktinycc_map_t) * (size_t)n);
+				if (!batch_out_map) {
+					error = "ducktinycc out of memory";
+					goto cleanup;
+				}
+				memset((void *)batch_out_map, 0, sizeof(ducktinycc_map_t) * (size_t)n);
 			}
 			tcc_validity_set_all(out_validity, n, ctx->return_type != TCC_FFI_VOID);
 			if (!ctx->batch_wrapper(batch_arg_data, in_validity, (uint64_t)n,
@@ -1998,7 +2483,11 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 			                                          ? (void *)batch_out_list
 			                                          : (tcc_ffi_type_is_array(ctx->return_type)
 			                                                 ? (void *)batch_out_array
-			                                                 : out_data))),
+			                                                 : (tcc_ffi_type_is_struct(ctx->return_type)
+			                                                        ? (void *)batch_out_struct
+			                                                        : (tcc_ffi_type_is_map(ctx->return_type)
+			                                                               ? (void *)batch_out_map
+			                                                               : out_data))))),
 			                        out_validity)) {
 				error = "ducktinycc invoke failed";
 				goto cleanup;
@@ -2107,6 +2596,100 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 						                                 child_is_valid);
 					}
 				}
+			} else if (tcc_ffi_type_is_struct(ctx->return_type)) {
+				for (row = 0; row < n; row++) {
+					ducktinycc_struct_t desc;
+					idx_t field_idx;
+					if (!duckdb_validity_row_is_valid(out_validity, row)) {
+						continue;
+					}
+					if (!batch_out_struct || !batch_out_struct[row].field_ptrs ||
+					    batch_out_struct[row].field_count != (uint64_t)out_struct_field_count) {
+						duckdb_validity_set_row_validity(out_validity, row, false);
+						continue;
+					}
+					desc = batch_out_struct[row];
+					for (field_idx = 0; field_idx < out_struct_field_count; field_idx++) {
+						uint8_t *dst;
+						uint64_t *field_validity;
+						const uint8_t *src_base = (const uint8_t *)desc.field_ptrs[field_idx];
+						if (!src_base) {
+							duckdb_validity_set_row_validity(out_validity, row, false);
+							break;
+						}
+						dst = out_struct_child_data[field_idx] + ((size_t)row * out_struct_child_sizes[field_idx]);
+						memcpy(dst, src_base + ((size_t)desc.offset * out_struct_child_sizes[field_idx]),
+						       out_struct_child_sizes[field_idx]);
+						duckdb_vector_ensure_validity_writable(duckdb_struct_vector_get_child(output, field_idx));
+						field_validity =
+						    duckdb_vector_get_validity(duckdb_struct_vector_get_child(output, field_idx));
+						{
+							bool field_is_valid = true;
+							if (desc.field_validity && desc.field_validity[field_idx]) {
+								field_is_valid = (desc.field_validity[field_idx][desc.offset >> 6] &
+								                  (1ULL << (desc.offset & 63))) != 0;
+							}
+							duckdb_validity_set_row_validity(field_validity, row, field_is_valid);
+						}
+					}
+				}
+			} else if (tcc_ffi_type_is_map(ctx->return_type)) {
+				for (row = 0; row < n; row++) {
+					ducktinycc_map_t desc;
+					idx_t elem_idx;
+					uint8_t *key_data;
+					uint8_t *value_data;
+					uint64_t *key_validity;
+					uint64_t *value_validity;
+					if (!duckdb_validity_row_is_valid(out_validity, row)) {
+						continue;
+					}
+					if (!batch_out_map) {
+						duckdb_validity_set_row_validity(out_validity, row, false);
+						continue;
+					}
+					desc = batch_out_map[row];
+					if (desc.len > 0 && (!desc.key_ptr || !desc.value_ptr)) {
+						duckdb_validity_set_row_validity(out_validity, row, false);
+						continue;
+					}
+					if (duckdb_list_vector_reserve(output, out_map_child_count + (idx_t)desc.len) != DuckDBSuccess) {
+						error = "ducktinycc map return reserve failed";
+						goto cleanup;
+					}
+					if (duckdb_list_vector_set_size(output, out_map_child_count + (idx_t)desc.len) != DuckDBSuccess) {
+						error = "ducktinycc map return set_size failed";
+						goto cleanup;
+					}
+					key_data = (uint8_t *)duckdb_vector_get_data(out_map_key_vector);
+					value_data = (uint8_t *)duckdb_vector_get_data(out_map_value_vector);
+					if (desc.len > 0) {
+						memcpy(key_data + ((size_t)out_map_child_count * out_map_key_size), desc.key_ptr,
+						       (size_t)desc.len * out_map_key_size);
+						memcpy(value_data + ((size_t)out_map_child_count * out_map_value_size), desc.value_ptr,
+						       (size_t)desc.len * out_map_value_size);
+					}
+					duckdb_vector_ensure_validity_writable(out_map_key_vector);
+					duckdb_vector_ensure_validity_writable(out_map_value_vector);
+					key_validity = duckdb_vector_get_validity(out_map_key_vector);
+					value_validity = duckdb_vector_get_validity(out_map_value_vector);
+					for (elem_idx = 0; elem_idx < (idx_t)desc.len; elem_idx++) {
+						bool key_ok = true;
+						bool value_ok = true;
+						uint64_t src_idx = desc.offset + (uint64_t)elem_idx;
+						if (desc.key_validity) {
+							key_ok = (desc.key_validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
+						}
+						if (desc.value_validity) {
+							value_ok = (desc.value_validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
+						}
+						duckdb_validity_set_row_validity(key_validity, out_map_child_count + elem_idx, key_ok);
+						duckdb_validity_set_row_validity(value_validity, out_map_child_count + elem_idx, value_ok);
+					}
+					out_map_entries[row].offset = out_map_child_count;
+					out_map_entries[row].length = (idx_t)desc.len;
+					out_map_child_count += (idx_t)desc.len;
+				}
 			}
 			goto cleanup;
 		}
@@ -2169,6 +2752,27 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 					row_array_values[col].offset = off;
 					row_array_values[col].len = (uint64_t)array_len;
 					arg_ptrs[col] = (void *)&row_array_values[col];
+				} else if (tcc_ffi_type_is_struct(ctx->arg_types[col])) {
+					row_struct_values[col].field_ptrs = (const void *const *)struct_child_data_columns[col];
+					row_struct_values[col].field_validity = (const uint64_t *const *)struct_child_validity_columns[col];
+					row_struct_values[col].field_count = (uint64_t)struct_field_counts[col];
+					row_struct_values[col].offset = (uint64_t)row;
+					arg_ptrs[col] = (void *)&row_struct_values[col];
+				} else if (tcc_ffi_type_is_map(ctx->arg_types[col])) {
+					duckdb_list_entry entry = map_entries_columns[col][row];
+					row_map_values[col].key_ptr =
+					    map_key_data_columns[col]
+					        ? (const void *)(map_key_data_columns[col] + ((size_t)entry.offset * map_key_sizes[col]))
+					        : NULL;
+					row_map_values[col].key_validity = map_key_validity_columns[col];
+					row_map_values[col].value_ptr =
+					    map_value_data_columns[col]
+					        ? (const void *)(map_value_data_columns[col] + ((size_t)entry.offset * map_value_sizes[col]))
+					        : NULL;
+					row_map_values[col].value_validity = map_value_validity_columns[col];
+					row_map_values[col].offset = (uint64_t)entry.offset;
+					row_map_values[col].len = (uint64_t)entry.length;
+					arg_ptrs[col] = (void *)&row_map_values[col];
 				} else {
 					arg_ptrs[col] = (void *)(in_data[col] + ((size_t)row * ctx->arg_sizes[col]));
 				}
@@ -2188,6 +2792,16 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 			out_array_value.validity = NULL;
 			out_array_value.offset = 0;
 			out_array_value.len = 0;
+			out_struct_value.field_ptrs = NULL;
+			out_struct_value.field_validity = NULL;
+			out_struct_value.field_count = 0;
+			out_struct_value.offset = 0;
+			out_map_value.key_ptr = NULL;
+			out_map_value.key_validity = NULL;
+			out_map_value.value_ptr = NULL;
+			out_map_value.value_validity = NULL;
+			out_map_value.offset = 0;
+			out_map_value.len = 0;
 			{
 				void *row_out_ptr = (void *)out_value;
 				if (ctx->return_type == TCC_FFI_VARCHAR) {
@@ -2198,6 +2812,10 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 					row_out_ptr = (void *)&out_list_value;
 				} else if (tcc_ffi_type_is_array(ctx->return_type)) {
 					row_out_ptr = (void *)&out_array_value;
+				} else if (tcc_ffi_type_is_struct(ctx->return_type)) {
+					row_out_ptr = (void *)&out_struct_value;
+				} else if (tcc_ffi_type_is_map(ctx->return_type)) {
+					row_out_ptr = (void *)&out_map_value;
 				}
 				if (!ctx->row_wrapper(arg_ptrs, row_out_ptr, &out_is_null)) {
 					error = "ducktinycc invoke failed";
@@ -2298,6 +2916,87 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 				duckdb_validity_set_row_validity(out_validity, row, true);
 				continue;
 			}
+			if (tcc_ffi_type_is_struct(ctx->return_type)) {
+				idx_t field_idx;
+				if (!out_struct_value.field_ptrs || out_struct_value.field_count != (uint64_t)out_struct_field_count) {
+					duckdb_validity_set_row_validity(out_validity, row, false);
+					continue;
+				}
+				for (field_idx = 0; field_idx < out_struct_field_count; field_idx++) {
+					const uint8_t *src_base = (const uint8_t *)out_struct_value.field_ptrs[field_idx];
+					uint8_t *dst;
+					uint64_t *field_validity;
+					bool field_is_valid = true;
+					if (!src_base) {
+						duckdb_validity_set_row_validity(out_validity, row, false);
+						break;
+					}
+					dst = out_struct_child_data[field_idx] + ((size_t)row * out_struct_child_sizes[field_idx]);
+					memcpy(dst, src_base + ((size_t)out_struct_value.offset * out_struct_child_sizes[field_idx]),
+					       out_struct_child_sizes[field_idx]);
+					duckdb_vector_ensure_validity_writable(duckdb_struct_vector_get_child(output, field_idx));
+					field_validity = duckdb_vector_get_validity(duckdb_struct_vector_get_child(output, field_idx));
+					if (out_struct_value.field_validity && out_struct_value.field_validity[field_idx]) {
+						field_is_valid = (out_struct_value.field_validity[field_idx][out_struct_value.offset >> 6] &
+						                  (1ULL << (out_struct_value.offset & 63))) != 0;
+					}
+					duckdb_validity_set_row_validity(field_validity, row, field_is_valid);
+				}
+				if (!duckdb_validity_row_is_valid(out_validity, row)) {
+					continue;
+				}
+				duckdb_validity_set_row_validity(out_validity, row, true);
+				continue;
+			}
+			if (tcc_ffi_type_is_map(ctx->return_type)) {
+				idx_t elem_idx;
+				uint8_t *key_data;
+				uint8_t *value_data;
+				uint64_t *key_validity;
+				uint64_t *value_validity;
+				if (out_map_value.len > 0 && (!out_map_value.key_ptr || !out_map_value.value_ptr)) {
+					duckdb_validity_set_row_validity(out_validity, row, false);
+					continue;
+				}
+				if (duckdb_list_vector_reserve(output, out_map_child_count + (idx_t)out_map_value.len) != DuckDBSuccess) {
+					error = "ducktinycc map return reserve failed";
+					goto cleanup;
+				}
+				if (duckdb_list_vector_set_size(output, out_map_child_count + (idx_t)out_map_value.len) != DuckDBSuccess) {
+					error = "ducktinycc map return set_size failed";
+					goto cleanup;
+				}
+				key_data = (uint8_t *)duckdb_vector_get_data(out_map_key_vector);
+				value_data = (uint8_t *)duckdb_vector_get_data(out_map_value_vector);
+				if (out_map_value.len > 0) {
+					memcpy(key_data + ((size_t)out_map_child_count * out_map_key_size), out_map_value.key_ptr,
+					       (size_t)out_map_value.len * out_map_key_size);
+					memcpy(value_data + ((size_t)out_map_child_count * out_map_value_size), out_map_value.value_ptr,
+					       (size_t)out_map_value.len * out_map_value_size);
+				}
+				duckdb_vector_ensure_validity_writable(out_map_key_vector);
+				duckdb_vector_ensure_validity_writable(out_map_value_vector);
+				key_validity = duckdb_vector_get_validity(out_map_key_vector);
+				value_validity = duckdb_vector_get_validity(out_map_value_vector);
+				for (elem_idx = 0; elem_idx < (idx_t)out_map_value.len; elem_idx++) {
+					bool key_ok = true;
+					bool value_ok = true;
+					uint64_t src_idx = out_map_value.offset + (uint64_t)elem_idx;
+					if (out_map_value.key_validity) {
+						key_ok = (out_map_value.key_validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
+					}
+					if (out_map_value.value_validity) {
+						value_ok = (out_map_value.value_validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
+					}
+					duckdb_validity_set_row_validity(key_validity, out_map_child_count + elem_idx, key_ok);
+					duckdb_validity_set_row_validity(value_validity, out_map_child_count + elem_idx, value_ok);
+				}
+				out_map_entries[row].offset = out_map_child_count;
+				out_map_entries[row].length = (idx_t)out_map_value.len;
+				out_map_child_count += (idx_t)out_map_value.len;
+				duckdb_validity_set_row_validity(out_validity, row, true);
+				continue;
+			}
 			duckdb_validity_set_row_validity(out_validity, row, true);
 			if (ret_size > 0) {
 				memcpy(out_data + ((size_t)row * ret_size), out_value, ret_size);
@@ -2351,6 +3050,20 @@ cleanup:
 				}
 			}
 		}
+		if (batch_struct_columns) {
+			for (col = 0; col < ctx->arg_count; col++) {
+				if (batch_struct_columns[col]) {
+					duckdb_free((void *)batch_struct_columns[col]);
+				}
+			}
+		}
+		if (batch_map_columns) {
+			for (col = 0; col < ctx->arg_count; col++) {
+				if (batch_map_columns[col]) {
+					duckdb_free((void *)batch_map_columns[col]);
+				}
+			}
+		}
 	if (batch_out_varchar) {
 		duckdb_free((void *)batch_out_varchar);
 	}
@@ -2363,11 +3076,25 @@ cleanup:
 		if (batch_out_array) {
 			duckdb_free((void *)batch_out_array);
 		}
+		if (batch_out_struct) {
+			duckdb_free((void *)batch_out_struct);
+		}
+		if (batch_out_map) {
+			duckdb_free((void *)batch_out_map);
+		}
 	if (in_data) {
 		duckdb_free(in_data);
 	}
 	if (in_validity) {
 		duckdb_free(in_validity);
+	}
+	if (synthetic_validity_columns) {
+		for (col = 0; col < ctx->arg_count; col++) {
+			if (synthetic_validity_columns[col]) {
+				duckdb_free((void *)synthetic_validity_columns[col]);
+			}
+		}
+		duckdb_free((void *)synthetic_validity_columns);
 	}
 	if (arg_ptrs) {
 		duckdb_free(arg_ptrs);
@@ -2387,6 +3114,12 @@ cleanup:
 		if (row_array_values) {
 			duckdb_free((void *)row_array_values);
 		}
+		if (row_struct_values) {
+			duckdb_free((void *)row_struct_values);
+		}
+		if (row_map_values) {
+			duckdb_free((void *)row_map_values);
+		}
 		if (row_varchar_allocations) {
 			duckdb_free((void *)row_varchar_allocations);
 		}
@@ -2401,6 +3134,12 @@ cleanup:
 		}
 		if (batch_array_columns) {
 			duckdb_free((void *)batch_array_columns);
+		}
+		if (batch_struct_columns) {
+			duckdb_free((void *)batch_struct_columns);
+		}
+		if (batch_map_columns) {
+			duckdb_free((void *)batch_map_columns);
 		}
 		if (batch_varchar_owned) {
 			duckdb_free((void *)batch_varchar_owned);
@@ -2426,6 +3165,63 @@ cleanup:
 		if (array_child_sizes) {
 			duckdb_free((void *)array_child_sizes);
 		}
+		if (struct_child_data_columns) {
+			for (col = 0; col < ctx->arg_count; col++) {
+				if (struct_child_data_columns[col]) {
+					duckdb_free((void *)struct_child_data_columns[col]);
+				}
+			}
+			duckdb_free((void *)struct_child_data_columns);
+		}
+		if (struct_child_validity_columns) {
+			for (col = 0; col < ctx->arg_count; col++) {
+				if (struct_child_validity_columns[col]) {
+					duckdb_free((void *)struct_child_validity_columns[col]);
+				}
+			}
+			duckdb_free((void *)struct_child_validity_columns);
+		}
+		if (struct_child_sizes) {
+			for (col = 0; col < ctx->arg_count; col++) {
+				if (struct_child_sizes[col]) {
+					duckdb_free((void *)struct_child_sizes[col]);
+				}
+			}
+			duckdb_free((void *)struct_child_sizes);
+		}
+		if (struct_field_counts) {
+			duckdb_free((void *)struct_field_counts);
+		}
+		if (map_entries_columns) {
+			duckdb_free((void *)map_entries_columns);
+		}
+		if (map_key_data_columns) {
+			duckdb_free((void *)map_key_data_columns);
+		}
+		if (map_key_validity_columns) {
+			duckdb_free((void *)map_key_validity_columns);
+		}
+		if (map_key_sizes) {
+			duckdb_free((void *)map_key_sizes);
+		}
+		if (map_value_data_columns) {
+			duckdb_free((void *)map_value_data_columns);
+		}
+		if (map_value_validity_columns) {
+			duckdb_free((void *)map_value_validity_columns);
+		}
+		if (map_value_sizes) {
+			duckdb_free((void *)map_value_sizes);
+		}
+		if (out_struct_child_data) {
+			duckdb_free((void *)out_struct_child_data);
+		}
+		if (out_struct_child_validity) {
+			duckdb_free((void *)out_struct_child_validity);
+		}
+		if (out_struct_child_sizes) {
+			duckdb_free((void *)out_struct_child_sizes);
+		}
 	if (error) {
 		duckdb_scalar_function_set_error(info, error);
 	}
@@ -2441,17 +3237,23 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	size_t ret_array_size = 0;
 	tcc_ffi_type_t *arg_types = NULL;
 	size_t *arg_array_sizes = NULL;
+	tcc_ffi_struct_meta_t ret_struct_meta;
+	tcc_ffi_map_meta_t ret_map_meta;
+	tcc_ffi_struct_meta_t *arg_struct_metas = NULL;
+	tcc_ffi_map_meta_t *arg_map_metas = NULL;
 	tcc_wrapper_mode_t mode = TCC_WRAPPER_MODE_ROW;
 	int arg_count = 0;
 	tcc_error_buffer_t err;
 	int i;
 	duckdb_type ret_duckdb_type;
 	memset(&err, 0, sizeof(err));
+	memset(&ret_struct_meta, 0, sizeof(ret_struct_meta));
+	memset(&ret_map_meta, 0, sizeof(ret_map_meta));
 	if (!con || !name || name[0] == '\0' || !fn_ptr) {
 		return false;
 	}
 	if (!tcc_parse_signature(return_type, arg_types_csv, &ret_type, &ret_array_size, &arg_types, &arg_array_sizes,
-	                         &arg_count, &err)) {
+	                         &ret_struct_meta, &ret_map_meta, &arg_struct_metas, &arg_map_metas, &arg_count, &err)) {
 		return false;
 	}
 	if (!tcc_parse_wrapper_mode(wrapper_mode, &mode, &err)) {
@@ -2461,6 +3263,13 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		if (arg_array_sizes) {
 			duckdb_free(arg_array_sizes);
 		}
+		if (arg_struct_metas) {
+			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+		}
+		if (arg_map_metas) {
+			duckdb_free(arg_map_metas);
+		}
+		tcc_struct_meta_destroy(&ret_struct_meta);
 		return false;
 	}
 	ret_duckdb_type = tcc_ffi_type_to_duckdb_type(ret_type);
@@ -2471,6 +3280,13 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		if (arg_array_sizes) {
 			duckdb_free(arg_array_sizes);
 		}
+		if (arg_struct_metas) {
+			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+		}
+		if (arg_map_metas) {
+			duckdb_free(arg_map_metas);
+		}
+		tcc_struct_meta_destroy(&ret_struct_meta);
 		return false;
 	}
 
@@ -2482,6 +3298,13 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		if (arg_array_sizes) {
 			duckdb_free(arg_array_sizes);
 		}
+		if (arg_struct_metas) {
+			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+		}
+		if (arg_map_metas) {
+			duckdb_free(arg_map_metas);
+		}
+		tcc_struct_meta_destroy(&ret_struct_meta);
 		if (fn) {
 			duckdb_destroy_scalar_function(&fn);
 		}
@@ -2495,6 +3318,13 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		if (arg_array_sizes) {
 			duckdb_free(arg_array_sizes);
 		}
+		if (arg_struct_metas) {
+			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+		}
+		if (arg_map_metas) {
+			duckdb_free(arg_map_metas);
+		}
+		tcc_struct_meta_destroy(&ret_struct_meta);
 		duckdb_destroy_scalar_function(&fn);
 		return false;
 	}
@@ -2510,8 +3340,16 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	ctx->return_array_size = ret_array_size;
 	ctx->arg_types = arg_types;
 	ctx->arg_array_sizes = arg_array_sizes;
+	ctx->return_struct_meta = ret_struct_meta;
+	ctx->return_map_meta = ret_map_meta;
+	ctx->arg_struct_metas = arg_struct_metas;
+	ctx->arg_map_metas = arg_map_metas;
 	arg_types = NULL;
 	arg_array_sizes = NULL;
+	memset(&ret_struct_meta, 0, sizeof(ret_struct_meta));
+	memset(&ret_map_meta, 0, sizeof(ret_map_meta));
+	arg_struct_metas = NULL;
+	arg_map_metas = NULL;
 	if (ctx->arg_count > 0) {
 		ctx->arg_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)ctx->arg_count);
 		if (!ctx->arg_sizes) {
@@ -2532,7 +3370,9 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	duckdb_scalar_function_set_name(fn, name);
 	for (i = 0; i < arg_count; i++) {
 		duckdb_logical_type arg_type =
-		    tcc_ffi_type_create_logical_type(ctx->arg_types[i], ctx->arg_array_sizes ? ctx->arg_array_sizes[i] : 0);
+		    tcc_ffi_type_create_logical_type(ctx->arg_types[i], ctx->arg_array_sizes ? ctx->arg_array_sizes[i] : 0,
+		                                     ctx->arg_struct_metas ? &ctx->arg_struct_metas[i] : NULL,
+		                                     ctx->arg_map_metas ? &ctx->arg_map_metas[i] : NULL);
 		if (!arg_type) {
 			tcc_host_sig_ctx_destroy(ctx);
 			duckdb_destroy_scalar_function(&fn);
@@ -2542,7 +3382,8 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		duckdb_destroy_logical_type(&arg_type);
 	}
 	{
-		duckdb_logical_type ret_type_obj = tcc_ffi_type_create_logical_type(ret_type, ret_array_size);
+		duckdb_logical_type ret_type_obj =
+		    tcc_ffi_type_create_logical_type(ret_type, ret_array_size, &ctx->return_struct_meta, &ctx->return_map_meta);
 		if (!ret_type_obj) {
 			tcc_host_sig_ctx_destroy(ctx);
 			duckdb_destroy_scalar_function(&fn);
@@ -3267,6 +4108,18 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 		*out_type = TCC_FFI_DECIMAL;
 		return true;
 	}
+	if (token_len > 8 && (token[0] == 's' || token[0] == 'S') && (token[1] == 't' || token[1] == 'T') &&
+	    (token[2] == 'r' || token[2] == 'R') && (token[3] == 'u' || token[3] == 'U') &&
+	    (token[4] == 'c' || token[4] == 'C') && (token[5] == 't' || token[5] == 'T') && token[6] == '<' &&
+	    token[token_len - 1] == '>') {
+		*out_type = TCC_FFI_STRUCT;
+		return true;
+	}
+	if (token_len > 5 && (token[0] == 'm' || token[0] == 'M') && (token[1] == 'a' || token[1] == 'A') &&
+	    (token[2] == 'p' || token[2] == 'P') && token[3] == '<' && token[token_len - 1] == '>') {
+		*out_type = TCC_FFI_MAP;
+		return true;
+	}
 	if (token_len >= 5 && (token[0] == 'l' || token[0] == 'L') && (token[1] == 'i' || token[1] == 'I') &&
 	    (token[2] == 's' || token[2] == 'S') && (token[3] == 't' || token[3] == 'T') && token[4] == '_') {
 		tcc_ffi_type_t child_type = TCC_FFI_VOID;
@@ -3327,22 +4180,314 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 	return false;
 }
 
+static bool tcc_is_identifier_token(const char *value) {
+	size_t i;
+	if (!value || value[0] == '\0') {
+		return false;
+	}
+	if (!(isalpha((unsigned char)value[0]) || value[0] == '_')) {
+		return false;
+	}
+	for (i = 1; value[i] != '\0'; i++) {
+		if (!(isalnum((unsigned char)value[i]) || value[i] == '_')) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t *out_meta,
+                                        tcc_error_buffer_t *error_buf) {
+	size_t token_len;
+	char *inner = NULL;
+	char *cur;
+	int field_count = 0;
+	int cap = 0;
+	char **field_names = NULL;
+	tcc_ffi_type_t *field_types = NULL;
+	size_t *field_sizes = NULL;
+	if (!token || !out_meta) {
+		tcc_set_error(error_buf, "invalid struct token");
+		return false;
+	}
+	memset(out_meta, 0, sizeof(*out_meta));
+	token_len = strlen(token);
+	if (token_len <= 8 || !((token[0] == 's' || token[0] == 'S') && (token[1] == 't' || token[1] == 'T') &&
+	                        (token[2] == 'r' || token[2] == 'R') && (token[3] == 'u' || token[3] == 'U') &&
+	                        (token[4] == 'c' || token[4] == 'C') && (token[5] == 't' || token[5] == 'T') &&
+	                        token[6] == '<' && token[token_len - 1] == '>')) {
+		tcc_set_error(error_buf, "struct token must use struct<...>");
+		return false;
+	}
+	inner = (char *)duckdb_malloc(token_len - 6);
+	if (!inner) {
+		tcc_set_error(error_buf, "out of memory");
+		return false;
+	}
+	memcpy(inner, token + 7, token_len - 8);
+	inner[token_len - 8] = '\0';
+	cur = inner;
+	while (cur && *cur) {
+		char *part = cur;
+		char *next = strchr(part, ';');
+		char *colon;
+		char *name_part;
+		char *type_part;
+		size_t part_len;
+		tcc_ffi_type_t field_type = TCC_FFI_VOID;
+		size_t field_array_size = 0;
+		size_t field_size;
+		char auto_name[32];
+		char **new_names;
+		tcc_ffi_type_t *new_types;
+		size_t *new_sizes;
+		if (next) {
+			*next = '\0';
+			cur = next + 1;
+		} else {
+			cur = NULL;
+		}
+		while (*part && isspace((unsigned char)*part)) {
+			part++;
+		}
+		part_len = strlen(part);
+		while (part_len > 0 && isspace((unsigned char)part[part_len - 1])) {
+			part[--part_len] = '\0';
+		}
+		if (part_len == 0) {
+			tcc_set_error(error_buf, "struct token contains empty field");
+			goto fail;
+		}
+		colon = strchr(part, ':');
+		if (colon) {
+			*colon = '\0';
+			name_part = part;
+			type_part = colon + 1;
+			while (*name_part && isspace((unsigned char)*name_part)) {
+				name_part++;
+			}
+			part_len = strlen(name_part);
+			while (part_len > 0 && isspace((unsigned char)name_part[part_len - 1])) {
+				name_part[--part_len] = '\0';
+			}
+			while (*type_part && isspace((unsigned char)*type_part)) {
+				type_part++;
+			}
+			part_len = strlen(type_part);
+			while (part_len > 0 && isspace((unsigned char)type_part[part_len - 1])) {
+				type_part[--part_len] = '\0';
+			}
+			if (!tcc_is_identifier_token(name_part)) {
+				tcc_set_error(error_buf, "struct field names must be identifiers");
+				goto fail;
+			}
+			if (type_part[0] == '\0') {
+				tcc_set_error(error_buf, "struct field type is missing");
+				goto fail;
+			}
+		} else {
+			snprintf(auto_name, sizeof(auto_name), "f%d", field_count + 1);
+			name_part = auto_name;
+			type_part = part;
+		}
+		if (!tcc_parse_type_token(type_part, false, &field_type, &field_array_size) ||
+		    field_array_size != 0 || !tcc_ffi_type_is_fixed_width_scalar(field_type)) {
+			tcc_set_error(error_buf,
+			              "struct fields currently support fixed-width scalar tokens only (no varchar/blob/nested)");
+			goto fail;
+		}
+		field_size = tcc_ffi_type_size(field_type);
+		if (field_size == 0) {
+			tcc_set_error(error_buf, "struct field has unsupported storage type");
+			goto fail;
+		}
+		if (field_count >= cap) {
+			int new_cap = cap == 0 ? 4 : cap * 2;
+			new_names = (char **)duckdb_malloc(sizeof(char *) * (size_t)new_cap);
+			new_types = (tcc_ffi_type_t *)duckdb_malloc(sizeof(tcc_ffi_type_t) * (size_t)new_cap);
+			new_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)new_cap);
+			if (!new_names || !new_types || !new_sizes) {
+				if (new_names) {
+					duckdb_free(new_names);
+				}
+				if (new_types) {
+					duckdb_free(new_types);
+				}
+				if (new_sizes) {
+					duckdb_free(new_sizes);
+				}
+				tcc_set_error(error_buf, "out of memory");
+				goto fail;
+			}
+			memset(new_names, 0, sizeof(char *) * (size_t)new_cap);
+			if (field_names && field_count > 0) {
+				memcpy(new_names, field_names, sizeof(char *) * (size_t)field_count);
+				memcpy(new_types, field_types, sizeof(tcc_ffi_type_t) * (size_t)field_count);
+				memcpy(new_sizes, field_sizes, sizeof(size_t) * (size_t)field_count);
+				duckdb_free(field_names);
+				duckdb_free(field_types);
+				duckdb_free(field_sizes);
+			}
+			field_names = new_names;
+			field_types = new_types;
+			field_sizes = new_sizes;
+			cap = new_cap;
+		}
+		field_names[field_count] = tcc_strdup(name_part);
+		if (!field_names[field_count]) {
+			tcc_set_error(error_buf, "out of memory");
+			goto fail;
+		}
+		field_types[field_count] = field_type;
+		field_sizes[field_count] = field_size;
+		field_count++;
+	}
+	if (field_count <= 0) {
+		tcc_set_error(error_buf, "struct token requires at least one field");
+		goto fail;
+	}
+	duckdb_free(inner);
+	out_meta->field_count = field_count;
+	out_meta->field_names = field_names;
+	out_meta->field_types = field_types;
+	out_meta->field_sizes = field_sizes;
+	return true;
+fail:
+	if (inner) {
+		duckdb_free(inner);
+	}
+	if (field_names) {
+		int i;
+		for (i = 0; i < field_count; i++) {
+			if (field_names[i]) {
+				duckdb_free(field_names[i]);
+			}
+		}
+		duckdb_free(field_names);
+	}
+	if (field_types) {
+		duckdb_free(field_types);
+	}
+	if (field_sizes) {
+		duckdb_free(field_sizes);
+	}
+	memset(out_meta, 0, sizeof(*out_meta));
+	return false;
+}
+
+static bool tcc_parse_map_meta_token(const char *token, tcc_ffi_map_meta_t *out_meta, tcc_error_buffer_t *error_buf) {
+	size_t token_len;
+	char *inner = NULL;
+	char *sep;
+	char *key_token;
+	char *value_token;
+	tcc_ffi_type_t key_type = TCC_FFI_VOID;
+	tcc_ffi_type_t value_type = TCC_FFI_VOID;
+	size_t key_array_size = 0;
+	size_t value_array_size = 0;
+	size_t key_size = 0;
+	size_t value_size = 0;
+	if (!token || !out_meta) {
+		tcc_set_error(error_buf, "invalid map token");
+		return false;
+	}
+	memset(out_meta, 0, sizeof(*out_meta));
+	token_len = strlen(token);
+	if (token_len <= 5 || !((token[0] == 'm' || token[0] == 'M') && (token[1] == 'a' || token[1] == 'A') &&
+	                        (token[2] == 'p' || token[2] == 'P') && token[3] == '<' &&
+	                        token[token_len - 1] == '>')) {
+		tcc_set_error(error_buf, "map token must use map<key_type;value_type>");
+		return false;
+	}
+	inner = (char *)duckdb_malloc(token_len - 3);
+	if (!inner) {
+		tcc_set_error(error_buf, "out of memory");
+		return false;
+	}
+	memcpy(inner, token + 4, token_len - 5);
+	inner[token_len - 5] = '\0';
+	sep = strchr(inner, ';');
+	if (!sep || strchr(sep + 1, ';')) {
+		duckdb_free(inner);
+		tcc_set_error(error_buf, "map token must use exactly one ';' separator");
+		return false;
+	}
+	*sep = '\0';
+	key_token = inner;
+	value_token = sep + 1;
+	while (*key_token && isspace((unsigned char)*key_token)) {
+		key_token++;
+	}
+	while (*value_token && isspace((unsigned char)*value_token)) {
+		value_token++;
+	}
+	{
+		size_t len = strlen(key_token);
+		while (len > 0 && isspace((unsigned char)key_token[len - 1])) {
+			key_token[--len] = '\0';
+		}
+	}
+	{
+		size_t len = strlen(value_token);
+		while (len > 0 && isspace((unsigned char)value_token[len - 1])) {
+			value_token[--len] = '\0';
+		}
+	}
+	if (key_token[0] == '\0' || value_token[0] == '\0') {
+		duckdb_free(inner);
+		tcc_set_error(error_buf, "map token key/value type is missing");
+		return false;
+	}
+	if (!tcc_parse_type_token(key_token, false, &key_type, &key_array_size) ||
+	    !tcc_parse_type_token(value_token, false, &value_type, &value_array_size) || key_array_size != 0 ||
+	    value_array_size != 0 || !tcc_ffi_type_is_fixed_width_scalar(key_type) ||
+	    !tcc_ffi_type_is_fixed_width_scalar(value_type)) {
+		duckdb_free(inner);
+		tcc_set_error(error_buf,
+		              "map key/value currently support fixed-width scalar tokens only (no varchar/blob/nested)");
+		return false;
+	}
+	key_size = tcc_ffi_type_size(key_type);
+	value_size = tcc_ffi_type_size(value_type);
+	duckdb_free(inner);
+	if (key_size == 0 || value_size == 0) {
+		tcc_set_error(error_buf, "map key/value has unsupported storage type");
+		return false;
+	}
+	out_meta->key_type = key_type;
+	out_meta->value_type = value_type;
+	out_meta->key_size = key_size;
+	out_meta->value_size = value_size;
+	return true;
+}
+
 static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
 	                                size_t *out_return_array_size, tcc_ffi_type_t **out_arg_types,
-	                                size_t **out_arg_array_sizes, int *out_arg_count, tcc_error_buffer_t *error_buf) {
+	                                size_t **out_arg_array_sizes, tcc_ffi_struct_meta_t *out_return_struct_meta,
+	                                tcc_ffi_map_meta_t *out_return_map_meta,
+	                                tcc_ffi_struct_meta_t **out_arg_struct_metas,
+	                                tcc_ffi_map_meta_t **out_arg_map_metas, int *out_arg_count,
+	                                tcc_error_buffer_t *error_buf) {
 	char *args_copy = NULL;
 	char *cur = NULL;
 	int argc = 0;
 	int cap = 0;
 	tcc_ffi_type_t *arg_types = NULL;
 	size_t *arg_array_sizes = NULL;
+	tcc_ffi_struct_meta_t return_struct_meta;
+	tcc_ffi_map_meta_t return_map_meta;
+	tcc_ffi_struct_meta_t *arg_struct_metas = NULL;
+	tcc_ffi_map_meta_t *arg_map_metas = NULL;
 	tcc_ffi_type_t ret_type = TCC_FFI_I64;
 	size_t ret_array_size = 0;
 	if (!return_type || return_type[0] == '\0' || !out_return_type || !out_return_array_size || !out_arg_types ||
-	    !out_arg_array_sizes || !out_arg_count) {
+	    !out_arg_array_sizes || !out_return_struct_meta || !out_return_map_meta || !out_arg_struct_metas ||
+	    !out_arg_map_metas || !out_arg_count) {
 		tcc_set_error(error_buf, "return_type is required");
 		return false;
 	}
+	memset(&return_struct_meta, 0, sizeof(return_struct_meta));
+	memset(&return_map_meta, 0, sizeof(return_map_meta));
 	if (!arg_types_csv) {
 		tcc_set_error(error_buf, "arg_types is required (use [] for no args)");
 		return false;
@@ -3351,16 +4496,28 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 		tcc_set_error(error_buf, "return_type contains unsupported type token");
 		return false;
 	}
+	if (ret_type == TCC_FFI_STRUCT && !tcc_parse_struct_meta_token(return_type, &return_struct_meta, error_buf)) {
+		return false;
+	}
+	if (ret_type == TCC_FFI_MAP && !tcc_parse_map_meta_token(return_type, &return_map_meta, error_buf)) {
+		tcc_struct_meta_destroy(&return_struct_meta);
+		return false;
+	}
 	if (arg_types_csv[0] == '\0') {
 		*out_return_type = ret_type;
 		*out_return_array_size = ret_array_size;
 		*out_arg_types = NULL;
 		*out_arg_array_sizes = NULL;
+		*out_return_struct_meta = return_struct_meta;
+		*out_return_map_meta = return_map_meta;
+		*out_arg_struct_metas = NULL;
+		*out_arg_map_metas = NULL;
 		*out_arg_count = 0;
 		return true;
 	}
 	args_copy = tcc_strdup(arg_types_csv);
 	if (!args_copy) {
+		tcc_struct_meta_destroy(&return_struct_meta);
 		tcc_set_error(error_buf, "out of memory");
 		return false;
 	}
@@ -3390,6 +4547,13 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 				if (arg_array_sizes) {
 					duckdb_free(arg_array_sizes);
 				}
+				if (arg_struct_metas) {
+					tcc_struct_meta_array_destroy(arg_struct_metas, argc);
+				}
+				if (arg_map_metas) {
+					duckdb_free(arg_map_metas);
+				}
+				tcc_struct_meta_destroy(&return_struct_meta);
 				tcc_set_error(error_buf, "arg_types contains empty token");
 				return false;
 			}
@@ -3397,9 +4561,19 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 				int new_cap = cap == 0 ? 8 : cap * 2;
 				tcc_ffi_type_t *new_types = (tcc_ffi_type_t *)duckdb_malloc(sizeof(tcc_ffi_type_t) * (size_t)new_cap);
 				size_t *new_array_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)new_cap);
+				tcc_ffi_struct_meta_t *new_struct_metas =
+				    (tcc_ffi_struct_meta_t *)duckdb_malloc(sizeof(tcc_ffi_struct_meta_t) * (size_t)new_cap);
+				tcc_ffi_map_meta_t *new_map_metas =
+				    (tcc_ffi_map_meta_t *)duckdb_malloc(sizeof(tcc_ffi_map_meta_t) * (size_t)new_cap);
 				if (!new_types) {
 					if (new_array_sizes) {
 						duckdb_free(new_array_sizes);
+					}
+					if (new_struct_metas) {
+						duckdb_free(new_struct_metas);
+					}
+					if (new_map_metas) {
+						duckdb_free(new_map_metas);
 					}
 					duckdb_free(args_copy);
 					if (arg_types) {
@@ -3408,10 +4582,17 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 					if (arg_array_sizes) {
 						duckdb_free(arg_array_sizes);
 					}
+					if (arg_struct_metas) {
+						tcc_struct_meta_array_destroy(arg_struct_metas, argc);
+					}
+					if (arg_map_metas) {
+						duckdb_free(arg_map_metas);
+					}
+					tcc_struct_meta_destroy(&return_struct_meta);
 					tcc_set_error(error_buf, "out of memory");
 					return false;
 				}
-				if (!new_array_sizes) {
+				if (!new_array_sizes || !new_struct_metas || !new_map_metas) {
 					duckdb_free(new_types);
 					duckdb_free(args_copy);
 					if (arg_types) {
@@ -3420,9 +4601,27 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 					if (arg_array_sizes) {
 						duckdb_free(arg_array_sizes);
 					}
+					if (new_array_sizes) {
+						duckdb_free(new_array_sizes);
+					}
+					if (new_struct_metas) {
+						duckdb_free(new_struct_metas);
+					}
+					if (new_map_metas) {
+						duckdb_free(new_map_metas);
+					}
+					if (arg_struct_metas) {
+						tcc_struct_meta_array_destroy(arg_struct_metas, argc);
+					}
+					if (arg_map_metas) {
+						duckdb_free(arg_map_metas);
+					}
+					tcc_struct_meta_destroy(&return_struct_meta);
 					tcc_set_error(error_buf, "out of memory");
 					return false;
 				}
+				memset(new_struct_metas, 0, sizeof(tcc_ffi_struct_meta_t) * (size_t)new_cap);
+				memset(new_map_metas, 0, sizeof(tcc_ffi_map_meta_t) * (size_t)new_cap);
 				if (arg_types && argc > 0) {
 					memcpy(new_types, arg_types, sizeof(tcc_ffi_type_t) * (size_t)argc);
 					duckdb_free(arg_types);
@@ -3431,8 +4630,18 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 					memcpy(new_array_sizes, arg_array_sizes, sizeof(size_t) * (size_t)argc);
 					duckdb_free(arg_array_sizes);
 				}
+				if (arg_struct_metas && argc > 0) {
+					memcpy(new_struct_metas, arg_struct_metas, sizeof(tcc_ffi_struct_meta_t) * (size_t)argc);
+					duckdb_free(arg_struct_metas);
+				}
+				if (arg_map_metas && argc > 0) {
+					memcpy(new_map_metas, arg_map_metas, sizeof(tcc_ffi_map_meta_t) * (size_t)argc);
+					duckdb_free(arg_map_metas);
+				}
 				arg_types = new_types;
 				arg_array_sizes = new_array_sizes;
+				arg_struct_metas = new_struct_metas;
+				arg_map_metas = new_map_metas;
 				cap = new_cap;
 			}
 			if (!tcc_parse_type_token(token, false, &arg_types[argc], &arg_array_sizes[argc])) {
@@ -3443,7 +4652,49 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 				if (arg_array_sizes) {
 					duckdb_free(arg_array_sizes);
 				}
+				if (arg_struct_metas) {
+					tcc_struct_meta_array_destroy(arg_struct_metas, argc);
+				}
+				if (arg_map_metas) {
+					duckdb_free(arg_map_metas);
+				}
+				tcc_struct_meta_destroy(&return_struct_meta);
 				tcc_set_error(error_buf, "arg_types contains unsupported type token");
+				return false;
+			}
+			if (arg_types[argc] == TCC_FFI_STRUCT &&
+			    !tcc_parse_struct_meta_token(token, &arg_struct_metas[argc], error_buf)) {
+				duckdb_free(args_copy);
+				if (arg_types) {
+					duckdb_free(arg_types);
+				}
+				if (arg_array_sizes) {
+					duckdb_free(arg_array_sizes);
+				}
+				if (arg_struct_metas) {
+					tcc_struct_meta_array_destroy(arg_struct_metas, argc + 1);
+				}
+				if (arg_map_metas) {
+					duckdb_free(arg_map_metas);
+				}
+				tcc_struct_meta_destroy(&return_struct_meta);
+				return false;
+			}
+			if (arg_types[argc] == TCC_FFI_MAP && !tcc_parse_map_meta_token(token, &arg_map_metas[argc], error_buf)) {
+				duckdb_free(args_copy);
+				if (arg_types) {
+					duckdb_free(arg_types);
+				}
+				if (arg_array_sizes) {
+					duckdb_free(arg_array_sizes);
+				}
+				if (arg_struct_metas) {
+					tcc_struct_meta_array_destroy(arg_struct_metas, argc + 1);
+				}
+				if (arg_map_metas) {
+					duckdb_free(arg_map_metas);
+				}
+				tcc_struct_meta_destroy(&return_struct_meta);
 				return false;
 			}
 			argc++;
@@ -3451,8 +4702,12 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 	duckdb_free(args_copy);
 	*out_return_type = ret_type;
 	*out_return_array_size = ret_array_size;
+	*out_return_struct_meta = return_struct_meta;
+	*out_return_map_meta = return_map_meta;
 	*out_arg_types = arg_types;
 	*out_arg_array_sizes = arg_array_sizes;
+	*out_arg_struct_metas = arg_struct_metas;
+	*out_arg_map_metas = arg_map_metas;
 	*out_arg_count = argc;
 	return true;
 }
@@ -3520,6 +4775,10 @@ static const char *tcc_ffi_type_to_c_type_name(tcc_ffi_type_t type) {
 		return "ducktinycc_interval_t";
 	case TCC_FFI_DECIMAL:
 		return "ducktinycc_decimal_t";
+	case TCC_FFI_STRUCT:
+		return "ducktinycc_struct_t";
+	case TCC_FFI_MAP:
+		return "ducktinycc_map_t";
 	case TCC_FFI_LIST_BOOL:
 	case TCC_FFI_LIST_I8:
 	case TCC_FFI_LIST_U8:
@@ -3673,6 +4932,32 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 				                          "}\n",
 				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
 				                          ret_c_type);
+			} else if (ok && tcc_ffi_type_is_struct(ret_type)) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "  %s result = %s(%s);\n"
+				                          "  if (!result.field_ptrs || result.field_count == 0) {\n"
+				                          "    if (out_is_null) { *out_is_null = 1; }\n"
+				                          "    return 1;\n"
+				                          "  }\n"
+				                          "  *(%s *)out_value = result;\n"
+				                          "  if (out_is_null) { *out_is_null = 0; }\n"
+				                          "  return 1;\n"
+				                          "}\n",
+				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
+				                          ret_c_type);
+			} else if (ok && tcc_ffi_type_is_map(ret_type)) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "  %s result = %s(%s);\n"
+				                          "  if (result.len > 0 && (!result.key_ptr || !result.value_ptr)) {\n"
+				                          "    if (out_is_null) { *out_is_null = 1; }\n"
+				                          "    return 1;\n"
+				                          "  }\n"
+				                          "  *(%s *)out_value = result;\n"
+				                          "  if (out_is_null) { *out_is_null = 0; }\n"
+				                          "  return 1;\n"
+				                          "}\n",
+				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
+				                          ret_c_type);
 			} else if (ok) {
 				ok = tcc_text_buf_appendf(&src,
 				                          "  %s result = %s(%s);\n"
@@ -3738,6 +5023,24 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 				ok = tcc_text_buf_appendf(&src,
 				                          "    %s result = %s(%s);\n"
 				                          "    if (!result.ptr) {\n"
+				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
+				                          "      continue;\n"
+				                          "    }\n"
+				                          "    out[row] = result;\n",
+				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
+			} else if (ok && tcc_ffi_type_is_struct(ret_type)) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "    %s result = %s(%s);\n"
+				                          "    if (!result.field_ptrs || result.field_count == 0) {\n"
+				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
+				                          "      continue;\n"
+				                          "    }\n"
+				                          "    out[row] = result;\n",
+				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
+			} else if (ok && tcc_ffi_type_is_map(ret_type)) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "    %s result = %s(%s);\n"
+				                          "    if (result.len > 0 && (!result.key_ptr || !result.value_ptr)) {\n"
 				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
 				                          "      continue;\n"
 				                          "    }\n"
@@ -3823,6 +5126,20 @@ static char *tcc_build_codegen_unit_source(const char *user_source, const char *
 	                      "  uint64_t offset;\n"
 	                      "  uint64_t len;\n"
 	                      "} ducktinycc_array_t;\n"
+	                      "typedef struct {\n"
+	                      "  const void *const *field_ptrs;\n"
+	                      "  const uint64_t *const *field_validity;\n"
+	                      "  uint64_t field_count;\n"
+	                      "  uint64_t offset;\n"
+	                      "} ducktinycc_struct_t;\n"
+	                      "typedef struct {\n"
+	                      "  const void *key_ptr;\n"
+	                      "  const uint64_t *key_validity;\n"
+	                      "  const void *value_ptr;\n"
+	                      "  const uint64_t *value_validity;\n"
+	                      "  uint64_t offset;\n"
+	                      "  uint64_t len;\n"
+	                      "} ducktinycc_map_t;\n"
 	                      "static int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx) {\n"
 	                      "  uint64_t global_idx;\n"
 	                      "  if (!list || idx >= list->len) {\n"
@@ -3844,6 +5161,43 @@ static char *tcc_build_codegen_unit_source(const char *user_source, const char *
 	                      "  }\n"
 	                      "  global_idx = arr->offset + idx;\n"
 	                      "  return (arr->validity[global_idx >> 6] & (1ULL << (global_idx & 63))) != 0;\n"
+	                      "}\n"
+	                      "static const void *ducktinycc_struct_field_ptr(const ducktinycc_struct_t *st, uint64_t idx) {\n"
+	                      "  if (!st || !st->field_ptrs || idx >= st->field_count) {\n"
+	                      "    return (const void *)0;\n"
+	                      "  }\n"
+	                      "  return st->field_ptrs[idx];\n"
+	                      "}\n"
+	                      "static int ducktinycc_struct_field_is_valid(const ducktinycc_struct_t *st, uint64_t field_idx) {\n"
+	                      "  if (!st || !st->field_ptrs || field_idx >= st->field_count) {\n"
+	                      "    return 0;\n"
+	                      "  }\n"
+	                      "  if (!st->field_validity || !st->field_validity[field_idx]) {\n"
+	                      "    return 1;\n"
+	                      "  }\n"
+	                      "  return (st->field_validity[field_idx][st->offset >> 6] & (1ULL << (st->offset & 63))) != 0;\n"
+	                      "}\n"
+	                      "static int ducktinycc_map_key_is_valid(const ducktinycc_map_t *m, uint64_t idx) {\n"
+	                      "  uint64_t global_idx;\n"
+	                      "  if (!m || idx >= m->len) {\n"
+	                      "    return 0;\n"
+	                      "  }\n"
+	                      "  if (!m->key_validity) {\n"
+	                      "    return 1;\n"
+	                      "  }\n"
+	                      "  global_idx = m->offset + idx;\n"
+	                      "  return (m->key_validity[global_idx >> 6] & (1ULL << (global_idx & 63))) != 0;\n"
+	                      "}\n"
+	                      "static int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx) {\n"
+	                      "  uint64_t global_idx;\n"
+	                      "  if (!m || idx >= m->len) {\n"
+	                      "    return 0;\n"
+	                      "  }\n"
+	                      "  if (!m->value_validity) {\n"
+	                      "    return 1;\n"
+	                      "  }\n"
+	                      "  global_idx = m->offset + idx;\n"
+	                      "  return (m->value_validity[global_idx >> 6] & (1ULL << (global_idx & 63))) != 0;\n"
 	                      "}\n";
 	size_t n0;
 	size_t n1;
@@ -3887,6 +5241,10 @@ static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_mod
 	size_t ret_array_size = 0;
 	tcc_ffi_type_t *arg_types = NULL;
 	size_t *arg_array_sizes = NULL;
+	tcc_ffi_struct_meta_t ret_struct_meta;
+	tcc_ffi_map_meta_t ret_map_meta;
+	tcc_ffi_struct_meta_t *arg_struct_metas = NULL;
+	tcc_ffi_map_meta_t *arg_map_metas = NULL;
 	tcc_wrapper_mode_t wrapper_mode = TCC_WRAPPER_MODE_ROW;
 	const char *wrapper_mode_token;
 	int arg_count = 0;
@@ -3900,12 +5258,15 @@ static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_mod
 		tcc_set_error(error_buf, "invalid codegen compile arguments");
 		return -1;
 	}
+	memset(&ret_struct_meta, 0, sizeof(ret_struct_meta));
+	memset(&ret_map_meta, 0, sizeof(ret_map_meta));
 	if (!state->connection) {
 		tcc_set_error(error_buf, "no persistent extension connection available");
 		return -1;
 	}
 	if (!tcc_parse_signature(bind->return_type, bind->arg_types, &ret_type, &ret_array_size, &arg_types,
-	                         &arg_array_sizes, &arg_count, error_buf)) {
+	                         &arg_array_sizes, &ret_struct_meta, &ret_map_meta, &arg_struct_metas,
+	                         &arg_map_metas, &arg_count, error_buf)) {
 		return -1;
 	}
 	if (!tcc_parse_wrapper_mode(bind->wrapper_mode, &wrapper_mode, error_buf)) {
@@ -3915,6 +5276,13 @@ static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_mod
 		if (arg_array_sizes) {
 			duckdb_free(arg_array_sizes);
 		}
+		if (arg_struct_metas) {
+			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+		}
+		if (arg_map_metas) {
+			duckdb_free(arg_map_metas);
+		}
+		tcc_struct_meta_destroy(&ret_struct_meta);
 		return -1;
 	}
 	wrapper_mode_token = tcc_wrapper_mode_token(wrapper_mode);
@@ -3925,6 +5293,13 @@ static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_mod
 		if (arg_array_sizes) {
 			duckdb_free(arg_array_sizes);
 		}
+		if (arg_struct_metas) {
+			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+		}
+		if (arg_map_metas) {
+			duckdb_free(arg_map_metas);
+		}
+		tcc_struct_meta_destroy(&ret_struct_meta);
 		tcc_set_error(error_buf, "wrapper_mode contains unsupported token");
 		return -1;
 	}
@@ -3943,6 +5318,15 @@ static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_mod
 		duckdb_free(arg_array_sizes);
 		arg_array_sizes = NULL;
 	}
+	if (arg_struct_metas) {
+		tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+		arg_struct_metas = NULL;
+	}
+	if (arg_map_metas) {
+		duckdb_free(arg_map_metas);
+		arg_map_metas = NULL;
+	}
+	tcc_struct_meta_destroy(&ret_struct_meta);
 	if (!loader_src) {
 		tcc_set_error(error_buf, "failed to generate codegen wrapper");
 		return -1;
@@ -4117,6 +5501,10 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			size_t ret_array_size = 0;
 			tcc_ffi_type_t *arg_types = NULL;
 			size_t *arg_array_sizes = NULL;
+			tcc_ffi_struct_meta_t ret_struct_meta;
+			tcc_ffi_map_meta_t ret_map_meta;
+			tcc_ffi_struct_meta_t *arg_struct_metas = NULL;
+			tcc_ffi_map_meta_t *arg_map_metas = NULL;
 			tcc_wrapper_mode_t wrapper_mode = TCC_WRAPPER_MODE_ROW;
 		const char *wrapper_mode_token = NULL;
 		int arg_count = 0;
@@ -4125,6 +5513,8 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		char *loader_src = NULL;
 		char *preview_src = NULL;
 		memset(&err, 0, sizeof(err));
+		memset(&ret_struct_meta, 0, sizeof(ret_struct_meta));
+		memset(&ret_map_meta, 0, sizeof(ret_map_meta));
 		if (!target_symbol || target_symbol[0] == '\0') {
 			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required (bind or argument)",
 			              NULL, sql_name, target_symbol, NULL, "connection");
@@ -4132,7 +5522,8 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			return;
 		}
 			if (!tcc_parse_signature(bind->return_type, bind->arg_types, &ret_type, &ret_array_size, &arg_types,
-			                         &arg_array_sizes, &arg_count, &err)) {
+			                         &arg_array_sizes, &ret_struct_meta, &ret_map_meta, &arg_struct_metas,
+			                         &arg_map_metas, &arg_count, &err)) {
 				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_SIGNATURE", "invalid return_type/arg_types",
 				              err.message[0] ? err.message : NULL, sql_name, target_symbol, NULL, "connection");
 				init->emitted = true;
@@ -4145,6 +5536,13 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 				if (arg_array_sizes) {
 					duckdb_free(arg_array_sizes);
 				}
+				if (arg_struct_metas) {
+					tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+				}
+				if (arg_map_metas) {
+					duckdb_free(arg_map_metas);
+				}
+				tcc_struct_meta_destroy(&ret_struct_meta);
 				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_WRAPPER_MODE", "invalid wrapper_mode",
 				              err.message[0] ? err.message : NULL, sql_name, target_symbol, NULL, "connection");
 				init->emitted = true;
@@ -4158,6 +5556,13 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 				if (arg_array_sizes) {
 					duckdb_free(arg_array_sizes);
 				}
+				if (arg_struct_metas) {
+					tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+				}
+				if (arg_map_metas) {
+					duckdb_free(arg_map_metas);
+				}
+				tcc_struct_meta_destroy(&ret_struct_meta);
 				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_WRAPPER_MODE", "invalid wrapper_mode",
 				              "wrapper_mode contains unsupported token", sql_name, target_symbol, NULL, "connection");
 				init->emitted = true;
@@ -4177,6 +5582,15 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 				duckdb_free(arg_array_sizes);
 				arg_array_sizes = NULL;
 			}
+			if (arg_struct_metas) {
+				tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+				arg_struct_metas = NULL;
+			}
+			if (arg_map_metas) {
+				duckdb_free(arg_map_metas);
+				arg_map_metas = NULL;
+			}
+			tcc_struct_meta_destroy(&ret_struct_meta);
 		if (!loader_src) {
 			tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED", "ffi codegen failed",
 			              "failed to generate codegen wrapper", sql_name, target_symbol, NULL, "connection");
@@ -4232,7 +5646,9 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 						phase = "bind";
 						code = "E_BAD_WRAPPER_MODE";
 						message = "invalid wrapper_mode";
-					} else if (strstr(err.message, "return_type") || strstr(err.message, "arg_types")) {
+					} else if (strstr(err.message, "return_type") || strstr(err.message, "arg_types") ||
+					           strstr(err.message, "struct token") || strstr(err.message, "map token") ||
+					           strstr(err.message, "fixed-width scalar tokens only")) {
 						phase = "bind";
 						code = "E_BAD_SIGNATURE";
 						message = "invalid return_type/arg_types";
