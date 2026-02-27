@@ -59,6 +59,20 @@ context columns. Functions are prefixed by `tcc_`
 | `tcc_system_paths(runtime_path := '', library_path := '')` | Show include and library search paths used by TinyCC workflows | Includes existence flags; includes Windows/MSYS2/Rtools defaults on Windows builds |
 | `tcc_library_probe(library := ..., runtime_path := '', library_path := '')` | Resolve a library short name or full filename/path | Supports `.a`, `.so*`, `.dylib`, `.dll`, `.lib` style names |
 
+### Pointer and Buffer Helpers (Direct SQL)
+
+| Function | Purpose | Notes |
+|---|---|---|
+| `tcc_alloc(size_ubigint)` | Allocate process-local C memory and return handle | Returns `UBIGINT` handle; zero-initialized; NULL on invalid size/OOM |
+| `tcc_free_ptr(handle_ubigint)` | Free an allocated handle | Returns `BOOLEAN`; true on success |
+| `tcc_ptr_size(handle_ubigint)` | Return allocation size in bytes | Returns `UBIGINT`; NULL for invalid handle |
+| `tcc_dataptr(handle_ubigint)` | Return raw process address for handle | Returns `UBIGINT`; interop escape hatch |
+| `tcc_ptr_add(addr_ubigint, offset_ubigint)` | Raw address arithmetic helper | Returns `UBIGINT` address |
+| `tcc_read_i8/u8/i16/u16/i32/u32/i64/u64/f32/f64(handle, offset)` | Typed reads from handle memory | Returns typed value or NULL when out-of-bounds/invalid |
+| `tcc_write_i8/u8/i16/u16/i32/u32/i64/u64/f32/f64(handle, offset, value)` | Typed writes into handle memory | Returns `BOOLEAN`; false on out-of-bounds/invalid |
+| `tcc_read_bytes(handle, offset, width)` | Read byte span as `BLOB` | NULL on out-of-bounds/invalid |
+| `tcc_write_bytes(handle, offset, blob)` | Write `BLOB` bytes into handle memory | Returns `BOOLEAN`; false on out-of-bounds/invalid |
+
 ## Supported Types
 
 Type metadata is explicit for `compile`, `quick_compile`, and `codegen_preview`:
