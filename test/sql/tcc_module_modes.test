@@ -363,6 +363,72 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'const char *echo_cstr(const char *s){ return s; }',
+  symbol := 'echo_cstr',
+  sql_name := 'echo_cstr',
+  return_type := 'varchar',
+  arg_types := ['cstring']
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT echo_cstr('duck'), echo_cstr('abcdefghijklmnopqrstuvwxyz0123456789');
+----
+duck	abcdefghijklmnopqrstuvwxyz0123456789
+
+query T
+SELECT echo_cstr(NULL);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *empty_to_null(const char *s){ if (!s || s[0] == 0) return 0; return s; }',
+  symbol := 'empty_to_null',
+  sql_name := 'empty_to_null',
+  return_type := 'text',
+  arg_types := ['string']
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT empty_to_null('ok'), empty_to_null('');
+----
+ok	NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *batch_echo(const char *s){ return s; }',
+  symbol := 'batch_echo',
+  sql_name := 'batch_echo',
+  return_type := 'varchar',
+  arg_types := ['varchar'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query TTT
+SELECT batch_echo(a), batch_echo(b), batch_echo(c)
+FROM (SELECT 'x' AS a, 'yy' AS b, NULL AS c);
+----
+x	yy	NULL
+
+query T
+SELECT batch_echo('abcdefghijklmnopqrstuvwxyz0123456789');
+----
+abcdefghijklmnopqrstuvwxyz0123456789
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'long long batch_add(long long a, long long b){ return a + b; }',
   symbol := 'batch_add',
   sql_name := 'batch_add',
