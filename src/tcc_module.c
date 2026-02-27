@@ -40,6 +40,22 @@ typedef struct {
 } tcc_rwlock_t;
 
 typedef struct {
+	uint64_t handle;
+	void *ptr;
+	uint64_t size;
+	bool owned;
+} tcc_ptr_entry_t;
+
+typedef struct {
+	atomic_uint ref_count;
+	atomic_flag lock;
+	tcc_ptr_entry_t *entries;
+	idx_t count;
+	idx_t capacity;
+	uint64_t next_handle;
+} tcc_ptr_registry_t;
+
+typedef struct {
 	char *runtime_path;
 	char *bound_symbol;
 	char *bound_sql_name;
@@ -79,6 +95,7 @@ typedef enum {
 	TCC_FFI_DECIMAL = 19,
 	TCC_FFI_STRUCT = 20,
 	TCC_FFI_MAP = 21,
+	TCC_FFI_PTR = 22,
 	TCC_FFI_LIST_BOOL = 64,
 	TCC_FFI_LIST_I8 = 65,
 	TCC_FFI_LIST_U8 = 66,
@@ -213,6 +230,7 @@ typedef struct {
 	duckdb_connection connection;
 	duckdb_database database;
 	tcc_rwlock_t lock;
+	tcc_ptr_registry_t *ptr_registry;
 	tcc_session_t session;
 	tcc_registered_entry_t *entries;
 	idx_t entry_count;
@@ -298,6 +316,10 @@ typedef struct {
 	atomic_uint_fast64_t offset;
 } tcc_diag_init_data_t;
 
+typedef struct {
+	tcc_ptr_registry_t *registry;
+} tcc_ptr_helper_ctx_t;
+
 static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
 	                                size_t *out_return_array_size, tcc_ffi_type_t **out_arg_types,
 	                                size_t **out_arg_array_sizes, tcc_ffi_struct_meta_t *out_return_struct_meta,
@@ -380,6 +402,780 @@ static void tcc_rwlock_write_unlock(tcc_rwlock_t *lock) {
 		return;
 	}
 	atomic_store_explicit(&lock->writer, false, memory_order_release);
+}
+
+static void tcc_ptr_registry_lock(tcc_ptr_registry_t *registry) {
+	if (!registry) {
+		return;
+	}
+	while (atomic_flag_test_and_set_explicit(&registry->lock, memory_order_acquire)) {
+	}
+}
+
+static void tcc_ptr_registry_unlock(tcc_ptr_registry_t *registry) {
+	if (!registry) {
+		return;
+	}
+	atomic_flag_clear_explicit(&registry->lock, memory_order_release);
+}
+
+static tcc_ptr_registry_t *tcc_ptr_registry_create(void) {
+	tcc_ptr_registry_t *registry = (tcc_ptr_registry_t *)duckdb_malloc(sizeof(tcc_ptr_registry_t));
+	if (!registry) {
+		return NULL;
+	}
+	memset(registry, 0, sizeof(*registry));
+	atomic_init(&registry->ref_count, 1);
+	atomic_flag_clear(&registry->lock);
+	registry->next_handle = 1;
+	return registry;
+}
+
+static void tcc_ptr_registry_destroy(tcc_ptr_registry_t *registry) {
+	idx_t i;
+	if (!registry) {
+		return;
+	}
+	for (i = 0; i < registry->count; i++) {
+		if (registry->entries[i].owned && registry->entries[i].ptr) {
+			free(registry->entries[i].ptr);
+		}
+	}
+	if (registry->entries) {
+		duckdb_free(registry->entries);
+	}
+	duckdb_free(registry);
+}
+
+static void tcc_ptr_registry_ref(tcc_ptr_registry_t *registry) {
+	if (!registry) {
+		return;
+	}
+	atomic_fetch_add_explicit(&registry->ref_count, 1, memory_order_relaxed);
+}
+
+static void tcc_ptr_registry_unref(tcc_ptr_registry_t *registry) {
+	if (!registry) {
+		return;
+	}
+	if (atomic_fetch_sub_explicit(&registry->ref_count, 1, memory_order_acq_rel) == 1) {
+		tcc_ptr_registry_destroy(registry);
+	}
+}
+
+static idx_t tcc_ptr_registry_find_handle_unlocked(tcc_ptr_registry_t *registry, uint64_t handle) {
+	idx_t i;
+	if (!registry || handle == 0) {
+		return (idx_t)-1;
+	}
+	for (i = 0; i < registry->count; i++) {
+		if (registry->entries[i].handle == handle) {
+			return i;
+		}
+	}
+	return (idx_t)-1;
+}
+
+static bool tcc_ptr_registry_reserve_unlocked(tcc_ptr_registry_t *registry, idx_t wanted) {
+	tcc_ptr_entry_t *new_entries;
+	idx_t new_capacity;
+	if (!registry) {
+		return false;
+	}
+	if (registry->capacity >= wanted) {
+		return true;
+	}
+	new_capacity = registry->capacity == 0 ? 16 : registry->capacity * 2;
+	while (new_capacity < wanted) {
+		if (new_capacity > (idx_t)-1 / 2) {
+			return false;
+		}
+		new_capacity *= 2;
+	}
+	new_entries = (tcc_ptr_entry_t *)duckdb_malloc(sizeof(tcc_ptr_entry_t) * (size_t)new_capacity);
+	if (!new_entries) {
+		return false;
+	}
+	memset(new_entries, 0, sizeof(tcc_ptr_entry_t) * (size_t)new_capacity);
+	if (registry->entries && registry->count > 0) {
+		memcpy(new_entries, registry->entries, sizeof(tcc_ptr_entry_t) * (size_t)registry->count);
+		duckdb_free(registry->entries);
+	}
+	registry->entries = new_entries;
+	registry->capacity = new_capacity;
+	return true;
+}
+
+static bool tcc_ptr_span_fits(uint64_t len, uint64_t offset, uint64_t width) {
+	if (offset > len) {
+		return false;
+	}
+	return width <= (len - offset);
+}
+
+static bool tcc_ptr_registry_alloc(tcc_ptr_registry_t *registry, uint64_t size, uint64_t *out_handle) {
+	void *ptr;
+	tcc_ptr_entry_t *entry;
+	uint64_t handle;
+	if (!registry || !out_handle || size == 0 || size > (uint64_t)(~(size_t)0)) {
+		return false;
+	}
+	ptr = malloc((size_t)size);
+	if (!ptr) {
+		return false;
+	}
+	memset(ptr, 0, (size_t)size);
+	tcc_ptr_registry_lock(registry);
+	if (!tcc_ptr_registry_reserve_unlocked(registry, registry->count + 1)) {
+		tcc_ptr_registry_unlock(registry);
+		free(ptr);
+		return false;
+	}
+	handle = registry->next_handle++;
+	if (handle == 0) {
+		handle = registry->next_handle++;
+	}
+	entry = &registry->entries[registry->count++];
+	memset(entry, 0, sizeof(*entry));
+	entry->handle = handle;
+	entry->ptr = ptr;
+	entry->size = size;
+	entry->owned = true;
+	tcc_ptr_registry_unlock(registry);
+	*out_handle = handle;
+	return true;
+}
+
+static bool tcc_ptr_registry_free(tcc_ptr_registry_t *registry, uint64_t handle) {
+	void *ptr = NULL;
+	bool owned = false;
+	idx_t idx;
+	idx_t last;
+	if (!registry || handle == 0) {
+		return false;
+	}
+	tcc_ptr_registry_lock(registry);
+	idx = tcc_ptr_registry_find_handle_unlocked(registry, handle);
+	if (idx == (idx_t)-1) {
+		tcc_ptr_registry_unlock(registry);
+		return false;
+	}
+	ptr = registry->entries[idx].ptr;
+	owned = registry->entries[idx].owned;
+	last = registry->count - 1;
+	if (idx != last) {
+		registry->entries[idx] = registry->entries[last];
+	}
+	memset(&registry->entries[last], 0, sizeof(registry->entries[last]));
+	registry->count--;
+	tcc_ptr_registry_unlock(registry);
+	if (owned && ptr) {
+		free(ptr);
+	}
+	return true;
+}
+
+static bool tcc_ptr_registry_get_ptr_size(tcc_ptr_registry_t *registry, uint64_t handle, uintptr_t *out_ptr,
+                                          uint64_t *out_size) {
+	idx_t idx;
+	if (!registry || handle == 0) {
+		return false;
+	}
+	tcc_ptr_registry_lock(registry);
+	idx = tcc_ptr_registry_find_handle_unlocked(registry, handle);
+	if (idx == (idx_t)-1) {
+		tcc_ptr_registry_unlock(registry);
+		return false;
+	}
+	if (out_ptr) {
+		*out_ptr = (uintptr_t)registry->entries[idx].ptr;
+	}
+	if (out_size) {
+		*out_size = registry->entries[idx].size;
+	}
+	tcc_ptr_registry_unlock(registry);
+	return true;
+}
+
+static bool tcc_ptr_registry_read(tcc_ptr_registry_t *registry, uint64_t handle, uint64_t offset, void *out,
+                                  uint64_t width) {
+	idx_t idx;
+	uint8_t *src;
+	if (!registry || !out || width == 0 || handle == 0) {
+		return false;
+	}
+	tcc_ptr_registry_lock(registry);
+	idx = tcc_ptr_registry_find_handle_unlocked(registry, handle);
+	if (idx == (idx_t)-1 || !registry->entries[idx].ptr ||
+	    !tcc_ptr_span_fits(registry->entries[idx].size, offset, width)) {
+		tcc_ptr_registry_unlock(registry);
+		return false;
+	}
+	src = (uint8_t *)registry->entries[idx].ptr + (size_t)offset;
+	memcpy(out, src, (size_t)width);
+	tcc_ptr_registry_unlock(registry);
+	return true;
+}
+
+static bool tcc_ptr_registry_write(tcc_ptr_registry_t *registry, uint64_t handle, uint64_t offset, const void *in,
+                                   uint64_t width) {
+	idx_t idx;
+	uint8_t *dst;
+	if (!registry || !in || width == 0 || handle == 0) {
+		return false;
+	}
+	tcc_ptr_registry_lock(registry);
+	idx = tcc_ptr_registry_find_handle_unlocked(registry, handle);
+	if (idx == (idx_t)-1 || !registry->entries[idx].ptr ||
+	    !tcc_ptr_span_fits(registry->entries[idx].size, offset, width)) {
+		tcc_ptr_registry_unlock(registry);
+		return false;
+	}
+	dst = (uint8_t *)registry->entries[idx].ptr + (size_t)offset;
+	memcpy(dst, in, (size_t)width);
+	tcc_ptr_registry_unlock(registry);
+	return true;
+}
+
+static void tcc_ptr_helper_ctx_destroy(void *ptr) {
+	tcc_ptr_helper_ctx_t *ctx = (tcc_ptr_helper_ctx_t *)ptr;
+	if (!ctx) {
+		return;
+	}
+	tcc_ptr_registry_unref(ctx->registry);
+	duckdb_free(ctx);
+}
+
+static bool tcc_valid_input_row(uint64_t *validity, idx_t row) {
+	return !validity || duckdb_validity_row_is_valid(validity, row);
+}
+
+static void tcc_set_output_row_null(uint64_t *validity, idx_t row) {
+	if (!validity) {
+		return;
+	}
+	duckdb_validity_set_row_invalid(validity, row);
+}
+
+static tcc_ptr_registry_t *tcc_get_ptr_registry(duckdb_function_info info) {
+	tcc_ptr_helper_ctx_t *ctx = (tcc_ptr_helper_ctx_t *)duckdb_scalar_function_get_extra_info(info);
+	if (!ctx || !ctx->registry) {
+		duckdb_scalar_function_set_error(info, "tcc pointer helper missing registry context");
+		return NULL;
+	}
+	return ctx->registry;
+}
+
+static void tcc_alloc_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
+	idx_t row_count;
+	idx_t row;
+	duckdb_vector in0;
+	uint64_t *in_size;
+	uint64_t *in_validity;
+	uint64_t *out_data;
+	uint64_t *out_validity;
+	if (!registry) {
+		return;
+	}
+	row_count = duckdb_data_chunk_get_size(input);
+	in0 = duckdb_data_chunk_get_vector(input, 0);
+	in_size = (uint64_t *)duckdb_vector_get_data(in0);
+	in_validity = duckdb_vector_get_validity(in0);
+	out_data = (uint64_t *)duckdb_vector_get_data(output);
+	duckdb_vector_ensure_validity_writable(output);
+	out_validity = duckdb_vector_get_validity(output);
+	for (row = 0; row < row_count; row++) {
+		uint64_t handle = 0;
+		if (!tcc_valid_input_row(in_validity, row) || !tcc_ptr_registry_alloc(registry, in_size[row], &handle)) {
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		out_data[row] = handle;
+		duckdb_validity_set_row_validity(out_validity, row, true);
+	}
+}
+
+static void tcc_free_ptr_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
+	idx_t row_count;
+	idx_t row;
+	duckdb_vector in0;
+	uint64_t *in_handle;
+	uint64_t *in_validity;
+	bool *out_data;
+	uint64_t *out_validity;
+	if (!registry) {
+		return;
+	}
+	row_count = duckdb_data_chunk_get_size(input);
+	in0 = duckdb_data_chunk_get_vector(input, 0);
+	in_handle = (uint64_t *)duckdb_vector_get_data(in0);
+	in_validity = duckdb_vector_get_validity(in0);
+	out_data = (bool *)duckdb_vector_get_data(output);
+	duckdb_vector_ensure_validity_writable(output);
+	out_validity = duckdb_vector_get_validity(output);
+	for (row = 0; row < row_count; row++) {
+		if (!tcc_valid_input_row(in_validity, row)) {
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		out_data[row] = tcc_ptr_registry_free(registry, in_handle[row]);
+		duckdb_validity_set_row_validity(out_validity, row, true);
+	}
+}
+
+static void tcc_dataptr_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
+	idx_t row_count;
+	idx_t row;
+	duckdb_vector in0;
+	uint64_t *in_handle;
+	uint64_t *in_validity;
+	uint64_t *out_data;
+	uint64_t *out_validity;
+	if (!registry) {
+		return;
+	}
+	row_count = duckdb_data_chunk_get_size(input);
+	in0 = duckdb_data_chunk_get_vector(input, 0);
+	in_handle = (uint64_t *)duckdb_vector_get_data(in0);
+	in_validity = duckdb_vector_get_validity(in0);
+	out_data = (uint64_t *)duckdb_vector_get_data(output);
+	duckdb_vector_ensure_validity_writable(output);
+	out_validity = duckdb_vector_get_validity(output);
+	for (row = 0; row < row_count; row++) {
+		uintptr_t addr = 0;
+		if (!tcc_valid_input_row(in_validity, row) ||
+		    !tcc_ptr_registry_get_ptr_size(registry, in_handle[row], &addr, NULL)) {
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		out_data[row] = (uint64_t)addr;
+		duckdb_validity_set_row_validity(out_validity, row, true);
+	}
+}
+
+static void tcc_ptr_size_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
+	idx_t row_count;
+	idx_t row;
+	duckdb_vector in0;
+	uint64_t *in_handle;
+	uint64_t *in_validity;
+	uint64_t *out_data;
+	uint64_t *out_validity;
+	if (!registry) {
+		return;
+	}
+	row_count = duckdb_data_chunk_get_size(input);
+	in0 = duckdb_data_chunk_get_vector(input, 0);
+	in_handle = (uint64_t *)duckdb_vector_get_data(in0);
+	in_validity = duckdb_vector_get_validity(in0);
+	out_data = (uint64_t *)duckdb_vector_get_data(output);
+	duckdb_vector_ensure_validity_writable(output);
+	out_validity = duckdb_vector_get_validity(output);
+	for (row = 0; row < row_count; row++) {
+		uint64_t size = 0;
+		if (!tcc_valid_input_row(in_validity, row) ||
+		    !tcc_ptr_registry_get_ptr_size(registry, in_handle[row], NULL, &size)) {
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		out_data[row] = size;
+		duckdb_validity_set_row_validity(out_validity, row, true);
+	}
+}
+
+static void tcc_ptr_add_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+	idx_t row_count = duckdb_data_chunk_get_size(input);
+	idx_t row;
+	duckdb_vector in0 = duckdb_data_chunk_get_vector(input, 0);
+	duckdb_vector in1 = duckdb_data_chunk_get_vector(input, 1);
+	uint64_t *base = (uint64_t *)duckdb_vector_get_data(in0);
+	uint64_t *off = (uint64_t *)duckdb_vector_get_data(in1);
+	uint64_t *valid0 = duckdb_vector_get_validity(in0);
+	uint64_t *valid1 = duckdb_vector_get_validity(in1);
+	uint64_t *out_data = (uint64_t *)duckdb_vector_get_data(output);
+	uint64_t *out_validity;
+	(void)info;
+	duckdb_vector_ensure_validity_writable(output);
+	out_validity = duckdb_vector_get_validity(output);
+	for (row = 0; row < row_count; row++) {
+		uintptr_t addr;
+		if (!tcc_valid_input_row(valid0, row) || !tcc_valid_input_row(valid1, row)) {
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		addr = (uintptr_t)base[row];
+		addr += (uintptr_t)off[row];
+		out_data[row] = (uint64_t)addr;
+		duckdb_validity_set_row_validity(out_validity, row, true);
+	}
+}
+
+#define TCC_DEFINE_PTR_READ_SCALAR(name, ctype)                                                                             \
+	static void tcc_read_##name##_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {     \
+		tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);                                                     \
+		idx_t row_count;                                                                                                \
+		idx_t row;                                                                                                      \
+		duckdb_vector in0;                                                                                              \
+		duckdb_vector in1;                                                                                              \
+		uint64_t *handles;                                                                                              \
+		uint64_t *offsets;                                                                                              \
+		uint64_t *valid0;                                                                                                \
+		uint64_t *valid1;                                                                                                \
+		ctype *out_data;                                                                                                \
+		uint64_t *out_validity;                                                                                          \
+		if (!registry) {                                                                                                \
+			return;                                                                                                 \
+		}                                                                                                               \
+		row_count = duckdb_data_chunk_get_size(input);                                                                  \
+		in0 = duckdb_data_chunk_get_vector(input, 0);                                                                   \
+		in1 = duckdb_data_chunk_get_vector(input, 1);                                                                   \
+		handles = (uint64_t *)duckdb_vector_get_data(in0);                                                             \
+		offsets = (uint64_t *)duckdb_vector_get_data(in1);                                                             \
+		valid0 = duckdb_vector_get_validity(in0);                                                                       \
+		valid1 = duckdb_vector_get_validity(in1);                                                                       \
+		out_data = (ctype *)duckdb_vector_get_data(output);                                                             \
+		duckdb_vector_ensure_validity_writable(output);                                                                 \
+		out_validity = duckdb_vector_get_validity(output);                                                              \
+		for (row = 0; row < row_count; row++) {                                                                         \
+			ctype value;                                                                                            \
+			if (!tcc_valid_input_row(valid0, row) || !tcc_valid_input_row(valid1, row) ||                        \
+			    !tcc_ptr_registry_read(registry, handles[row], offsets[row], &value, (uint64_t)sizeof(ctype))) { \
+				tcc_set_output_row_null(out_validity, row);                                                       \
+				continue;                                                                                         \
+			}                                                                                                       \
+			out_data[row] = value;                                                                                  \
+			duckdb_validity_set_row_validity(out_validity, row, true);                                             \
+		}                                                                                                               \
+	}
+
+#define TCC_DEFINE_PTR_WRITE_SCALAR(name, ctype)                                                                            \
+	static void tcc_write_##name##_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {    \
+		tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);                                                     \
+		idx_t row_count;                                                                                                \
+		idx_t row;                                                                                                      \
+		duckdb_vector in0;                                                                                              \
+		duckdb_vector in1;                                                                                              \
+		duckdb_vector in2;                                                                                              \
+		uint64_t *handles;                                                                                              \
+		uint64_t *offsets;                                                                                              \
+		ctype *values;                                                                                                  \
+		uint64_t *valid0;                                                                                                \
+		uint64_t *valid1;                                                                                                \
+		uint64_t *valid2;                                                                                                \
+		bool *out_data;                                                                                                 \
+		uint64_t *out_validity;                                                                                          \
+		if (!registry) {                                                                                                \
+			return;                                                                                                 \
+		}                                                                                                               \
+		row_count = duckdb_data_chunk_get_size(input);                                                                  \
+		in0 = duckdb_data_chunk_get_vector(input, 0);                                                                   \
+		in1 = duckdb_data_chunk_get_vector(input, 1);                                                                   \
+		in2 = duckdb_data_chunk_get_vector(input, 2);                                                                   \
+		handles = (uint64_t *)duckdb_vector_get_data(in0);                                                             \
+		offsets = (uint64_t *)duckdb_vector_get_data(in1);                                                             \
+		values = (ctype *)duckdb_vector_get_data(in2);                                                                  \
+		valid0 = duckdb_vector_get_validity(in0);                                                                       \
+		valid1 = duckdb_vector_get_validity(in1);                                                                       \
+		valid2 = duckdb_vector_get_validity(in2);                                                                       \
+		out_data = (bool *)duckdb_vector_get_data(output);                                                              \
+		duckdb_vector_ensure_validity_writable(output);                                                                 \
+		out_validity = duckdb_vector_get_validity(output);                                                              \
+		for (row = 0; row < row_count; row++) {                                                                         \
+			if (!tcc_valid_input_row(valid0, row) || !tcc_valid_input_row(valid1, row) ||                         \
+			    !tcc_valid_input_row(valid2, row)) {                                                                \
+				tcc_set_output_row_null(out_validity, row);                                                       \
+				continue;                                                                                         \
+			}                                                                                                       \
+			out_data[row] =                                                                                         \
+			    tcc_ptr_registry_write(registry, handles[row], offsets[row], &values[row], (uint64_t)sizeof(ctype)); \
+			duckdb_validity_set_row_validity(out_validity, row, true);                                             \
+		}                                                                                                               \
+	}
+
+TCC_DEFINE_PTR_READ_SCALAR(i8, int8_t)
+TCC_DEFINE_PTR_READ_SCALAR(u8, uint8_t)
+TCC_DEFINE_PTR_READ_SCALAR(i16, int16_t)
+TCC_DEFINE_PTR_READ_SCALAR(u16, uint16_t)
+TCC_DEFINE_PTR_READ_SCALAR(i32, int32_t)
+TCC_DEFINE_PTR_READ_SCALAR(u32, uint32_t)
+TCC_DEFINE_PTR_READ_SCALAR(i64, int64_t)
+TCC_DEFINE_PTR_READ_SCALAR(u64, uint64_t)
+TCC_DEFINE_PTR_READ_SCALAR(f32, float)
+TCC_DEFINE_PTR_READ_SCALAR(f64, double)
+
+TCC_DEFINE_PTR_WRITE_SCALAR(i8, int8_t)
+TCC_DEFINE_PTR_WRITE_SCALAR(u8, uint8_t)
+TCC_DEFINE_PTR_WRITE_SCALAR(i16, int16_t)
+TCC_DEFINE_PTR_WRITE_SCALAR(u16, uint16_t)
+TCC_DEFINE_PTR_WRITE_SCALAR(i32, int32_t)
+TCC_DEFINE_PTR_WRITE_SCALAR(u32, uint32_t)
+TCC_DEFINE_PTR_WRITE_SCALAR(i64, int64_t)
+TCC_DEFINE_PTR_WRITE_SCALAR(u64, uint64_t)
+TCC_DEFINE_PTR_WRITE_SCALAR(f32, float)
+TCC_DEFINE_PTR_WRITE_SCALAR(f64, double)
+
+#undef TCC_DEFINE_PTR_READ_SCALAR
+#undef TCC_DEFINE_PTR_WRITE_SCALAR
+
+static void tcc_read_bytes_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
+	idx_t row_count;
+	idx_t row;
+	duckdb_vector in0;
+	duckdb_vector in1;
+	duckdb_vector in2;
+	uint64_t *handles;
+	uint64_t *offsets;
+	uint64_t *widths;
+	uint64_t *valid0;
+	uint64_t *valid1;
+	uint64_t *valid2;
+	uint64_t *out_validity;
+	if (!registry) {
+		return;
+	}
+	row_count = duckdb_data_chunk_get_size(input);
+	in0 = duckdb_data_chunk_get_vector(input, 0);
+	in1 = duckdb_data_chunk_get_vector(input, 1);
+	in2 = duckdb_data_chunk_get_vector(input, 2);
+	handles = (uint64_t *)duckdb_vector_get_data(in0);
+	offsets = (uint64_t *)duckdb_vector_get_data(in1);
+	widths = (uint64_t *)duckdb_vector_get_data(in2);
+	valid0 = duckdb_vector_get_validity(in0);
+	valid1 = duckdb_vector_get_validity(in1);
+	valid2 = duckdb_vector_get_validity(in2);
+	duckdb_vector_ensure_validity_writable(output);
+	out_validity = duckdb_vector_get_validity(output);
+	for (row = 0; row < row_count; row++) {
+		char *buffer = NULL;
+		if (!tcc_valid_input_row(valid0, row) || !tcc_valid_input_row(valid1, row) || !tcc_valid_input_row(valid2, row)) {
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		if (widths[row] == 0) {
+			duckdb_vector_assign_string_element_len(output, row, "", 0);
+			duckdb_validity_set_row_validity(out_validity, row, true);
+			continue;
+		}
+		if (widths[row] > (uint64_t)(~(size_t)0)) {
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		buffer = (char *)duckdb_malloc((size_t)widths[row]);
+		if (!buffer) {
+			duckdb_scalar_function_set_error(info, "tcc_read_bytes out of memory");
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		if (!tcc_ptr_registry_read(registry, handles[row], offsets[row], buffer, widths[row])) {
+			duckdb_free(buffer);
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		duckdb_vector_assign_string_element_len(output, row, buffer, (idx_t)widths[row]);
+		duckdb_validity_set_row_validity(out_validity, row, true);
+		duckdb_free(buffer);
+	}
+}
+
+static void tcc_write_bytes_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
+	idx_t row_count;
+	idx_t row;
+	duckdb_vector in0;
+	duckdb_vector in1;
+	duckdb_vector in2;
+	uint64_t *handles;
+	uint64_t *offsets;
+	duckdb_string_t *blobs;
+	uint64_t *valid0;
+	uint64_t *valid1;
+	uint64_t *valid2;
+	bool *out_data;
+	uint64_t *out_validity;
+	if (!registry) {
+		return;
+	}
+	row_count = duckdb_data_chunk_get_size(input);
+	in0 = duckdb_data_chunk_get_vector(input, 0);
+	in1 = duckdb_data_chunk_get_vector(input, 1);
+	in2 = duckdb_data_chunk_get_vector(input, 2);
+	handles = (uint64_t *)duckdb_vector_get_data(in0);
+	offsets = (uint64_t *)duckdb_vector_get_data(in1);
+	blobs = (duckdb_string_t *)duckdb_vector_get_data(in2);
+	valid0 = duckdb_vector_get_validity(in0);
+	valid1 = duckdb_vector_get_validity(in1);
+	valid2 = duckdb_vector_get_validity(in2);
+	out_data = (bool *)duckdb_vector_get_data(output);
+	duckdb_vector_ensure_validity_writable(output);
+	out_validity = duckdb_vector_get_validity(output);
+	for (row = 0; row < row_count; row++) {
+		const char *blob_data;
+		uint64_t blob_len;
+		if (!tcc_valid_input_row(valid0, row) || !tcc_valid_input_row(valid1, row) || !tcc_valid_input_row(valid2, row)) {
+			tcc_set_output_row_null(out_validity, row);
+			continue;
+		}
+		blob_data = duckdb_string_t_data(&blobs[row]);
+		blob_len = (uint64_t)duckdb_string_t_length(blobs[row]);
+		if (blob_len == 0) {
+			out_data[row] = true;
+			duckdb_validity_set_row_validity(out_validity, row, true);
+			continue;
+		}
+		out_data[row] = tcc_ptr_registry_write(registry, handles[row], offsets[row], blob_data, blob_len);
+		duckdb_validity_set_row_validity(out_validity, row, true);
+	}
+}
+
+static bool tcc_register_pointer_scalar(duckdb_connection connection, const char *name, duckdb_scalar_function_t fn_ptr,
+                                        duckdb_type return_type, const duckdb_type *arg_types, idx_t arg_count,
+                                        tcc_ptr_registry_t *registry) {
+	duckdb_scalar_function fn = duckdb_create_scalar_function();
+	duckdb_logical_type ret_obj = NULL;
+	duckdb_logical_type *args = NULL;
+	tcc_ptr_helper_ctx_t *ctx = NULL;
+	idx_t i;
+	duckdb_state rc;
+	if (!fn) {
+		return false;
+	}
+	ret_obj = duckdb_create_logical_type(return_type);
+	if (!ret_obj) {
+		duckdb_destroy_scalar_function(&fn);
+		return false;
+	}
+	duckdb_scalar_function_set_name(fn, name);
+	duckdb_scalar_function_set_return_type(fn, ret_obj);
+	duckdb_scalar_function_set_volatile(fn);
+	duckdb_scalar_function_set_function(fn, fn_ptr);
+	if (arg_count > 0) {
+		args = (duckdb_logical_type *)duckdb_malloc(sizeof(duckdb_logical_type) * (size_t)arg_count);
+		if (!args) {
+			duckdb_destroy_logical_type(&ret_obj);
+			duckdb_destroy_scalar_function(&fn);
+			return false;
+		}
+		memset(args, 0, sizeof(duckdb_logical_type) * (size_t)arg_count);
+		for (i = 0; i < arg_count; i++) {
+			args[i] = duckdb_create_logical_type(arg_types[i]);
+			if (!args[i]) {
+				for (idx_t j = 0; j < i; j++) {
+					duckdb_destroy_logical_type(&args[j]);
+				}
+				duckdb_free(args);
+				duckdb_destroy_logical_type(&ret_obj);
+				duckdb_destroy_scalar_function(&fn);
+				return false;
+			}
+			duckdb_scalar_function_add_parameter(fn, args[i]);
+		}
+	}
+	if (registry) {
+		ctx = (tcc_ptr_helper_ctx_t *)duckdb_malloc(sizeof(tcc_ptr_helper_ctx_t));
+		if (!ctx) {
+			if (args) {
+				for (i = 0; i < arg_count; i++) {
+					duckdb_destroy_logical_type(&args[i]);
+				}
+				duckdb_free(args);
+			}
+			duckdb_destroy_logical_type(&ret_obj);
+			duckdb_destroy_scalar_function(&fn);
+			return false;
+		}
+		ctx->registry = registry;
+		tcc_ptr_registry_ref(registry);
+		duckdb_scalar_function_set_extra_info(fn, ctx, tcc_ptr_helper_ctx_destroy);
+	}
+	rc = duckdb_register_scalar_function(connection, fn);
+	if (args) {
+		for (i = 0; i < arg_count; i++) {
+			duckdb_destroy_logical_type(&args[i]);
+		}
+		duckdb_free(args);
+	}
+	duckdb_destroy_logical_type(&ret_obj);
+	if (rc != DuckDBSuccess) {
+		duckdb_destroy_scalar_function(&fn);
+		return false;
+	}
+	return true;
+}
+
+static bool register_tcc_pointer_helper_functions(duckdb_connection connection, tcc_ptr_registry_t *registry) {
+	static const duckdb_type sig_u64[] = {DUCKDB_TYPE_UBIGINT};
+	static const duckdb_type sig_u64_u64[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT};
+	static const duckdb_type sig_u64_u64_u64[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT};
+	static const duckdb_type sig_u64_u64_blob[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_BLOB};
+	static const duckdb_type sig_u64_u64_i8[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_TINYINT};
+	static const duckdb_type sig_u64_u64_u8[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UTINYINT};
+	static const duckdb_type sig_u64_u64_i16[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_SMALLINT};
+	static const duckdb_type sig_u64_u64_u16[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_USMALLINT};
+	static const duckdb_type sig_u64_u64_i32[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_INTEGER};
+	static const duckdb_type sig_u64_u64_u32[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UINTEGER};
+	static const duckdb_type sig_u64_u64_i64[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_BIGINT};
+	static const duckdb_type sig_u64_u64_u64w[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT};
+	static const duckdb_type sig_u64_u64_f32[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_FLOAT};
+	static const duckdb_type sig_u64_u64_f64[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_DOUBLE};
+	return tcc_register_pointer_scalar(connection, "tcc_alloc", tcc_alloc_scalar, DUCKDB_TYPE_UBIGINT, sig_u64, 1,
+	                                   registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_free_ptr", tcc_free_ptr_scalar, DUCKDB_TYPE_BOOLEAN, sig_u64, 1,
+	                                   registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_dataptr", tcc_dataptr_scalar, DUCKDB_TYPE_UBIGINT, sig_u64, 1,
+	                                   registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_ptr_size", tcc_ptr_size_scalar, DUCKDB_TYPE_UBIGINT, sig_u64, 1,
+	                                   registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_ptr_add", tcc_ptr_add_scalar, DUCKDB_TYPE_UBIGINT, sig_u64_u64, 2,
+	                                   NULL) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_bytes", tcc_read_bytes_scalar, DUCKDB_TYPE_BLOB,
+	                                   sig_u64_u64_u64, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_bytes", tcc_write_bytes_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_blob, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_i8", tcc_read_i8_scalar, DUCKDB_TYPE_TINYINT, sig_u64_u64,
+	                                   2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_i8", tcc_write_i8_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_i8, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_u8", tcc_read_u8_scalar, DUCKDB_TYPE_UTINYINT, sig_u64_u64,
+	                                   2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_u8", tcc_write_u8_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_u8, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_i16", tcc_read_i16_scalar, DUCKDB_TYPE_SMALLINT, sig_u64_u64,
+	                                   2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_i16", tcc_write_i16_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_i16, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_u16", tcc_read_u16_scalar, DUCKDB_TYPE_USMALLINT,
+	                                   sig_u64_u64, 2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_u16", tcc_write_u16_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_u16, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_i32", tcc_read_i32_scalar, DUCKDB_TYPE_INTEGER, sig_u64_u64,
+	                                   2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_i32", tcc_write_i32_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_i32, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_u32", tcc_read_u32_scalar, DUCKDB_TYPE_UINTEGER,
+	                                   sig_u64_u64, 2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_u32", tcc_write_u32_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_u32, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_i64", tcc_read_i64_scalar, DUCKDB_TYPE_BIGINT, sig_u64_u64,
+	                                   2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_i64", tcc_write_i64_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_i64, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_u64", tcc_read_u64_scalar, DUCKDB_TYPE_UBIGINT,
+	                                   sig_u64_u64, 2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_u64", tcc_write_u64_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_u64w, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_f32", tcc_read_f32_scalar, DUCKDB_TYPE_FLOAT, sig_u64_u64,
+	                                   2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_f32", tcc_write_f32_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_f32, 3, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_read_f64", tcc_read_f64_scalar, DUCKDB_TYPE_DOUBLE, sig_u64_u64,
+	                                   2, registry) &&
+	       tcc_register_pointer_scalar(connection, "tcc_write_f64", tcc_write_f64_scalar, DUCKDB_TYPE_BOOLEAN,
+	                                   sig_u64_u64_f64, 3, registry);
 }
 
 static char *tcc_strdup(const char *value) {
@@ -1236,6 +2032,7 @@ static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type) {
 	case TCC_FFI_TIMESTAMP:
 	case TCC_FFI_INTERVAL:
 	case TCC_FFI_DECIMAL:
+	case TCC_FFI_PTR:
 		return true;
 	default:
 		return false;
@@ -1571,6 +2368,7 @@ static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
 	case TCC_FFI_I64:
 	case TCC_FFI_U64:
 	case TCC_FFI_F64:
+	case TCC_FFI_PTR:
 		return 8;
 	case TCC_FFI_VARCHAR:
 		return sizeof(duckdb_string_t);
@@ -1656,6 +2454,8 @@ static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 	case TCC_FFI_I64:
 		return DUCKDB_TYPE_BIGINT;
 	case TCC_FFI_U64:
+		return DUCKDB_TYPE_UBIGINT;
+	case TCC_FFI_PTR:
 		return DUCKDB_TYPE_UBIGINT;
 	case TCC_FFI_F32:
 		return DUCKDB_TYPE_FLOAT;
@@ -4057,6 +4857,10 @@ static void destroy_tcc_module_state(void *ptr) {
 	if (state->entries) {
 		duckdb_free(state->entries);
 	}
+	if (state->ptr_registry) {
+		tcc_ptr_registry_unref(state->ptr_registry);
+		state->ptr_registry = NULL;
+	}
 	if (state->session.runtime_path) {
 		duckdb_free(state->session.runtime_path);
 	}
@@ -4408,6 +5212,10 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 	if (tcc_equals_ci(token, "u64") || tcc_equals_ci(token, "uint64") || tcc_equals_ci(token, "ubigint") ||
 	    tcc_equals_ci(token, "ulonglong")) {
 		*out_type = TCC_FFI_U64;
+		return true;
+	}
+	if (tcc_equals_ci(token, "ptr") || tcc_equals_ci(token, "pointer") || tcc_equals_ci(token, "c_ptr")) {
+		*out_type = TCC_FFI_PTR;
 		return true;
 	}
 	if (tcc_equals_ci(token, "f32") || tcc_equals_ci(token, "float") || tcc_equals_ci(token, "real")) {
@@ -5099,6 +5907,8 @@ static const char *tcc_ffi_type_to_c_type_name(tcc_ffi_type_t type) {
 		return "long long";
 	case TCC_FFI_U64:
 		return "unsigned long long";
+	case TCC_FFI_PTR:
+		return "void *";
 	case TCC_FFI_F32:
 		return "float";
 	case TCC_FFI_F64:
@@ -5201,18 +6011,37 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 			ok = false;
 			break;
 		}
-		if (!tcc_text_buf_appendf(&args_decl, "%s%s a%d", i == 0 ? "" : ", ", arg_c_type, i) ||
-		    !tcc_text_buf_appendf(&row_unpack_lines, "  %s a%d = *(%s *)args[%d];\n", arg_c_type, i, arg_c_type, i) ||
-		    !tcc_text_buf_appendf(&row_call_args, "%sa%d", i == 0 ? "" : ", ", i) ||
-		    !tcc_text_buf_appendf(&batch_col_decls, "  %s *col%d = (%s *)arg_data[%d];\n", arg_c_type, i, arg_c_type,
-		                          i) ||
-		    !tcc_text_buf_appendf(&batch_call_args, "%scol%d[row]", i == 0 ? "" : ", ", i) ||
-		    !tcc_text_buf_appendf(
-		        &batch_null_checks,
-		        "%s(arg_validity[%d] && ((arg_validity[%d][row >> 6] & (1ULL << (row & 63))) == 0))",
-		        i == 0 ? "" : " || ", i, i)) {
+		if (!tcc_text_buf_appendf(&args_decl, "%s%s a%d", i == 0 ? "" : ", ", arg_c_type, i)) {
 			ok = false;
 			break;
+		}
+		if (arg_types[i] == TCC_FFI_PTR) {
+			if (!tcc_text_buf_appendf(&row_unpack_lines,
+			                          "  void *a%d = (void *)(uintptr_t)(*(unsigned long long *)args[%d]);\n", i, i) ||
+			    !tcc_text_buf_appendf(&row_call_args, "%sa%d", i == 0 ? "" : ", ", i) ||
+			    !tcc_text_buf_appendf(&batch_col_decls, "  unsigned long long *col%d_ptr = (unsigned long long *)arg_data[%d];\n",
+			                          i, i) ||
+			    !tcc_text_buf_appendf(&batch_call_args, "%s(void *)(uintptr_t)col%d_ptr[row]", i == 0 ? "" : ", ", i) ||
+			    !tcc_text_buf_appendf(
+			        &batch_null_checks,
+			        "%s(arg_validity[%d] && ((arg_validity[%d][row >> 6] & (1ULL << (row & 63))) == 0))",
+			        i == 0 ? "" : " || ", i, i)) {
+				ok = false;
+				break;
+			}
+		} else {
+			if (!tcc_text_buf_appendf(&row_unpack_lines, "  %s a%d = *(%s *)args[%d];\n", arg_c_type, i, arg_c_type, i) ||
+			    !tcc_text_buf_appendf(&row_call_args, "%sa%d", i == 0 ? "" : ", ", i) ||
+			    !tcc_text_buf_appendf(&batch_col_decls, "  %s *col%d = (%s *)arg_data[%d];\n", arg_c_type, i, arg_c_type,
+			                          i) ||
+			    !tcc_text_buf_appendf(&batch_call_args, "%scol%d[row]", i == 0 ? "" : ", ", i) ||
+			    !tcc_text_buf_appendf(
+			        &batch_null_checks,
+			        "%s(arg_validity[%d] && ((arg_validity[%d][row >> 6] & (1ULL << (row & 63))) == 0))",
+			        i == 0 ? "" : " || ", i, i)) {
+				ok = false;
+				break;
+			}
 		}
 	}
 	if (ok && arg_count == 0) {
@@ -5263,6 +6092,18 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 				                          "}\n",
 				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
 				                          ret_c_type);
+			} else if (ok && ret_type == TCC_FFI_PTR) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "  void *result = (void *)%s(%s);\n"
+				                          "  if (!result) {\n"
+				                          "    if (out_is_null) { *out_is_null = 1; }\n"
+				                          "    return 1;\n"
+				                          "  }\n"
+				                          "  *(unsigned long long *)out_value = (unsigned long long)(uintptr_t)result;\n"
+				                          "  if (out_is_null) { *out_is_null = 0; }\n"
+				                          "  return 1;\n"
+				                          "}\n",
+				                          target_symbol, row_call_args.data ? row_call_args.data : "");
 			} else if (ok && (tcc_ffi_type_is_list(ret_type) || tcc_ffi_type_is_array(ret_type))) {
 				ok = tcc_text_buf_appendf(&src,
 				                          "  %s result = %s(%s);\n"
@@ -5326,6 +6167,8 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 		    batch_col_decls.data ? batch_col_decls.data : "");
 		if (ok && ret_type == TCC_FFI_VOID) {
 			ok = tcc_text_buf_appendf(&src, "  (void)out_data;\n");
+		} else if (ok && ret_type == TCC_FFI_PTR) {
+			ok = tcc_text_buf_appendf(&src, "  unsigned long long *out = (unsigned long long *)out_data;\n");
 		} else if (ok) {
 			ok = tcc_text_buf_appendf(&src, "  %s *out = (%s *)out_data;\n", ret_c_type, ret_c_type);
 		}
@@ -5363,6 +6206,15 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 				                          "    }\n"
 				                          "    out[row] = result;\n",
 				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
+			} else if (ok && ret_type == TCC_FFI_PTR) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "    void *result = (void *)%s(%s);\n"
+				                          "    if (!result) {\n"
+				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
+				                          "      continue;\n"
+				                          "    }\n"
+				                          "    out[row] = (unsigned long long)(uintptr_t)result;\n",
+				                          target_symbol, batch_call_args.data ? batch_call_args.data : "");
 			} else if (ok && (tcc_ffi_type_is_list(ret_type) || tcc_ffi_type_is_array(ret_type))) {
 				ok = tcc_text_buf_appendf(&src,
 				                          "    %s result = %s(%s);\n"
@@ -6342,6 +7194,14 @@ bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 	tcc_rwlock_init(&state->lock);
 	state->connection = connection;
 	state->database = database;
+	state->ptr_registry = tcc_ptr_registry_create();
+	if (!state->ptr_registry) {
+		duckdb_free(state);
+		duckdb_destroy_logical_type(&list_varchar_type);
+		duckdb_destroy_logical_type(&varchar_type);
+		duckdb_destroy_table_function(&tf);
+		return false;
+	}
 
 	duckdb_table_function_set_name(tf, "tcc_module");
 	duckdb_table_function_add_named_parameter(tf, "mode", varchar_type);
@@ -6369,7 +7229,8 @@ bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 
 	rc = duckdb_register_table_function(connection, tf);
 	if (rc == DuckDBSuccess) {
-		rc = register_tcc_system_paths_function(connection) && register_tcc_library_probe_function(connection)
+		rc = register_tcc_system_paths_function(connection) && register_tcc_library_probe_function(connection) &&
+		             register_tcc_pointer_helper_functions(connection, state->ptr_registry)
 		         ? DuckDBSuccess
 		         : DuckDBError;
 	}

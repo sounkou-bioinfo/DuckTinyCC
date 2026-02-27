@@ -59,6 +59,20 @@ context columns. Functions are prefixed by `tcc_`
 | `tcc_system_paths(runtime_path := '', library_path := '')` | Show include and library search paths used by TinyCC workflows | Includes existence flags; includes Windows/MSYS2/Rtools defaults on Windows builds |
 | `tcc_library_probe(library := ..., runtime_path := '', library_path := '')` | Resolve a library short name or full filename/path | Supports `.a`, `.so*`, `.dylib`, `.dll`, `.lib` style names |
 
+### Pointer and Buffer Helpers (Direct SQL)
+
+| Function | Purpose | Notes |
+|---|---|---|
+| `tcc_alloc(size_ubigint)` | Allocate process-local C memory and return handle | Returns `UBIGINT` handle; zero-initialized; NULL on invalid size/OOM |
+| `tcc_free_ptr(handle_ubigint)` | Free an allocated handle | Returns `BOOLEAN`; true on success |
+| `tcc_ptr_size(handle_ubigint)` | Return allocation size in bytes | Returns `UBIGINT`; NULL for invalid handle |
+| `tcc_dataptr(handle_ubigint)` | Return raw process address for handle | Returns `UBIGINT`; interop escape hatch |
+| `tcc_ptr_add(addr_ubigint, offset_ubigint)` | Raw address arithmetic helper | Returns `UBIGINT` address |
+| `tcc_read_i8/u8/i16/u16/i32/u32/i64/u64/f32/f64(handle, offset)` | Typed reads from handle memory | Returns typed value or NULL when out-of-bounds/invalid |
+| `tcc_write_i8/u8/i16/u16/i32/u32/i64/u64/f32/f64(handle, offset, value)` | Typed writes into handle memory | Returns `BOOLEAN`; false on out-of-bounds/invalid |
+| `tcc_read_bytes(handle, offset, width)` | Read byte span as `BLOB` | NULL on out-of-bounds/invalid |
+| `tcc_write_bytes(handle, offset, blob)` | Write `BLOB` bytes into handle memory | Returns `BOOLEAN`; false on out-of-bounds/invalid |
+
 ## Supported Types
 
 Type metadata is explicit for `compile`, `quick_compile`, and `codegen_preview`:
@@ -70,7 +84,7 @@ Current executable SQL registration support:
 
 | Signature Piece | Accepted Tokens | DuckDB Type |
 |---|---|---|
-| `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`, `numeric` | `BIGINT` for `void`; otherwise matching scalar type |
+| `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `ptr`, `pointer`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`, `numeric` | `BIGINT` for `void`; otherwise matching scalar type (`ptr` maps to `UBIGINT`) |
 | each `arg_types` element | same scalar tokens as `return_type`, plus fixed-child list tokens `list_i64` or `i64[]`, fixed-size array tokens like `i64[3]`, `struct<name:type;...>`, and `map<key_type;value_type>` | scalar type, `LIST(child)`, `ARRAY(child,N)`, `STRUCT(...)`, or `MAP(...)` |
 
 Additional limits and behavior:
@@ -79,6 +93,7 @@ Additional limits and behavior:
 - Wrapper mode: `row` (default) or `batch`
 - NULL handling: NULL-in/NULL-out
 - `void` return registers as a SQL function that emits `NULL` values
+- `ptr`/`pointer` use explicit pointer ABI in generated wrappers and map to SQL `UBIGINT`
 - `varchar`/`cstring` bridge to C `const char *`; returned `NULL` pointers produce SQL `NULL`
 - `blob`/`buffer` bridge to C `ducktinycc_blob_t { const void *ptr; uint64_t len }`; returned `ptr == NULL` produces SQL `NULL`
 - easy scalar structs use C aliases: `ducktinycc_hugeint_t` (UUID), `ducktinycc_date_t`, `ducktinycc_time_t`, `ducktinycc_timestamp_t`, `ducktinycc_interval_t`, `ducktinycc_decimal_t`
@@ -88,7 +103,7 @@ Additional limits and behavior:
 - struct arguments/returns use `ducktinycc_struct_t { const void *const *field_ptrs; const uint64_t *const *field_validity; uint64_t field_count; uint64_t offset }`
 - map arguments/returns use `ducktinycc_map_t { key_ptr, key_validity, value_ptr, value_validity, offset, len }`
 - `i64[]` means variable-length `LIST`; `i64[3]` means fixed-size `ARRAY`
-- current `struct<...>` and `map<...>` members support fixed-width scalar families only (`bool/i8/u8/i16/u16/i32/u32/i64/u64/f32/f64/uuid/date/time/timestamp/interval/decimal`)
+- current `struct<...>` and `map<...>` members support fixed-width scalar families only (`bool/i8/u8/i16/u16/i32/u32/i64/u64/ptr/f32/f64/uuid/date/time/timestamp/interval/decimal`)
 - `struct<...>` and `map<...>` use `;` separators in tokens to avoid ambiguity inside `arg_types := [...]`
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
 
@@ -125,9 +140,10 @@ Additional limits and behavior:
 - Arrow to reduce marshalling: not used directly; batch wrappers already consume DuckDB vectors column-wise and avoid per-row host-wrapper crossings.
 - DuckDB nested types: `LIST`, `ARRAY`, `STRUCT`, and `MAP` are first-class SQL argument/return tokens with C descriptors; nested/non-fixed-width struct/map members remain future work.
 - Host helper ABI: wrappers now expose typed/bounds-checked buffer helpers (`ducktinycc_read_*`, `ducktinycc_write_*`, `ducktinycc_read_bytes`, `ducktinycc_write_bytes`, `ducktinycc_span_fits`) in addition to list/array/struct/map descriptor helpers.
-- Pointer representation (future SQL surface): use `UBIGINT` handles with ownership/type tags once pointer-table functions are introduced; current wrappers operate on direct in-process pointers only.
+- SQL pointer helpers: `tcc_alloc`, `tcc_free_ptr`, `tcc_dataptr`, `tcc_ptr_size`, `tcc_ptr_add`, typed `tcc_read_*`/`tcc_write_*`, and `tcc_read_bytes`/`tcc_write_bytes` are registered at extension load.
+- Pointer representation: SQL uses `UBIGINT` handles backed by a per-database in-memory pointer registry.
 - Real C structs (not DuckDB `STRUCT`): treat these as pointer-backed objects (`ptr<T>` style), with helper UDFs for `malloc/free`, field address, `container_of`, and typed field get/set/read/write.
-- Safety posture for future pointer tables: no raw user-provided addresses by default; pointers should enter through controlled constructors/host symbols and be validated through a registry.
+- Safety posture: prefer handle-based helpers (`tcc_alloc` + `tcc_read/write_*`) over raw address arithmetic; `tcc_dataptr` is exposed for interop escape hatches.
 
 ## Builds
 
@@ -420,6 +436,114 @@ SELECT sum_i64([1,NULL,3]::BIGINT[]) AS sum_with_null_child;
 SQL
 ```
 
+### SQL Pointer Helpers (`tcc_alloc`/`tcc_read*`/`tcc_write*`)
+
+These helpers are directly callable from SQL and are registered at extension load.
+Memory is process-local and tied to a per-database registry; free handles with
+`tcc_free_ptr` when done.
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+WITH p AS (SELECT tcc_alloc(16) AS h),
+w AS (SELECT h, tcc_write_i64(h, 8, 42) AS ok FROM p),
+r AS (SELECT h, ok, tcc_read_i64(h, 8) AS v, tcc_ptr_size(h) AS sz, tcc_dataptr(h) AS addr FROM w),
+f AS (SELECT ok, v, sz, addr, tcc_free_ptr(h) AS freed FROM r)
+SELECT ok, v, sz, addr > 0 AS addr_nonzero, freed FROM f;
+
+WITH p AS (SELECT tcc_alloc(4) AS h),
+w AS (SELECT h, tcc_write_bytes(h, 0, from_hex('DEADBEEF')) AS ok FROM p),
+r AS (SELECT h, ok, hex(tcc_read_bytes(h, 0, 4)) AS hx FROM w),
+f AS (SELECT ok, hx, tcc_free_ptr(h) AS freed FROM r)
+SELECT ok, hx, freed FROM f;
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long read_ptr_i64(void *p){
+  if (!p) return -1;
+  return *(const long long *)p;
+}',
+  symbol := 'read_ptr_i64',
+  sql_name := 'read_ptr_i64',
+  return_type := 'i64',
+  arg_types := ['ptr']
+);
+WITH p AS (SELECT tcc_alloc(8) AS h),
+w AS (SELECT h, tcc_write_i64(h, 0, 42) AS ok FROM p),
+r AS (SELECT h, ok, read_ptr_i64(tcc_dataptr(h)) AS v FROM w),
+f AS (SELECT ok, v, tcc_free_ptr(h) AS freed FROM r)
+SELECT ok, v, freed FROM f;
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'struct point_i32 { int x; int y; };
+unsigned long long point_i32_sizeof(void){ return (unsigned long long)sizeof(struct point_i32); }',
+  symbol := 'point_i32_sizeof',
+  sql_name := 'point_i32_sizeof',
+  return_type := 'u64',
+  arg_types := []
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#define OFFSETOF(type, member) ((unsigned long long)((char *)&(((type *)0)->member) - (char *)0))
+struct point_i32 { int x; int y; };
+unsigned long long point_i32_off_x(void){ return OFFSETOF(struct point_i32, x); }',
+  symbol := 'point_i32_off_x',
+  sql_name := 'point_i32_off_x',
+  return_type := 'u64',
+  arg_types := []
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#define OFFSETOF(type, member) ((unsigned long long)((char *)&(((type *)0)->member) - (char *)0))
+struct point_i32 { int x; int y; };
+unsigned long long point_i32_off_y(void){ return OFFSETOF(struct point_i32, y); }',
+  symbol := 'point_i32_off_y',
+  sql_name := 'point_i32_off_y',
+  return_type := 'u64',
+  arg_types := []
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'struct point_i32 { int x; int y; };
+long long point_i32_sum(void *p){
+  struct point_i32 *q = (struct point_i32 *)p;
+  if (!q) return -1;
+  return (long long)q->x + (long long)q->y;
+}',
+  symbol := 'point_i32_sum',
+  sql_name := 'point_i32_sum',
+  return_type := 'i64',
+  arg_types := ['ptr']
+);
+WITH m AS (
+  SELECT point_i32_sizeof() AS sz, point_i32_off_x() AS ox, point_i32_off_y() AS oy
+),
+p AS (
+  SELECT sz, ox, oy, tcc_alloc(sz) AS h FROM m
+),
+w AS (
+  SELECT sz, ox, oy, h,
+         tcc_write_i32(h, ox, 7) AS ok1,
+         tcc_write_i32(h, oy, 9) AS ok2
+  FROM p
+),
+r AS (
+  SELECT h, sz, ox, oy, ok1, ok2, point_i32_sum(tcc_dataptr(h)) AS s FROM w
+),
+f AS (
+  SELECT ok1, ok2, s, tcc_free_ptr(h) AS freed FROM r
+)
+SELECT ok1, ok2, s, freed FROM f;
+SQL
+```
+
 Fixed-size arrays use `type[N]` and `ducktinycc_array_t`:
 
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
@@ -600,9 +724,6 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
 
-### 13) Cleanup
-
-No explicit cleanup is required in the CLI example flow.
 
 ## Notes
 
