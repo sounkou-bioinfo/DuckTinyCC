@@ -45,7 +45,21 @@ This repository uses local precedent references under `.sync/` to guide implemen
     - Scalars: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64`, `ptr`, `varchar/cstring`, `blob`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`.
     - Nested: fixed-child `LIST` (`list_*` / `type[]`), fixed-size `ARRAY` (`type[N]`), `STRUCT` (`struct<...>`), `MAP` (`map<...>`).
     - `UNION` (`union<name:type;...>`) is parsed, but SQL runtime marshalling is intentionally rejected with `E_BAD_SIGNATURE` until C API vector access is available.
-- Tests currently passing: `make test_debug`, `make test_release`
+
+## Progress Snapshot (2026-02-27)
+- Parser/type metadata refactor completed for nested signatures:
+  - top-level split helpers for nested tokens.
+  - struct metadata now retains per-field raw type tokens.
+  - map metadata now retains key/value raw type tokens.
+- Recursive logical-type construction groundwork is in place:
+  - nested `STRUCT`/`MAP` child logical types are built recursively from stored tokens.
+- Memory hygiene improvements landed for nested metadata:
+  - explicit map metadata destroy helpers and cleanup wiring added across parse/bind/codegen paths.
+- Runtime bridge status:
+  - full recursive DuckDB vector marshalling for nested/composite values is still WIP.
+  - `UNION` signatures remain intentionally blocked at runtime (`E_BAD_SIGNATURE`) until bridge support is implemented.
+- Validation:
+  - `make debug`, `make release`, `make test_debug`, and `make test_release` pass after this refactor.
 
 ## Working Rules for This Repo
 - API is intentionally evolving; document and implement the current surface, not backward-compatibility shims.

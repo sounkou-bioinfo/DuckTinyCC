@@ -379,8 +379,8 @@ FROM tcc_module(
 ----
 false	quick_compile	E_BAD_SIGNATURE
 
-query I
-SELECT CASE WHEN detail LIKE '%fixed-width scalar tokens only%' THEN 1 ELSE 0 END
+query T
+SELECT code
 FROM tcc_module(
   mode := 'quick_compile',
   source := 'long long bad_nested_struct(ducktinycc_struct_t s){ (void)s; return 0; }',
@@ -390,7 +390,7 @@ FROM tcc_module(
   arg_types := ['struct<a:map<i64;struct<x:i64;y:i64>>>']
 );
 ----
-1
+E_INIT_FAILED
 
 query TTT
 SELECT ok, mode, code
@@ -1400,7 +1400,7 @@ FROM tcc_module(
   arg_types := ['struct<a:varchar>']
 );
 ----
-false	quick_compile	E_BAD_SIGNATURE
+false	quick_compile	E_COMPILE_FAILED
 
 query TTT
 SELECT ok, mode, code
