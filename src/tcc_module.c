@@ -5817,6 +5817,69 @@ static bool tcc_parse_wrapper_mode(const char *wrapper_mode, tcc_wrapper_mode_t 
 	return false;
 }
 
+static char *tcc_next_top_level_part(char **cursor, char sep) {
+	char *start;
+	char *p;
+	int angle_depth = 0;
+	int square_depth = 0;
+	if (!cursor || !*cursor) {
+		return NULL;
+	}
+	start = *cursor;
+	p = start;
+	while (*p) {
+		if (*p == '<') {
+			angle_depth++;
+		} else if (*p == '>') {
+			if (angle_depth > 0) {
+				angle_depth--;
+			}
+		} else if (*p == '[') {
+			square_depth++;
+		} else if (*p == ']') {
+			if (square_depth > 0) {
+				square_depth--;
+			}
+		} else if (*p == sep && angle_depth == 0 && square_depth == 0) {
+			*p = '\0';
+			*cursor = p + 1;
+			return start;
+		}
+		p++;
+	}
+	*cursor = NULL;
+	return start;
+}
+
+static char *tcc_find_top_level_char(char *input, char target) {
+	char *p;
+	int angle_depth = 0;
+	int square_depth = 0;
+	if (!input) {
+		return NULL;
+	}
+	p = input;
+	while (*p) {
+		if (*p == '<') {
+			angle_depth++;
+		} else if (*p == '>') {
+			if (angle_depth > 0) {
+				angle_depth--;
+			}
+		} else if (*p == '[') {
+			square_depth++;
+		} else if (*p == ']') {
+			if (square_depth > 0) {
+				square_depth--;
+			}
+		} else if (*p == target && angle_depth == 0 && square_depth == 0) {
+			return p;
+		}
+		p++;
+	}
+	return NULL;
+}
+
 static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_type_t *out_type, size_t *out_array_size) {
 	size_t token_len;
 	if (!token || token[0] == '\0' || !out_type) {
@@ -6232,8 +6295,7 @@ static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t
 	inner[token_len - 8] = '\0';
 	cur = inner;
 	while (cur && *cur) {
-		char *part = cur;
-		char *next = strchr(part, ';');
+		char *part = tcc_next_top_level_part(&cur, ';');
 		char *colon;
 		char *name_part;
 		char *type_part;
@@ -6245,12 +6307,6 @@ static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t
 		char **new_names;
 		tcc_ffi_type_t *new_types;
 		size_t *new_sizes;
-		if (next) {
-			*next = '\0';
-			cur = next + 1;
-		} else {
-			cur = NULL;
-		}
 		while (*part && isspace((unsigned char)*part)) {
 			part++;
 		}
@@ -6262,7 +6318,7 @@ static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t
 			tcc_set_error(error_buf, "struct token contains empty field");
 			goto fail;
 		}
-		colon = strchr(part, ':');
+		colon = tcc_find_top_level_char(part, ':');
 		if (colon) {
 			*colon = '\0';
 			name_part = part;
@@ -6410,8 +6466,8 @@ static bool tcc_parse_map_meta_token(const char *token, tcc_ffi_map_meta_t *out_
 	}
 	memcpy(inner, token + 4, token_len - 5);
 	inner[token_len - 5] = '\0';
-	sep = strchr(inner, ';');
-	if (!sep || strchr(sep + 1, ';')) {
+	sep = tcc_find_top_level_char(inner, ';');
+	if (!sep || tcc_find_top_level_char(sep + 1, ';')) {
 		duckdb_free(inner);
 		tcc_set_error(error_buf, "map token must use exactly one ';' separator");
 		return false;
@@ -6496,8 +6552,7 @@ static bool tcc_parse_union_meta_token(const char *token, tcc_ffi_union_meta_t *
 	inner[token_len - 7] = '\0';
 	cur = inner;
 	while (cur && *cur) {
-		char *part = cur;
-		char *next = strchr(part, ';');
+		char *part = tcc_next_top_level_part(&cur, ';');
 		char *colon;
 		char *name_part;
 		char *type_part;
@@ -6505,12 +6560,6 @@ static bool tcc_parse_union_meta_token(const char *token, tcc_ffi_union_meta_t *
 		tcc_ffi_type_t member_type = TCC_FFI_VOID;
 		size_t member_array_size = 0;
 		size_t member_size = 0;
-		if (next) {
-			*next = '\0';
-			cur = next + 1;
-		} else {
-			cur = NULL;
-		}
 		while (*part && isspace((unsigned char)*part)) {
 			part++;
 		}
@@ -6522,7 +6571,7 @@ static bool tcc_parse_union_meta_token(const char *token, tcc_ffi_union_meta_t *
 			tcc_set_error(error_buf, "union token contains empty member");
 			goto fail;
 		}
-		colon = strchr(part, ':');
+		colon = tcc_find_top_level_char(part, ':');
 		if (!colon) {
 			tcc_set_error(error_buf, "union member must use name:type");
 			goto fail;
