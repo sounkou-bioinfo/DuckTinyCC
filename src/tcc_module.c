@@ -239,7 +239,7 @@ typedef struct {
 } tcc_module_bind_data_t;
 
 typedef struct {
-	bool emitted;
+	atomic_bool emitted;
 } tcc_module_init_data_t;
 
 typedef struct {
@@ -295,7 +295,7 @@ typedef struct {
 } tcc_diag_bind_data_t;
 
 typedef struct {
-	idx_t offset;
+	atomic_uint_fast64_t offset;
 } tcc_diag_init_data_t;
 
 static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
@@ -3981,7 +3981,7 @@ static void tcc_module_init(duckdb_init_info info) {
 		duckdb_init_set_error(info, "out of memory");
 		return;
 	}
-	init->emitted = false;
+	atomic_store_explicit(&init->emitted, false, memory_order_relaxed);
 	duckdb_init_set_init_data(info, init, destroy_tcc_module_init_data);
 }
 
@@ -5447,8 +5447,14 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 	tcc_module_init_data_t *init = (tcc_module_init_data_t *)duckdb_function_get_init_data(info);
 	const char *runtime_path;
 	int lock_mode = 0; /* 0 none, 1 read, 2 write */
+	bool expected_not_emitted = false;
 
 	if (!state || !bind || !init) {
+		duckdb_data_chunk_set_size(output, 0);
+		return;
+	}
+	if (!atomic_compare_exchange_strong_explicit(&init->emitted, &expected_not_emitted, true, memory_order_acq_rel,
+	                                             memory_order_acquire)) {
 		duckdb_data_chunk_set_size(output, 0);
 		return;
 	}
@@ -5458,10 +5464,6 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 	} else {
 		tcc_rwlock_read_lock(&state->lock);
 		lock_mode = 1;
-	}
-	if (init->emitted) {
-		duckdb_data_chunk_set_size(output, 0);
-		goto tcc_module_done;
 	}
 
 	runtime_path = tcc_session_runtime_path(state, bind->runtime_path);
@@ -5774,7 +5776,6 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 	}
 
 tcc_module_done:
-	init->emitted = true;
 	if (lock_mode == 2) {
 		tcc_rwlock_write_unlock(&state->lock);
 	} else if (lock_mode == 1) {
@@ -5817,9 +5818,8 @@ static void tcc_diag_table_init(duckdb_init_info info) {
 		duckdb_init_set_error(info, "out of memory");
 		return;
 	}
-	init->offset = 0;
+	atomic_store_explicit(&init->offset, 0, memory_order_relaxed);
 	duckdb_init_set_init_data(info, init, destroy_tcc_diag_init_data);
-	duckdb_init_set_max_threads(info, 1);
 }
 
 static void tcc_diag_table_function(duckdb_function_info info, duckdb_data_chunk output) {
@@ -5828,11 +5828,17 @@ static void tcc_diag_table_function(duckdb_function_info info, duckdb_data_chunk
 	tcc_diag_row_t *row;
 	duckdb_vector v_exists;
 	bool *exists_data;
-	if (!bind || !init || init->offset >= bind->rows.count) {
+	uint64_t row_idx;
+	if (!bind || !init) {
 		duckdb_data_chunk_set_size(output, 0);
 		return;
 	}
-	row = &bind->rows.rows[init->offset++];
+	row_idx = atomic_fetch_add_explicit(&init->offset, 1, memory_order_acq_rel);
+	if ((idx_t)row_idx >= bind->rows.count) {
+		duckdb_data_chunk_set_size(output, 0);
+		return;
+	}
+	row = &bind->rows.rows[(idx_t)row_idx];
 	tcc_set_varchar_col(duckdb_data_chunk_get_vector(output, 0), 0, row->kind);
 	tcc_set_varchar_col(duckdb_data_chunk_get_vector(output, 1), 0, row->key);
 	tcc_set_varchar_col(duckdb_data_chunk_get_vector(output, 2), 0, row->value);
