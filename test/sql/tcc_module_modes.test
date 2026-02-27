@@ -727,6 +727,101 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'long long sum_array3(ducktinycc_array_t a){
+  const long long *p = (const long long *)a.ptr;
+  unsigned long long i;
+  long long s = 0;
+  if (!a.ptr) return 0;
+  for (i = 0; i < a.len; i++) {
+    if (ducktinycc_array_is_valid(&a, i)) s += p[i];
+  }
+  return s;
+}',
+  symbol := 'sum_array3',
+  sql_name := 'sum_array3',
+  return_type := 'i64',
+  arg_types := ['i64[3]']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT sum_array3([1,2,3]::BIGINT[3]);
+----
+6
+
+query I
+SELECT sum_array3([1,NULL,3]::BIGINT[3]);
+----
+4
+
+query T
+SELECT sum_array3(NULL::BIGINT[3]);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_array_t make_array3(long long x){
+  static long long values[3];
+  static uint64_t validity[1];
+  ducktinycc_array_t out;
+  values[0] = x;
+  values[1] = x + 1;
+  values[2] = x + 2;
+  validity[0] = 5ULL;
+  out.ptr = values;
+  out.validity = validity;
+  out.offset = 0;
+  out.len = 3;
+  return out;
+}',
+  symbol := 'make_array3',
+  sql_name := 'make_array3',
+  return_type := 'i64[3]',
+  arg_types := ['i64']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT CAST(make_array3(10) AS VARCHAR);
+----
+[10, NULL, 12]
+
+query T
+SELECT make_array3(NULL);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_array_t batch_echo_array3(ducktinycc_array_t a){ return a; }',
+  symbol := 'batch_echo_array3',
+  sql_name := 'batch_echo_array3',
+  return_type := 'i64[3]',
+  arg_types := ['i64[3]'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT CAST(batch_echo_array3(v) AS VARCHAR)
+FROM (VALUES ([1,2,3]::BIGINT[3]), ([4,NULL,6]::BIGINT[3]), (NULL::BIGINT[3])) t(v);
+----
+[1, 2, 3]
+[4, NULL, 6]
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'long long batch_add(long long a, long long b){ return a + b; }',
   symbol := 'batch_add',
   sql_name := 'batch_add',
