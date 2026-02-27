@@ -70,8 +70,8 @@ Current executable SQL registration support:
 
 | Signature Piece | Accepted Tokens | DuckDB Type |
 |---|---|---|
-| `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes` | `BIGINT` for `void`; otherwise matching scalar type |
-| each `arg_types` element | `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes` | matching scalar type |
+| `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`, `numeric` | `BIGINT` for `void`; otherwise matching scalar type |
+| each `arg_types` element | `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`, `numeric` | matching scalar type |
 
 Additional limits and behavior:
 
@@ -81,6 +81,8 @@ Additional limits and behavior:
 - `void` return registers as a SQL function that emits `NULL` values
 - `varchar`/`cstring` bridge to C `const char *`; returned `NULL` pointers produce SQL `NULL`
 - `blob`/`buffer` bridge to C `ducktinycc_blob_t { const void *ptr; uint64_t len }`; returned `ptr == NULL` produces SQL `NULL`
+- easy scalar structs use C aliases: `ducktinycc_hugeint_t` (UUID), `ducktinycc_date_t`, `ducktinycc_time_t`, `ducktinycc_timestamp_t`, `ducktinycc_interval_t`, `ducktinycc_decimal_t`
+- `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
 
 ## How It Works (Current)
 

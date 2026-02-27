@@ -63,13 +63,48 @@ typedef enum {
 	TCC_FFI_F32 = 10,
 	TCC_FFI_F64 = 11,
 	TCC_FFI_VARCHAR = 12,
-	TCC_FFI_BLOB = 13
+	TCC_FFI_BLOB = 13,
+	TCC_FFI_UUID = 14,
+	TCC_FFI_DATE = 15,
+	TCC_FFI_TIME = 16,
+	TCC_FFI_TIMESTAMP = 17,
+	TCC_FFI_INTERVAL = 18,
+	TCC_FFI_DECIMAL = 19
 } tcc_ffi_type_t;
+
+typedef struct {
+	uint64_t lower;
+	int64_t upper;
+} ducktinycc_hugeint_t;
 
 typedef struct {
 	const void *ptr;
 	uint64_t len;
 } ducktinycc_blob_t;
+
+typedef struct {
+	int32_t days;
+} ducktinycc_date_t;
+
+typedef struct {
+	int64_t micros;
+} ducktinycc_time_t;
+
+typedef struct {
+	int64_t micros;
+} ducktinycc_timestamp_t;
+
+typedef struct {
+	int32_t months;
+	int32_t days;
+	int64_t micros;
+} ducktinycc_interval_t;
+
+typedef struct {
+	uint8_t width;
+	uint8_t scale;
+	ducktinycc_hugeint_t value;
+} ducktinycc_decimal_t;
 
 typedef enum {
 	TCC_WRAPPER_MODE_ROW = 0,
@@ -174,6 +209,7 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 static bool tcc_equals_ci(const char *a, const char *b);
 static bool tcc_parse_wrapper_mode(const char *wrapper_mode, tcc_wrapper_mode_t *out_mode,
                                    tcc_error_buffer_t *error_buf);
+static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type);
 
 static char *tcc_strdup(const char *value) {
 	size_t len;
@@ -995,6 +1031,18 @@ static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
 		return sizeof(duckdb_string_t);
 	case TCC_FFI_BLOB:
 		return sizeof(ducktinycc_blob_t);
+	case TCC_FFI_UUID:
+		return sizeof(ducktinycc_hugeint_t);
+	case TCC_FFI_DATE:
+		return sizeof(ducktinycc_date_t);
+	case TCC_FFI_TIME:
+		return sizeof(ducktinycc_time_t);
+	case TCC_FFI_TIMESTAMP:
+		return sizeof(ducktinycc_timestamp_t);
+	case TCC_FFI_INTERVAL:
+		return sizeof(ducktinycc_interval_t);
+	case TCC_FFI_DECIMAL:
+		return sizeof(ducktinycc_decimal_t);
 	case TCC_FFI_VOID:
 	default:
 		return 0;
@@ -1032,9 +1080,34 @@ static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 		return DUCKDB_TYPE_VARCHAR;
 	case TCC_FFI_BLOB:
 		return DUCKDB_TYPE_BLOB;
+	case TCC_FFI_UUID:
+		return DUCKDB_TYPE_UUID;
+	case TCC_FFI_DATE:
+		return DUCKDB_TYPE_DATE;
+	case TCC_FFI_TIME:
+		return DUCKDB_TYPE_TIME;
+	case TCC_FFI_TIMESTAMP:
+		return DUCKDB_TYPE_TIMESTAMP;
+	case TCC_FFI_INTERVAL:
+		return DUCKDB_TYPE_INTERVAL;
+	case TCC_FFI_DECIMAL:
+		return DUCKDB_TYPE_DECIMAL;
 	default:
 		return DUCKDB_TYPE_INVALID;
 	}
+}
+
+static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type) {
+	duckdb_type base_type;
+	if (type == TCC_FFI_DECIMAL) {
+		/* Keep a stable default until typed signatures accept precision/scale parameters. */
+		return duckdb_create_decimal_type(18, 3);
+	}
+	base_type = tcc_ffi_type_to_duckdb_type(type);
+	if (base_type == DUCKDB_TYPE_INVALID) {
+		return NULL;
+	}
+	return duckdb_create_logical_type(base_type);
 }
 
 static void tcc_validity_set_all(uint64_t *validity, idx_t count, bool valid) {
@@ -1538,7 +1611,7 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 
 	duckdb_scalar_function_set_name(fn, name);
 	for (i = 0; i < arg_count; i++) {
-		duckdb_logical_type arg_type = duckdb_create_logical_type(tcc_ffi_type_to_duckdb_type(ctx->arg_types[i]));
+		duckdb_logical_type arg_type = tcc_ffi_type_create_logical_type(ctx->arg_types[i]);
 		if (!arg_type) {
 			tcc_host_sig_ctx_destroy(ctx);
 			duckdb_destroy_scalar_function(&fn);
@@ -1548,7 +1621,7 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		duckdb_destroy_logical_type(&arg_type);
 	}
 	{
-		duckdb_logical_type ret_type_obj = duckdb_create_logical_type(ret_duckdb_type);
+		duckdb_logical_type ret_type_obj = tcc_ffi_type_create_logical_type(ret_type);
 		if (!ret_type_obj) {
 			tcc_host_sig_ctx_destroy(ctx);
 			duckdb_destroy_scalar_function(&fn);
@@ -2244,6 +2317,30 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 		*out_type = TCC_FFI_BLOB;
 		return true;
 	}
+	if (tcc_equals_ci(token, "uuid")) {
+		*out_type = TCC_FFI_UUID;
+		return true;
+	}
+	if (tcc_equals_ci(token, "date")) {
+		*out_type = TCC_FFI_DATE;
+		return true;
+	}
+	if (tcc_equals_ci(token, "time")) {
+		*out_type = TCC_FFI_TIME;
+		return true;
+	}
+	if (tcc_equals_ci(token, "timestamp") || tcc_equals_ci(token, "datetime")) {
+		*out_type = TCC_FFI_TIMESTAMP;
+		return true;
+	}
+	if (tcc_equals_ci(token, "interval")) {
+		*out_type = TCC_FFI_INTERVAL;
+		return true;
+	}
+	if (tcc_equals_ci(token, "decimal") || tcc_equals_ci(token, "numeric")) {
+		*out_type = TCC_FFI_DECIMAL;
+		return true;
+	}
 	return false;
 }
 
@@ -2390,6 +2487,18 @@ static const char *tcc_ffi_type_to_c_type_name(tcc_ffi_type_t type) {
 		return "const char *";
 	case TCC_FFI_BLOB:
 		return "ducktinycc_blob_t";
+	case TCC_FFI_UUID:
+		return "ducktinycc_hugeint_t";
+	case TCC_FFI_DATE:
+		return "ducktinycc_date_t";
+	case TCC_FFI_TIME:
+		return "ducktinycc_time_t";
+	case TCC_FFI_TIMESTAMP:
+		return "ducktinycc_timestamp_t";
+	case TCC_FFI_INTERVAL:
+		return "ducktinycc_interval_t";
+	case TCC_FFI_DECIMAL:
+		return "ducktinycc_decimal_t";
 	default:
 		return NULL;
 	}
@@ -2595,12 +2704,34 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 
 static char *tcc_build_codegen_unit_source(const char *user_source, const char *loader_source) {
 	char *combined_src;
-	const char *prelude =
-	    "#include <stdint.h>\n"
-	    "typedef struct {\n"
-	    "  const void *ptr;\n"
-	    "  uint64_t len;\n"
-	    "} ducktinycc_blob_t;\n";
+	const char *prelude = "#include <stdint.h>\n"
+	                      "typedef struct {\n"
+	                      "  uint64_t lower;\n"
+	                      "  int64_t upper;\n"
+	                      "} ducktinycc_hugeint_t;\n"
+	                      "typedef struct {\n"
+	                      "  const void *ptr;\n"
+	                      "  uint64_t len;\n"
+	                      "} ducktinycc_blob_t;\n"
+	                      "typedef struct {\n"
+	                      "  int32_t days;\n"
+	                      "} ducktinycc_date_t;\n"
+	                      "typedef struct {\n"
+	                      "  int64_t micros;\n"
+	                      "} ducktinycc_time_t;\n"
+	                      "typedef struct {\n"
+	                      "  int64_t micros;\n"
+	                      "} ducktinycc_timestamp_t;\n"
+	                      "typedef struct {\n"
+	                      "  int32_t months;\n"
+	                      "  int32_t days;\n"
+	                      "  int64_t micros;\n"
+	                      "} ducktinycc_interval_t;\n"
+	                      "typedef struct {\n"
+	                      "  uint8_t width;\n"
+	                      "  uint8_t scale;\n"
+	                      "  ducktinycc_hugeint_t value;\n"
+	                      "} ducktinycc_decimal_t;\n";
 	size_t n0;
 	size_t n1;
 	size_t n2;

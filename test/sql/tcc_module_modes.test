@@ -494,6 +494,114 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'ducktinycc_date_t next_day(ducktinycc_date_t d){ d.days += 1; return d; }',
+  symbol := 'next_day',
+  sql_name := 'next_day',
+  return_type := 'date',
+  arg_types := ['date']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT next_day(DATE '2024-01-01');
+----
+2024-01-02
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_time_t add_second_time(ducktinycc_time_t t){ t.micros += 1000000; return t; }',
+  symbol := 'add_second_time',
+  sql_name := 'add_second_time',
+  return_type := 'time',
+  arg_types := ['time']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT add_second_time(TIME '01:02:03');
+----
+01:02:04
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_timestamp_t add_second_ts(ducktinycc_timestamp_t t){ t.micros += 1000000; return t; }',
+  symbol := 'add_second_ts',
+  sql_name := 'add_second_ts',
+  return_type := 'timestamp',
+  arg_types := ['timestamp']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT add_second_ts(TIMESTAMP '2024-01-01 00:00:00');
+----
+2024-01-01 00:00:01
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long interval_days(ducktinycc_interval_t v){ return (long long)v.days; }',
+  symbol := 'interval_days',
+  sql_name := 'interval_days',
+  return_type := 'i64',
+  arg_types := ['interval']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT interval_days(INTERVAL '3 days 5 hours');
+----
+3
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_hugeint_t uuid_echo(ducktinycc_hugeint_t u){ return u; }',
+  symbol := 'uuid_echo',
+  sql_name := 'uuid_echo',
+  return_type := 'uuid',
+  arg_types := ['uuid']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT uuid_echo('00000000-0000-0000-0000-00000000000a'::UUID) = '00000000-0000-0000-0000-00000000000a'::UUID;
+----
+true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_decimal_t decimal_echo(ducktinycc_decimal_t d){ return d; }',
+  symbol := 'decimal_echo',
+  sql_name := 'decimal_echo',
+  return_type := 'decimal',
+  arg_types := ['decimal']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT decimal_echo(12.345::DECIMAL(18,3)) = 12.345::DECIMAL(18,3);
+----
+true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'long long batch_add(long long a, long long b){ return a + b; }',
   symbol := 'batch_add',
   sql_name := 'batch_add',
