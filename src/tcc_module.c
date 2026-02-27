@@ -3512,6 +3512,97 @@ static void *ducktinycc_ptr_add_mut(void *base, uint64_t byte_offset) {
 	return (void *)(p + byte_offset);
 }
 
+static int ducktinycc_span_fits(uint64_t len, uint64_t offset, uint64_t width) {
+	if (offset > len) {
+		return 0;
+	}
+	return width <= (len - offset);
+}
+
+static const void *ducktinycc_buf_ptr_at(const void *base, uint64_t len, uint64_t offset, uint64_t width) {
+	if (!base || !ducktinycc_span_fits(len, offset, width)) {
+		return NULL;
+	}
+	return ducktinycc_ptr_add(base, offset);
+}
+
+static void *ducktinycc_buf_ptr_at_mut(void *base, uint64_t len, uint64_t offset, uint64_t width) {
+	if (!base || !ducktinycc_span_fits(len, offset, width)) {
+		return NULL;
+	}
+	return ducktinycc_ptr_add_mut(base, offset);
+}
+
+static int ducktinycc_read_bytes(const void *base, uint64_t len, uint64_t offset, void *out, uint64_t width) {
+	const void *src;
+	if (!out && width > 0) {
+		return 0;
+	}
+	if (width == 0) {
+		return 1;
+	}
+	src = ducktinycc_buf_ptr_at(base, len, offset, width);
+	if (!src) {
+		return 0;
+	}
+	memcpy(out, src, (size_t)width);
+	return 1;
+}
+
+static int ducktinycc_write_bytes(void *base, uint64_t len, uint64_t offset, const void *in, uint64_t width) {
+	void *dst;
+	if (!in && width > 0) {
+		return 0;
+	}
+	if (width == 0) {
+		return 1;
+	}
+	dst = ducktinycc_buf_ptr_at_mut(base, len, offset, width);
+	if (!dst) {
+		return 0;
+	}
+	memcpy(dst, in, (size_t)width);
+	return 1;
+}
+
+#define DUCKTINYCC_DEFINE_BUF_RW(name, type)                                                                                \
+	static int ducktinycc_read_##name(const void *base, uint64_t len, uint64_t offset, type *out) {                     \
+		return ducktinycc_read_bytes(base, len, offset, out, (uint64_t)sizeof(type));                               \
+	}                                                                                                                      \
+	static int ducktinycc_write_##name(void *base, uint64_t len, uint64_t offset, type value) {                        \
+		return ducktinycc_write_bytes(base, len, offset, &value, (uint64_t)sizeof(type));                          \
+	}
+
+DUCKTINYCC_DEFINE_BUF_RW(i8, int8_t)
+DUCKTINYCC_DEFINE_BUF_RW(u8, uint8_t)
+DUCKTINYCC_DEFINE_BUF_RW(i16, int16_t)
+DUCKTINYCC_DEFINE_BUF_RW(u16, uint16_t)
+DUCKTINYCC_DEFINE_BUF_RW(i32, int32_t)
+DUCKTINYCC_DEFINE_BUF_RW(u32, uint32_t)
+DUCKTINYCC_DEFINE_BUF_RW(i64, int64_t)
+DUCKTINYCC_DEFINE_BUF_RW(u64, uint64_t)
+DUCKTINYCC_DEFINE_BUF_RW(f32, float)
+DUCKTINYCC_DEFINE_BUF_RW(f64, double)
+
+#undef DUCKTINYCC_DEFINE_BUF_RW
+
+static int ducktinycc_read_ptr(const void *base, uint64_t len, uint64_t offset, const void **out) {
+	uintptr_t tmp = 0;
+	if (!out) {
+		return 0;
+	}
+	if (!ducktinycc_read_bytes(base, len, offset, &tmp, (uint64_t)sizeof(uintptr_t))) {
+		return 0;
+	}
+	*out = (const void *)tmp;
+	return 1;
+}
+
+static int ducktinycc_write_ptr(void *base, uint64_t len, uint64_t offset, const void *value) {
+	uintptr_t tmp = (uintptr_t)value;
+	return ducktinycc_write_bytes(base, len, offset, &tmp, (uint64_t)sizeof(uintptr_t));
+}
+
 static int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx) {
 	uint64_t global_idx;
 	if (!list || idx >= list->len) {
@@ -3625,6 +3716,33 @@ static void tcc_add_host_symbols(TCCState *s) {
 	(void)tcc_add_symbol(s, "ducktinycc_span_contains", ducktinycc_span_contains);
 	(void)tcc_add_symbol(s, "ducktinycc_ptr_add", ducktinycc_ptr_add);
 	(void)tcc_add_symbol(s, "ducktinycc_ptr_add_mut", ducktinycc_ptr_add_mut);
+	(void)tcc_add_symbol(s, "ducktinycc_span_fits", ducktinycc_span_fits);
+	(void)tcc_add_symbol(s, "ducktinycc_buf_ptr_at", ducktinycc_buf_ptr_at);
+	(void)tcc_add_symbol(s, "ducktinycc_buf_ptr_at_mut", ducktinycc_buf_ptr_at_mut);
+	(void)tcc_add_symbol(s, "ducktinycc_read_bytes", ducktinycc_read_bytes);
+	(void)tcc_add_symbol(s, "ducktinycc_write_bytes", ducktinycc_write_bytes);
+	(void)tcc_add_symbol(s, "ducktinycc_read_i8", ducktinycc_read_i8);
+	(void)tcc_add_symbol(s, "ducktinycc_write_i8", ducktinycc_write_i8);
+	(void)tcc_add_symbol(s, "ducktinycc_read_u8", ducktinycc_read_u8);
+	(void)tcc_add_symbol(s, "ducktinycc_write_u8", ducktinycc_write_u8);
+	(void)tcc_add_symbol(s, "ducktinycc_read_i16", ducktinycc_read_i16);
+	(void)tcc_add_symbol(s, "ducktinycc_write_i16", ducktinycc_write_i16);
+	(void)tcc_add_symbol(s, "ducktinycc_read_u16", ducktinycc_read_u16);
+	(void)tcc_add_symbol(s, "ducktinycc_write_u16", ducktinycc_write_u16);
+	(void)tcc_add_symbol(s, "ducktinycc_read_i32", ducktinycc_read_i32);
+	(void)tcc_add_symbol(s, "ducktinycc_write_i32", ducktinycc_write_i32);
+	(void)tcc_add_symbol(s, "ducktinycc_read_u32", ducktinycc_read_u32);
+	(void)tcc_add_symbol(s, "ducktinycc_write_u32", ducktinycc_write_u32);
+	(void)tcc_add_symbol(s, "ducktinycc_read_i64", ducktinycc_read_i64);
+	(void)tcc_add_symbol(s, "ducktinycc_write_i64", ducktinycc_write_i64);
+	(void)tcc_add_symbol(s, "ducktinycc_read_u64", ducktinycc_read_u64);
+	(void)tcc_add_symbol(s, "ducktinycc_write_u64", ducktinycc_write_u64);
+	(void)tcc_add_symbol(s, "ducktinycc_read_f32", ducktinycc_read_f32);
+	(void)tcc_add_symbol(s, "ducktinycc_write_f32", ducktinycc_write_f32);
+	(void)tcc_add_symbol(s, "ducktinycc_read_f64", ducktinycc_read_f64);
+	(void)tcc_add_symbol(s, "ducktinycc_write_f64", ducktinycc_write_f64);
+	(void)tcc_add_symbol(s, "ducktinycc_read_ptr", ducktinycc_read_ptr);
+	(void)tcc_add_symbol(s, "ducktinycc_write_ptr", ducktinycc_write_ptr);
 	(void)tcc_add_symbol(s, "ducktinycc_list_is_valid", ducktinycc_list_is_valid);
 	(void)tcc_add_symbol(s, "ducktinycc_list_elem_ptr", ducktinycc_list_elem_ptr);
 	(void)tcc_add_symbol(s, "ducktinycc_array_is_valid", ducktinycc_array_is_valid);
@@ -5371,6 +5489,33 @@ static char *tcc_build_codegen_unit_source(const char *user_source, const char *
 		                      "extern int ducktinycc_span_contains(uint64_t len, uint64_t idx);\n"
 		                      "extern const void *ducktinycc_ptr_add(const void *base, uint64_t byte_offset);\n"
 		                      "extern void *ducktinycc_ptr_add_mut(void *base, uint64_t byte_offset);\n"
+		                      "extern int ducktinycc_span_fits(uint64_t len, uint64_t offset, uint64_t width);\n"
+		                      "extern const void *ducktinycc_buf_ptr_at(const void *base, uint64_t len, uint64_t offset, uint64_t width);\n"
+		                      "extern void *ducktinycc_buf_ptr_at_mut(void *base, uint64_t len, uint64_t offset, uint64_t width);\n"
+		                      "extern int ducktinycc_read_bytes(const void *base, uint64_t len, uint64_t offset, void *out, uint64_t width);\n"
+		                      "extern int ducktinycc_write_bytes(void *base, uint64_t len, uint64_t offset, const void *in, uint64_t width);\n"
+		                      "extern int ducktinycc_read_i8(const void *base, uint64_t len, uint64_t offset, int8_t *out);\n"
+		                      "extern int ducktinycc_write_i8(void *base, uint64_t len, uint64_t offset, int8_t value);\n"
+		                      "extern int ducktinycc_read_u8(const void *base, uint64_t len, uint64_t offset, uint8_t *out);\n"
+		                      "extern int ducktinycc_write_u8(void *base, uint64_t len, uint64_t offset, uint8_t value);\n"
+		                      "extern int ducktinycc_read_i16(const void *base, uint64_t len, uint64_t offset, int16_t *out);\n"
+		                      "extern int ducktinycc_write_i16(void *base, uint64_t len, uint64_t offset, int16_t value);\n"
+		                      "extern int ducktinycc_read_u16(const void *base, uint64_t len, uint64_t offset, uint16_t *out);\n"
+		                      "extern int ducktinycc_write_u16(void *base, uint64_t len, uint64_t offset, uint16_t value);\n"
+		                      "extern int ducktinycc_read_i32(const void *base, uint64_t len, uint64_t offset, int32_t *out);\n"
+		                      "extern int ducktinycc_write_i32(void *base, uint64_t len, uint64_t offset, int32_t value);\n"
+		                      "extern int ducktinycc_read_u32(const void *base, uint64_t len, uint64_t offset, uint32_t *out);\n"
+		                      "extern int ducktinycc_write_u32(void *base, uint64_t len, uint64_t offset, uint32_t value);\n"
+		                      "extern int ducktinycc_read_i64(const void *base, uint64_t len, uint64_t offset, int64_t *out);\n"
+		                      "extern int ducktinycc_write_i64(void *base, uint64_t len, uint64_t offset, int64_t value);\n"
+		                      "extern int ducktinycc_read_u64(const void *base, uint64_t len, uint64_t offset, uint64_t *out);\n"
+		                      "extern int ducktinycc_write_u64(void *base, uint64_t len, uint64_t offset, uint64_t value);\n"
+		                      "extern int ducktinycc_read_f32(const void *base, uint64_t len, uint64_t offset, float *out);\n"
+		                      "extern int ducktinycc_write_f32(void *base, uint64_t len, uint64_t offset, float value);\n"
+		                      "extern int ducktinycc_read_f64(const void *base, uint64_t len, uint64_t offset, double *out);\n"
+		                      "extern int ducktinycc_write_f64(void *base, uint64_t len, uint64_t offset, double value);\n"
+		                      "extern int ducktinycc_read_ptr(const void *base, uint64_t len, uint64_t offset, const void **out);\n"
+		                      "extern int ducktinycc_write_ptr(void *base, uint64_t len, uint64_t offset, const void *value);\n"
 		                      "extern int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx);\n"
 		                      "extern const void *ducktinycc_list_elem_ptr(const ducktinycc_list_t *list, uint64_t idx, uint64_t elem_size);\n"
 		                      "extern int ducktinycc_array_is_valid(const ducktinycc_array_t *arr, uint64_t idx);\n"

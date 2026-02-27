@@ -494,6 +494,58 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'long long blob_read_i32(ducktinycc_blob_t b){
+  int32_t v = 0;
+  if (!b.ptr) return 0;
+  if (!ducktinycc_read_i32(b.ptr, b.len, 0, &v)) return -1;
+  return (long long)v;
+}',
+  symbol := 'blob_read_i32',
+  sql_name := 'blob_read_i32',
+  return_type := 'i64',
+  arg_types := ['blob']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT blob_read_i32(from_hex('2A000000'));
+----
+42
+
+query I
+SELECT blob_read_i32(from_hex('2A0000'));
+----
+-1
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long local_rw_i64(void){
+  uint8_t buf[16];
+  int64_t out = 0;
+  if (!ducktinycc_write_i64(buf, sizeof(buf), 8, 41)) return -1;
+  if (!ducktinycc_read_i64(buf, sizeof(buf), 8, &out)) return -2;
+  return out + 1;
+}',
+  symbol := 'local_rw_i64',
+  sql_name := 'local_rw_i64',
+  return_type := 'i64',
+  arg_types := []
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT local_rw_i64();
+----
+42
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'ducktinycc_date_t next_day(ducktinycc_date_t d){ d.days += 1; return d; }',
   symbol := 'next_day',
   sql_name := 'next_day',

@@ -162,18 +162,20 @@ Additional limits and behavior:
 - DuckDB nested types: `LIST`, `ARRAY`, `STRUCT`, and `MAP` are
   first-class SQL argument/return tokens with C descriptors;
   nested/non-fixed-width struct/map members remain future work.
-- Pointer utilities (next): adopt an Rtinycc-like helper layer for typed
-  memory I/O (`read_i8/u8/.../f64/ptr`, `write_*`, `read_bytes`,
-  `write_bytes`) on opaque pointer handles.
-- Pointer representation: use `UBIGINT` handles in SQL mapped to an
-  internal pointer registry with ownership tags (`owned`, `borrowed`,
-  `external`) and optional type tags.
+- Host helper ABI: wrappers now expose typed/bounds-checked buffer
+  helpers (`ducktinycc_read_*`, `ducktinycc_write_*`,
+  `ducktinycc_read_bytes`, `ducktinycc_write_bytes`,
+  `ducktinycc_span_fits`) in addition to list/array/struct/map descriptor
+  helpers.
+- Pointer representation (future SQL surface): use `UBIGINT` handles with
+  ownership/type tags once pointer-table functions are introduced; current
+  wrappers operate on direct in-process pointers only.
 - Real C structs (not DuckDB `STRUCT`): treat these as pointer-backed
   objects (`ptr<T>` style), with helper UDFs for `malloc/free`, field
   address, `container_of`, and typed field get/set/read/write.
-- Safety posture: no raw user-provided addresses by default; pointers
-  should enter through controlled constructors/host symbols and be
-  validated through the registry.
+- Safety posture for future pointer tables: no raw user-provided addresses
+  by default; pointers should enter through controlled constructors/host
+  symbols and be validated through a registry.
 
 ## Builds
 
