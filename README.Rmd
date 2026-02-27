@@ -71,7 +71,7 @@ Current executable SQL registration support:
 | Signature Piece | Accepted Tokens | DuckDB Type |
 |---|---|---|
 | `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`, `numeric` | `BIGINT` for `void`; otherwise matching scalar type |
-| each `arg_types` element | same scalar tokens as `return_type`, plus fixed-child list tokens `list_i64` or `i64[]` style (also for `bool/i8/u8/i16/u16/i32/u32/u64/f32/f64/uuid/date/time/timestamp/interval/decimal`) | scalar type or `LIST(child)` |
+| each `arg_types` element | same scalar tokens as `return_type`, plus fixed-child list tokens `list_i64` or `i64[]` style, and fixed-size array tokens like `i64[3]` (also for `bool/i8/u8/i16/u16/i32/u32/u64/f32/f64/uuid/date/time/timestamp/interval/decimal`) | scalar type, `LIST(child)`, or `ARRAY(child,N)` |
 
 Additional limits and behavior:
 
@@ -84,7 +84,8 @@ Additional limits and behavior:
 - easy scalar structs use C aliases: `ducktinycc_hugeint_t` (UUID), `ducktinycc_date_t`, `ducktinycc_time_t`, `ducktinycc_timestamp_t`, `ducktinycc_interval_t`, `ducktinycc_decimal_t`
 - list arguments bridge to C `ducktinycc_list_t { const void *ptr; const uint64_t *validity; uint64_t offset; uint64_t len }`
 - list returns are supported via `ducktinycc_list_t` (`ptr == NULL` yields SQL `NULL`)
-- fixed-size `ARRAY` signatures (e.g. `i64[3]`) are not yet parsed; `i64[]` maps to variable-size `LIST`
+- fixed-size array arguments/returns use `ducktinycc_array_t { const void *ptr; const uint64_t *validity; uint64_t offset; uint64_t len }`
+- `i64[]` means variable-length `LIST`; `i64[3]` means fixed-size `ARRAY`
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
 
 ## How It Works (Current)
@@ -99,6 +100,7 @@ Additional limits and behavior:
 - VARCHAR inputs are read from DuckDB `duckdb_string_t` vectors and passed to wrappers as C `const char *`.
 - BLOB inputs are presented as `ducktinycc_blob_t` views over DuckDB buffers.
 - LIST inputs are presented as `ducktinycc_list_t` slices over DuckDB child vectors (`ptr` + `len` + validity bitmask + child offset).
+- ARRAY inputs are presented as `ducktinycc_array_t` fixed-size slices over DuckDB array child vectors.
 
 ## Memory Ownership and Lifecycle
 
@@ -406,6 +408,35 @@ FROM tcc_module(
 );
 SELECT sum_i64([1,2,3]::BIGINT[]) AS sum_plain;
 SELECT sum_i64([1,NULL,3]::BIGINT[]) AS sum_with_null_child;
+SQL
+```
+
+Fixed-size arrays use `type[N]` and `ducktinycc_array_t`:
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long sum_array3(ducktinycc_array_t a){
+  const long long *p = (const long long *)a.ptr;
+  unsigned long long i;
+  long long s = 0;
+  if (!a.ptr) return 0;
+  for (i = 0; i < a.len; i++) {
+    if (ducktinycc_array_is_valid(&a, i)) s += p[i];
+  }
+  return s;
+}',
+  symbol := 'sum_array3',
+  sql_name := 'sum_array3',
+  return_type := 'i64',
+  arg_types := ['i64[3]']
+);
+SELECT sum_array3([1,2,3]::BIGINT[3]) AS sum_plain;
+SELECT sum_array3([1,NULL,3]::BIGINT[3]) AS sum_with_null_child;
 SQL
 ```
 
