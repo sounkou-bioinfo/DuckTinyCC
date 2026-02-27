@@ -117,7 +117,45 @@ Additional limits and behavior:
   (`bool/i8/u8/i16/u16/i32/u32/i64/u64/ptr/f32/f64/uuid/date/time/timestamp/interval/decimal`)
 - `struct<...>` and `map<...>` use `;` separators in tokens to avoid
   ambiguity inside `arg_types := [...]`
-- `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
+- `decimal`/`numeric` currently bind as `DECIMAL(18,3)` \## Get Started
+
+Minimal end-to-end example: compile a C function and call it from SQL.
+
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+
+-- Compile and register a zero-arg C UDF returning VARCHAR
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *hello_from_c_udf(void){ return "hello from C UDF"; }',
+  symbol := 'hello_from_c_udf',
+  sql_name := 'hello_from_c_udf',
+  return_type := 'varchar',
+  arg_types := []
+);
+
+-- Call it like any SQL scalar function
+SELECT hello_from_c_udf() AS msg;
+SQL
+```
+
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    Run Time (s): real 0.002 user 0.001853 sys 0.000103
+    ┌──────────────────┐
+    │       msg        │
+    │     varchar      │
+    ├──────────────────┤
+    │ hello from C UDF │
+    └──────────────────┘
+    Run Time (s): real 0.000 user 0.000089 sys 0.000067
 
 ## How It Works
 
@@ -171,7 +209,7 @@ Additional limits and behavior:
   functions as internal catalog entries, so SQL `DROP FUNCTION` is not
   available for them.
 
-## Design Direction (API Still Evolving)
+## API WIP (Design Direction)
 
 - Host symbol registration mode: feasible and aligned with Rtinycc-style
   embedding; prefer an allow-listed registry (name -\> host address)
@@ -193,9 +231,33 @@ Additional limits and behavior:
 - Pointer representation: SQL uses `UBIGINT` handles backed by a
   per-database in-memory pointer registry.
 - Real C structs/unions/enums/bitfields: `c_struct`, `c_union`,
-  `c_enum`, and `c_bitfield` now auto-generate helper UDFs (`*_new`,
-  `*_free`, `*_get_*`, `*_set_*`, `*_off_*`, `*_addr`, `*_sizeof`,
-  `*_alignof`) directly from C declarations + field specs.
+  `c_enum`, and `c_bitfield` now auto-generate helper UDFs directly from
+  C declarations + field specs.
+- For `c_struct`/`c_union`, helpers include `*_new`, `*_free`,
+  `*_get_*`, `*_set_*`, `*_off_*`, `*_addr`, `*_sizeof`, `*_alignof`.
+- For `c_bitfield`, field helpers are `*_get_*`/`*_set_*`
+  (compiler-resolved bitfield layout); per-field `*_off_*`/`*_addr` are
+  intentionally omitted.
+- Callback signatures (planned): support explicit callback tokens in
+  bindings, e.g. `callback:<ret(args...)>` and
+  `callback_async:<ret(args...)>`, so wrapper code can model
+  function-pointer arguments intentionally.
+- Callback registry (planned): map DuckDB-side callable handles to
+  registry entries (signature + callable + lifecycle token); compiled C
+  receives only a generated trampoline pointer plus opaque callback
+  context (`ptr`), not raw SQL/runtime addresses.
+- Typed trampoline codegen (planned): generate one trampoline per
+  callback argument from the declared signature, then marshal C args -\>
+  DuckDB call values -\> C return with explicit conversion rules.
+- Callback failure/default policy (planned): follow Rtinycc-style
+  defaults (`0`/`false`/`NULL`/`void`) when callback dispatch fails;
+  async mode enqueues work and returns the type-default immediately.
+- Host symbol wiring for callbacks (planned): expose callback runtime
+  entrypoints as host symbols via `tcc_add_symbol(...)` before
+  relocation (same ordering discipline used by Rtinycc for callback
+  invoke/schedule hooks).
+- Callback feature status: planned only (not yet part of the executable
+  SQL API surface).
 - Safety posture: prefer handle-based helpers (`tcc_alloc` +
   `tcc_read/write_*`) over raw address arithmetic; `tcc_dataptr` is
   exposed for interop escape hatches.
@@ -254,21 +316,21 @@ SQL
     ├─────────┼────────────┼─────────┼─────────┤
     │ true    │ config_set │ OK      │ (empty) │
     └─────────┴────────────┴─────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000167 sys 0.000167
+    Run Time (s): real 0.000 user 0.000519 sys 0.000043
     ┌─────────┬────────────┬─────────┬───────────────────────────────────────────────────────────────────────────────────────┐
     │   ok    │    mode    │  code   │                                        detail                                         │
     │ boolean │  varchar   │ varchar │                                        varchar                                        │
     ├─────────┼────────────┼─────────┼───────────────────────────────────────────────────────────────────────────────────────┤
     │ true    │ config_get │ OK      │ runtime=/root/DuckTinyCC/cmake_build/release/tinycc_build state_id=0 config_version=1 │
     └─────────┴────────────┴─────────┴───────────────────────────────────────────────────────────────────────────────────────┘
-    Run Time (s): real 0.000 user 0.000109 sys 0.000109
+    Run Time (s): real 0.001 user 0.000474 sys 0.000000
     ┌─────────┬─────────┬─────────┬───────────────────────────────────────────────────────────────┐
     │   ok    │  mode   │  code   │                            detail                             │
     │ boolean │ varchar │ varchar │                            varchar                            │
     ├─────────┼─────────┼─────────┼───────────────────────────────────────────────────────────────┤
     │ true    │ list    │ OK      │ registered=0 sources=0 headers=0 includes=0 libs=0 state_id=0 │
     └─────────┴─────────┴─────────┴───────────────────────────────────────────────────────────────┘
-    Run Time (s): real 0.000 user 0.000126 sys 0.000126
+    Run Time (s): real 0.000 user 0.000334 sys 0.000000
 
 ### 3) System Paths and Library Probe Helpers
 
@@ -304,7 +366,7 @@ SQL
     ├──────────────┴──────────────┴─────────┴───────────────────────────────────────────────────────────────────┤
     │ 12 rows                                                                                         4 columns │
     └───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-    Run Time (s): real 0.000 user 0.000380 sys 0.000170
+    Run Time (s): real 0.000 user 0.000462 sys 0.000000
     ┌─────────────┬──────────────┬─────────┬─────────────────────────────────────────────────────────────┬──────────────────────────────────┐
     │    kind     │     key      │ exists  │                            value                            │              detail              │
     │   varchar   │   varchar    │ boolean │                           varchar                           │             varchar              │
@@ -339,7 +401,7 @@ SQL
     ├─────────────┴──────────────┴─────────┴─────────────────────────────────────────────────────────────┴──────────────────────────────────┤
     │ 27 rows                                                                                                                     5 columns │
     └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-    Run Time (s): real 0.001 user 0.000891 sys 0.000000
+    Run Time (s): real 0.000 user 0.000672 sys 0.000067
 
 ### 4) Example A: Staged Build + `tinycc_bind` + `compile`
 
@@ -422,98 +484,98 @@ SQL
     ├─────────┼───────────────┼─────────┼────────────┤
     │ true    │ tcc_new_state │ OK      │ state_id=1 │
     └─────────┴───────────────┴─────────┴────────────┘
-    Run Time (s): real 0.000 user 0.000370 sys 0.000222
+    Run Time (s): real 0.001 user 0.000434 sys 0.000276
     ┌─────────┬─────────────┬─────────┬────────────────────────────┐
     │   ok    │    mode     │  code   │           detail           │
     │ boolean │   varchar   │ varchar │          varchar           │
     ├─────────┼─────────────┼─────────┼────────────────────────────┤
     │ true    │ add_include │ OK      │ third_party/tinycc/include │
     └─────────┴─────────────┴─────────┴────────────────────────────┘
-    Run Time (s): real 0.001 user 0.000367 sys 0.000042
+    Run Time (s): real 0.000 user 0.000475 sys 0.000000
     ┌─────────┬────────────────┬─────────┬────────────────────────────┐
     │   ok    │      mode      │  code   │           detail           │
     │ boolean │    varchar     │ varchar │          varchar           │
     ├─────────┼────────────────┼─────────┼────────────────────────────┤
     │ true    │ add_sysinclude │ OK      │ third_party/tinycc/include │
     └─────────┴────────────────┴─────────┴────────────────────────────┘
-    Run Time (s): real 0.000 user 0.000565 sys 0.000329
+    Run Time (s): real 0.000 user 0.000364 sys 0.000000
     ┌─────────┬──────────────────┬─────────┬────────────────────┐
     │   ok    │       mode       │  code   │       detail       │
     │ boolean │     varchar      │ varchar │      varchar       │
     ├─────────┼──────────────────┼─────────┼────────────────────┤
     │ true    │ add_library_path │ OK      │ third_party/tinycc │
     └─────────┴──────────────────┴─────────┴────────────────────┘
-    Run Time (s): real 0.001 user 0.000225 sys 0.000132
+    Run Time (s): real 0.001 user 0.000862 sys 0.000000
     ┌─────────┬────────────┬─────────┬─────────┐
     │   ok    │    mode    │  code   │ detail  │
     │ boolean │  varchar   │ varchar │ varchar │
     ├─────────┼────────────┼─────────┼─────────┤
     │ true    │ add_option │ OK      │ -O2     │
     └─────────┴────────────┴─────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000293 sys 0.000000
+    Run Time (s): real 0.000 user 0.000321 sys 0.000000
     ┌─────────┬────────────┬─────────┬───────────┐
     │   ok    │    mode    │  code   │  detail   │
     │ boolean │  varchar   │ varchar │  varchar  │
     ├─────────┼────────────┼─────────┼───────────┤
     │ true    │ add_define │ OK      │ TCC_SHIFT │
     └─────────┴────────────┴─────────┴───────────┘
-    Run Time (s): real 0.000 user 0.000680 sys 0.000012
+    Run Time (s): real 0.000 user 0.000381 sys 0.000000
     ┌─────────┬────────────┬─────────┬─────────────────┐
     │   ok    │    mode    │  code   │     detail      │
     │ boolean │  varchar   │ varchar │     varchar     │
     ├─────────┼────────────┼─────────┼─────────────────┤
     │ true    │ add_header │ OK      │ header appended │
     └─────────┴────────────┴─────────┴─────────────────┘
-    Run Time (s): real 0.000 user 0.000178 sys 0.000096
+    Run Time (s): real 0.001 user 0.000774 sys 0.000000
     ┌─────────┬────────────┬─────────┬─────────────────┐
     │   ok    │    mode    │  code   │     detail      │
     │ boolean │  varchar   │ varchar │     varchar     │
     ├─────────┼────────────┼─────────┼─────────────────┤
     │ true    │ add_source │ OK      │ source appended │
     └─────────┴────────────┴─────────┴─────────────────┘
-    Run Time (s): real 0.001 user 0.000158 sys 0.000085
+    Run Time (s): real 0.000 user 0.000357 sys 0.000000
     ┌─────────┬─────────────┬─────────┐
     │   ok    │    mode     │  code   │
     │ boolean │   varchar   │ varchar │
     ├─────────┼─────────────┼─────────┤
     │ true    │ tinycc_bind │ OK      │
     └─────────┴─────────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000268 sys 0.000000
+    Run Time (s): real 0.000 user 0.000269 sys 0.000000
     ┌─────────┬─────────┬─────────┐
     │   ok    │  mode   │  code   │
     │ boolean │ varchar │ varchar │
     ├─────────┼─────────┼─────────┤
     │ true    │ compile │ OK      │
     └─────────┴─────────┴─────────┘
-    Run Time (s): real 0.003 user 0.005848 sys 0.001071
+    Run Time (s): real 0.004 user 0.006284 sys 0.000000
     ┌───────┐
     │ value │
     │ int64 │
     ├───────┤
     │    42 │
     └───────┘
-    Run Time (s): real 0.001 user 0.000145 sys 0.000061
+    Run Time (s): real 0.000 user 0.000182 sys 0.000000
     ┌─────────┬─────────────┬─────────┐
     │   ok    │    mode     │  code   │
     │ boolean │   varchar   │ varchar │
     ├─────────┼─────────────┼─────────┤
     │ true    │ tinycc_bind │ OK      │
     └─────────┴─────────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000505 sys 0.000000
+    Run Time (s): real 0.000 user 0.000180 sys 0.000000
     ┌─────────┬─────────┬─────────┐
     │   ok    │  mode   │  code   │
     │ boolean │ varchar │ varchar │
     ├─────────┼─────────┼─────────┤
     │ true    │ compile │ OK      │
     └─────────┴─────────┴─────────┘
-    Run Time (s): real 0.003 user 0.005453 sys 0.000000
+    Run Time (s): real 0.002 user 0.001655 sys 0.000722
     ┌───────┐
     │ value │
     │ int64 │
     ├───────┤
     │    42 │
     └───────┘
-    Run Time (s): real 0.000 user 0.000404 sys 0.000000
+    Run Time (s): real 0.000 user 0.000180 sys 0.000060
 
 ### 5) Example B: Fast Lane `quick_compile` (with include/library inputs)
 
@@ -547,14 +609,14 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.004 user 0.004502 sys 0.000037
+    Run Time (s): real 0.004 user 0.004564 sys 0.000098
     ┌───────┐
     │ value │
     │ int64 │
     ├───────┤
     │    32 │
     └───────┘
-    Run Time (s): real 0.000 user 0.000198 sys 0.000026
+    Run Time (s): real 0.001 user 0.000000 sys 0.000489
 
 ### 6) Example C: Libraries (`add_library`)
 
@@ -592,42 +654,42 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ tcc_new_state │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000162 sys 0.000162
+    Run Time (s): real 0.000 user 0.000642 sys 0.000000
     ┌─────────┬─────────────┬─────────┐
     │   ok    │    mode     │  code   │
     │ boolean │   varchar   │ varchar │
     ├─────────┼─────────────┼─────────┤
     │ true    │ add_library │ OK      │
     └─────────┴─────────────┴─────────┘
-    Run Time (s): real 0.001 user 0.000272 sys 0.000272
+    Run Time (s): real 0.000 user 0.000309 sys 0.000000
     ┌─────────┬────────────┬─────────┐
     │   ok    │    mode    │  code   │
     │ boolean │  varchar   │ varchar │
     ├─────────┼────────────┼─────────┤
     │ true    │ add_source │ OK      │
     └─────────┴────────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000237 sys 0.000000
+    Run Time (s): real 0.001 user 0.000400 sys 0.000101
     ┌─────────┬─────────────┬─────────┐
     │   ok    │    mode     │  code   │
     │ boolean │   varchar   │ varchar │
     ├─────────┼─────────────┼─────────┤
     │ true    │ tinycc_bind │ OK      │
     └─────────┴─────────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000441 sys 0.000000
+    Run Time (s): real 0.000 user 0.000251 sys 0.000000
     ┌─────────┬─────────┬─────────┐
     │   ok    │  mode   │  code   │
     │ boolean │ varchar │ varchar │
     ├─────────┼─────────┼─────────┤
     │ true    │ compile │ OK      │
     └─────────┴─────────┴─────────┘
-    Run Time (s): real 0.005 user 0.005094 sys 0.000000
+    Run Time (s): real 0.006 user 0.011618 sys 0.000000
     ┌───────┐
     │ value │
     │ int64 │
     ├───────┤
     │    32 │
     └───────┘
-    Run Time (s): real 0.000 user 0.000437 sys 0.000015
+    Run Time (s): real 0.000 user 0.000217 sys 0.000000
 
 ### 7) Reset Session
 
@@ -648,14 +710,14 @@ SQL
     ├─────────┼─────────┼─────────┼───────────────────────────────────────────────────────────────┤
     │ true    │ list    │ OK      │ registered=0 sources=0 headers=0 includes=0 libs=0 state_id=0 │
     └─────────┴─────────┴─────────┴───────────────────────────────────────────────────────────────┘
-    Run Time (s): real 0.001 user 0.000508 sys 0.000729
+    Run Time (s): real 0.000 user 0.000340 sys 0.000255
     ┌─────────┬──────────────┬─────────┐
     │   ok    │     mode     │  code   │
     │ boolean │   varchar    │ varchar │
     ├─────────┼──────────────┼─────────┤
     │ true    │ config_reset │ OK      │
     └─────────┴──────────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000304 sys 0.000164
+    Run Time (s): real 0.001 user 0.000177 sys 0.000134
 
 ### 8) Codegen Preview (No Compile)
 
@@ -685,7 +747,7 @@ SQL
     ├─────────┼─────────┼─────────┼───────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
     │ true    │ codegen │ OK      │ __ducktinycc_ffi_init_0_0 │ #include <stdint.h>\ntypedef struct {\n  uint64_t lower;\n  int64_t upper;\n} ducktinycc_hugeint_t;\ntypedef struct {\n  const void *ptr;\n  uint64_t len;\n} ducktinycc_blob_t;\ntypedef struct {\n  int32_t days;\n} ducktinycc_date_ │
     └─────────┴─────────┴─────────┴───────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-    Run Time (s): real 0.001 user 0.001463 sys 0.000138
+    Run Time (s): real 0.000 user 0.000373 sys 0.000166
 
 ### 9) Batch Wrapper Mode
 
@@ -717,14 +779,14 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.002 user 0.001962 sys 0.000024
+    Run Time (s): real 0.001 user 0.001467 sys 0.000213
     ┌──────────────┐
     │      s       │
     │    int64     │
     ├──────────────┤
     │ 500001500000 │
     └──────────────┘
-    Run Time (s): real 0.004 user 0.003264 sys 0.001151
+    Run Time (s): real 0.004 user 0.004008 sys 0.000082
 
 ### 10) Arrays/Lists as C Slice Arguments
 
@@ -772,21 +834,21 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.001 user 0.001623 sys 0.000000
+    Run Time (s): real 0.004 user 0.008433 sys 0.000031
     ┌───────────┐
     │ sum_plain │
     │   int64   │
     ├───────────┤
     │         6 │
     └───────────┘
-    Run Time (s): real 0.000 user 0.000361 sys 0.000000
+    Run Time (s): real 0.001 user 0.001017 sys 0.000000
     ┌─────────────────────┐
     │ sum_with_null_child │
     │        int64        │
     ├─────────────────────┤
     │                   4 │
     └─────────────────────┘
-    Run Time (s): real 0.001 user 0.000344 sys 0.000043
+    Run Time (s): real 0.000 user 0.000367 sys 0.000097
 
 ### SQL Pointer Helpers (`tcc_alloc`/`tcc_read*`/`tcc_write*`)
 
@@ -800,6 +862,7 @@ auto-generate accessor UDFs in the same session.
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
 .timer on
+-- Handle-backed pointer helpers
 WITH p AS (SELECT tcc_alloc(16) AS h),
 w AS (SELECT h, tcc_write_i64(h, 8, 42) AS ok FROM p),
 r AS (SELECT h, ok, tcc_read_i64(h, 8) AS v, tcc_ptr_size(h) AS sz, tcc_dataptr(h) AS addr FROM w),
@@ -830,6 +893,7 @@ r AS (SELECT h, ok, read_ptr_i64(tcc_dataptr(h)) AS v FROM w),
 f AS (SELECT ok, v, tcc_free_ptr(h) AS freed FROM r)
 SELECT ok, v, freed FROM f;
 
+-- Auto-generated C struct helpers; ox/oy are byte offsets (offsetof)
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'c_struct',
@@ -858,6 +922,7 @@ f AS (
 )
 SELECT x, y, ox, oy, freed FROM f;
 
+-- Auto-generated union helpers
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'c_union',
@@ -870,6 +935,7 @@ w AS (SELECT union_number_auto_set_i(p, 77) AS p FROM p),
 f AS (SELECT union_number_auto_get_i(p) AS v, union_number_auto_free(p) IS NULL AS freed FROM w)
 SELECT v, freed FROM f;
 
+-- Auto-generated enum constant helpers
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'c_enum',
@@ -879,6 +945,7 @@ FROM tcc_module(
 );
 SELECT enum_color_auto_RED_AUTO() AS red, enum_color_auto_BLUE_AUTO() AS blue;
 
+-- Auto-generated bitfield helpers (portable through compiler-generated accessors)
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'c_bitfield',
@@ -900,84 +967,84 @@ SQL
     ├─────────┼───────┼────────┼──────────────┼─────────┤
     │ true    │    42 │     16 │ true         │ true    │
     └─────────┴───────┴────────┴──────────────┴─────────┘
-    Run Time (s): real 0.001 user 0.000539 sys 0.000256
+    Run Time (s): real 0.000 user 0.000500 sys 0.000265
     ┌─────────┬──────────┬─────────┐
     │   ok    │    hx    │  freed  │
     │ boolean │ varchar  │ boolean │
     ├─────────┼──────────┼─────────┤
     │ true    │ DEADBEEF │ true    │
     └─────────┴──────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000591 sys 0.000000
+    Run Time (s): real 0.001 user 0.000568 sys 0.000000
     ┌─────────┬───────────────┬─────────┐
     │   ok    │     mode      │  code   │
     │ boolean │    varchar    │ varchar │
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.002 user 0.003275 sys 0.000000
+    Run Time (s): real 0.002 user 0.003822 sys 0.000000
     ┌─────────┬───────┬─────────┐
     │   ok    │   v   │  freed  │
     │ boolean │ int64 │ boolean │
     ├─────────┼───────┼─────────┤
     │ true    │    42 │ true    │
     └─────────┴───────┴─────────┘
-    Run Time (s): real 0.000 user 0.000649 sys 0.000000
+    Run Time (s): real 0.000 user 0.000399 sys 0.000000
     ┌─────────┬──────────┬─────────┐
     │   ok    │   mode   │  code   │
     │ boolean │ varchar  │ varchar │
     ├─────────┼──────────┼─────────┤
     │ true    │ c_struct │ OK      │
     └─────────┴──────────┴─────────┘
-    Run Time (s): real 0.012 user 0.011785 sys 0.000000
+    Run Time (s): real 0.012 user 0.009997 sys 0.001821
     ┌───────┬───────┬────────┬────────┬─────────┐
     │   x   │   y   │   ox   │   oy   │  freed  │
     │ int32 │ int32 │ uint64 │ uint64 │ boolean │
     ├───────┼───────┼────────┼────────┼─────────┤
     │     7 │     9 │      0 │      4 │ true    │
     └───────┴───────┴────────┴────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000477 sys 0.000000
+    Run Time (s): real 0.000 user 0.000384 sys 0.000132
     ┌─────────┬─────────┬─────────┐
     │   ok    │  mode   │  code   │
     │ boolean │ varchar │ varchar │
     ├─────────┼─────────┼─────────┤
     │ true    │ c_union │ OK      │
     └─────────┴─────────┴─────────┘
-    Run Time (s): real 0.014 user 0.022469 sys 0.004651
+    Run Time (s): real 0.012 user 0.009733 sys 0.001889
     ┌───────┬─────────┐
     │   v   │  freed  │
     │ int32 │ boolean │
     ├───────┼─────────┤
     │    77 │ true    │
     └───────┴─────────┘
-    Run Time (s): real 0.000 user 0.000513 sys 0.000122
+    Run Time (s): real 0.000 user 0.000238 sys 0.000074
     ┌─────────┬─────────┬─────────┐
     │   ok    │  mode   │  code   │
     │ boolean │ varchar │ varchar │
     ├─────────┼─────────┼─────────┤
     │ true    │ c_enum  │ OK      │
     └─────────┴─────────┴─────────┘
-    Run Time (s): real 0.004 user 0.003771 sys 0.000000
+    Run Time (s): real 0.004 user 0.001891 sys 0.001988
     ┌───────┬───────┐
     │  red  │ blue  │
     │ int64 │ int64 │
     ├───────┼───────┤
     │     0 │     2 │
     └───────┴───────┘
-    Run Time (s): real 0.000 user 0.000262 sys 0.000000
+    Run Time (s): real 0.000 user 0.000174 sys 0.000060
     ┌─────────┬────────────┬─────────┐
     │   ok    │    mode    │  code   │
     │ boolean │  varchar   │ varchar │
     ├─────────┼────────────┼─────────┤
     │ true    │ c_bitfield │ OK      │
     └─────────┴────────────┴─────────┘
-    Run Time (s): real 0.008 user 0.007562 sys 0.000000
+    Run Time (s): real 0.010 user 0.019076 sys 0.000944
     ┌────────┬───────┬─────────┐
     │ active │  lvl  │  freed  │
     │ uint8  │ uint8 │ boolean │
     ├────────┼───────┼─────────┤
     │      1 │     9 │ true    │
     └────────┴───────┴─────────┘
-    Run Time (s): real 0.000 user 0.000351 sys 0.000000
+    Run Time (s): real 0.001 user 0.000328 sys 0.000083
 
 Fixed-size arrays use `type[N]` and `ducktinycc_array_t`:
 
@@ -1014,21 +1081,21 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.002 user 0.001590 sys 0.000000
+    Run Time (s): real 0.001 user 0.001572 sys 0.000000
     ┌───────────┐
     │ sum_plain │
     │   int64   │
     ├───────────┤
     │         6 │
     └───────────┘
-    Run Time (s): real 0.000 user 0.000222 sys 0.000000
+    Run Time (s): real 0.001 user 0.000282 sys 0.000000
     ┌─────────────────────┐
     │ sum_with_null_child │
     │        int64        │
     ├─────────────────────┤
     │                   4 │
     └─────────────────────┘
-    Run Time (s): real 0.000 user 0.000470 sys 0.000000
+    Run Time (s): real 0.000 user 0.000216 sys 0.000000
 
 Structs use `struct<name:type;...>` and `ducktinycc_struct_t`:
 
@@ -1063,14 +1130,14 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.001 user 0.000366 sys 0.001253
+    Run Time (s): real 0.002 user 0.000730 sys 0.000874
     ┌───────┐
     │   s   │
     │ int64 │
     ├───────┤
     │     7 │
     └───────┘
-    Run Time (s): real 0.001 user 0.000139 sys 0.000092
+    Run Time (s): real 0.000 user 0.000294 sys 0.000168
 
 Maps use `map<key_type;value_type>` and `ducktinycc_map_t`:
 
@@ -1107,14 +1174,14 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.002 user 0.001621 sys 0.000000
+    Run Time (s): real 0.002 user 0.000760 sys 0.000926
     ┌───────┐
     │   s   │
     │ int64 │
     ├───────┤
     │    33 │
     └───────┘
-    Run Time (s): real 0.000 user 0.000264 sys 0.000000
+    Run Time (s): real 0.000 user 0.000360 sys 0.000160
 
 Buffer helpers are available for manual byte-layout work (for local
 scratch buffers or BLOB payloads):
@@ -1165,35 +1232,35 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.002 user 0.002383 sys 0.000129
+    Run Time (s): real 0.002 user 0.002067 sys 0.000391
     ┌──────────┐
     │ ok_value │
     │  int64   │
     ├──────────┤
     │       42 │
     └──────────┘
-    Run Time (s): real 0.000 user 0.000187 sys 0.000085
+    Run Time (s): real 0.000 user 0.000226 sys 0.000071
     ┌──────────────────┐
     │ short_blob_error │
     │      int64       │
     ├──────────────────┤
     │               -1 │
     └──────────────────┘
-    Run Time (s): real 0.001 user 0.000212 sys 0.000097
+    Run Time (s): real 0.000 user 0.000207 sys 0.000066
     ┌─────────┬───────────────┬─────────┐
     │   ok    │     mode      │  code   │
     │ boolean │    varchar    │ varchar │
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.001 user 0.000740 sys 0.000928
+    Run Time (s): real 0.002 user 0.000432 sys 0.001069
     ┌─────────────────┐
     │ local_roundtrip │
     │      int64      │
     ├─────────────────┤
     │              42 │
     └─────────────────┘
-    Run Time (s): real 0.000 user 0.000181 sys 0.000091
+    Run Time (s): real 0.000 user 0.000204 sys 0.000000
 
 ### 11) `config_reset` Semantics
 
@@ -1230,35 +1297,35 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.002 user 0.002445 sys 0.002208
+    Run Time (s): real 0.002 user 0.002203 sys 0.000128
     ┌──────────────┐
     │ before_reset │
     │    int32     │
     ├──────────────┤
     │           42 │
     └──────────────┘
-    Run Time (s): real 0.001 user 0.000149 sys 0.000080
+    Run Time (s): real 0.001 user 0.000272 sys 0.000169
     ┌─────────┬──────────────┬─────────┐
     │   ok    │     mode     │  code   │
     │ boolean │   varchar    │ varchar │
     ├─────────┼──────────────┼─────────┤
     │ true    │ config_reset │ OK      │
     └─────────┴──────────────┴─────────┘
-    Run Time (s): real 0.000 user 0.000513 sys 0.000000
+    Run Time (s): real 0.000 user 0.000323 sys 0.000000
     ┌─────────┬─────────┬─────────┬───────────────────────────────────────────────────────────────┐
     │   ok    │  mode   │  code   │                            detail                             │
     │ boolean │ varchar │ varchar │                            varchar                            │
     ├─────────┼─────────┼─────────┼───────────────────────────────────────────────────────────────┤
     │ true    │ list    │ OK      │ registered=1 sources=0 headers=0 includes=0 libs=0 state_id=1 │
     └─────────┴─────────┴─────────┴───────────────────────────────────────────────────────────────┘
-    Run Time (s): real 0.000 user 0.000230 sys 0.000000
+    Run Time (s): real 0.000 user 0.000657 sys 0.000000
     ┌─────────────┐
     │ after_reset │
     │    int32    │
     ├─────────────┤
     │          42 │
     └─────────────┘
-    Run Time (s): real 0.000 user 0.000198 sys 0.000000
+    Run Time (s): real 0.000 user 0.000262 sys 0.000107
 
 ### 12) CLI Benchmark Snippet
 
@@ -1284,42 +1351,42 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
 
-    Run Time (s): real 0.001 user 0.000509 sys 0.000000
+    Run Time (s): real 0.001 user 0.000809 sys 0.000000
     ┌─────────┬───────────────┬─────────┐
     │   ok    │     mode      │  code   │
     │ boolean │    varchar    │ varchar │
     ├─────────┼───────────────┼─────────┤
     │ true    │ quick_compile │ OK      │
     └─────────┴───────────────┴─────────┘
-    Run Time (s): real 0.002 user 0.003766 sys 0.000000
+    Run Time (s): real 0.004 user 0.004509 sys 0.000002
     ┌─────────────────┐
     │ add_i32(20, 22) │
     │      int32      │
     ├─────────────────┤
     │              42 │
     └─────────────────┘
-    Run Time (s): real 0.000 user 0.000201 sys 0.000000
+    Run Time (s): real 0.001 user 0.001561 sys 0.000152
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.013 user 0.013767 sys 0.000000
+    Run Time (s): real 0.028 user 0.028746 sys 0.000000
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.014 user 0.013443 sys 0.000000
+    Run Time (s): real 0.013 user 0.013060 sys 0.000000
     ┌──────────────┐
     │      s       │
     │    int128    │
     ├──────────────┤
     │ 500041500000 │
     └──────────────┘
-    Run Time (s): real 0.014 user 0.027412 sys 0.000000
+    Run Time (s): real 0.013 user 0.013226 sys 0.000000
 
 ## Notes
 

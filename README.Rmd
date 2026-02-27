@@ -110,6 +110,30 @@ Additional limits and behavior:
 - current `struct<...>` and `map<...>` members support fixed-width scalar families only (`bool/i8/u8/i16/u16/i32/u32/i64/u64/ptr/f32/f64/uuid/date/time/timestamp/interval/decimal`)
 - `struct<...>` and `map<...>` use `;` separators in tokens to avoid ambiguity inside `arg_types := [...]`
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
+## Get Started 
+
+Minimal end-to-end example: compile a C function and call it from SQL.
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+
+-- Compile and register a zero-arg C UDF returning VARCHAR
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *hello_from_c_udf(void){ return "hello from C UDF"; }',
+  symbol := 'hello_from_c_udf',
+  sql_name := 'hello_from_c_udf',
+  return_type := 'varchar',
+  arg_types := []
+);
+
+-- Call it like any SQL scalar function
+SELECT hello_from_c_udf() AS msg;
+SQL
+```
 
 ## How It Works
 
@@ -138,7 +162,7 @@ Additional limits and behavior:
 - `config_reset` and `tcc_new_state` clear staged build/session inputs, but do not remove already registered SQL UDF catalog entries.
 - Current DuckDB C API behavior treats these API-registered scalar functions as internal catalog entries, so SQL `DROP FUNCTION` is not available for them.
 
-## Design Direction (API Still Evolving)
+## API WIP (Design Direction)
 
 - Host symbol registration mode: feasible and aligned with Rtinycc-style embedding; prefer an allow-listed registry (name -> host address) over raw SQL-provided addresses.
 - Arrow to reduce marshalling: not used directly; batch wrappers already consume DuckDB vectors column-wise and avoid per-row host-wrapper crossings.
@@ -146,7 +170,15 @@ Additional limits and behavior:
 - Host helper ABI: wrappers now expose typed/bounds-checked buffer helpers (`ducktinycc_read_*`, `ducktinycc_write_*`, `ducktinycc_read_bytes`, `ducktinycc_write_bytes`, `ducktinycc_span_fits`) in addition to list/array/struct/map descriptor helpers.
 - SQL pointer helpers: `tcc_alloc`, `tcc_free_ptr`, `tcc_dataptr`, `tcc_ptr_size`, `tcc_ptr_add`, typed `tcc_read_*`/`tcc_write_*`, and `tcc_read_bytes`/`tcc_write_bytes` are registered at extension load.
 - Pointer representation: SQL uses `UBIGINT` handles backed by a per-database in-memory pointer registry.
-- Real C structs/unions/enums/bitfields: `c_struct`, `c_union`, `c_enum`, and `c_bitfield` now auto-generate helper UDFs (`*_new`, `*_free`, `*_get_*`, `*_set_*`, `*_off_*`, `*_addr`, `*_sizeof`, `*_alignof`) directly from C declarations + field specs.
+- Real C structs/unions/enums/bitfields: `c_struct`, `c_union`, `c_enum`, and `c_bitfield` now auto-generate helper UDFs directly from C declarations + field specs.
+- For `c_struct`/`c_union`, helpers include `*_new`, `*_free`, `*_get_*`, `*_set_*`, `*_off_*`, `*_addr`, `*_sizeof`, `*_alignof`.
+- For `c_bitfield`, field helpers are `*_get_*`/`*_set_*` (compiler-resolved bitfield layout); per-field `*_off_*`/`*_addr` are intentionally omitted.
+- Callback signatures (planned): support explicit callback tokens in bindings, e.g. `callback:<ret(args...)>` and `callback_async:<ret(args...)>`, so wrapper code can model function-pointer arguments intentionally.
+- Callback registry (planned): map DuckDB-side callable handles to registry entries (signature + callable + lifecycle token); compiled C receives only a generated trampoline pointer plus opaque callback context (`ptr`), not raw SQL/runtime addresses.
+- Typed trampoline codegen (planned): generate one trampoline per callback argument from the declared signature, then marshal C args -> DuckDB call values -> C return with explicit conversion rules.
+- Callback failure/default policy (planned): follow Rtinycc-style defaults (`0`/`false`/`NULL`/`void`) when callback dispatch fails; async mode enqueues work and returns the type-default immediately.
+- Host symbol wiring for callbacks (planned): expose callback runtime entrypoints as host symbols via `tcc_add_symbol(...)` before relocation (same ordering discipline used by Rtinycc for callback invoke/schedule hooks).
+- Callback feature status: planned only (not yet part of the executable SQL API surface).
 - Safety posture: prefer handle-based helpers (`tcc_alloc` + `tcc_read/write_*`) over raw address arithmetic; `tcc_dataptr` is exposed for interop escape hatches.
 
 ## Builds
@@ -452,6 +484,7 @@ auto-generate accessor UDFs in the same session.
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
 .timer on
+-- Handle-backed pointer helpers
 WITH p AS (SELECT tcc_alloc(16) AS h),
 w AS (SELECT h, tcc_write_i64(h, 8, 42) AS ok FROM p),
 r AS (SELECT h, ok, tcc_read_i64(h, 8) AS v, tcc_ptr_size(h) AS sz, tcc_dataptr(h) AS addr FROM w),
@@ -482,6 +515,7 @@ r AS (SELECT h, ok, read_ptr_i64(tcc_dataptr(h)) AS v FROM w),
 f AS (SELECT ok, v, tcc_free_ptr(h) AS freed FROM r)
 SELECT ok, v, freed FROM f;
 
+-- Auto-generated C struct helpers; ox/oy are byte offsets (offsetof)
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'c_struct',
@@ -510,6 +544,7 @@ f AS (
 )
 SELECT x, y, ox, oy, freed FROM f;
 
+-- Auto-generated union helpers
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'c_union',
@@ -522,6 +557,7 @@ w AS (SELECT union_number_auto_set_i(p, 77) AS p FROM p),
 f AS (SELECT union_number_auto_get_i(p) AS v, union_number_auto_free(p) IS NULL AS freed FROM w)
 SELECT v, freed FROM f;
 
+-- Auto-generated enum constant helpers
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'c_enum',
@@ -531,6 +567,7 @@ FROM tcc_module(
 );
 SELECT enum_color_auto_RED_AUTO() AS red, enum_color_auto_BLUE_AUTO() AS blue;
 
+-- Auto-generated bitfield helpers (portable through compiler-generated accessors)
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'c_bitfield',
