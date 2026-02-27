@@ -124,10 +124,10 @@ Additional limits and behavior:
 - Host symbol registration mode: feasible and aligned with Rtinycc-style embedding; prefer an allow-listed registry (name -> host address) over raw SQL-provided addresses.
 - Arrow to reduce marshalling: not used directly; batch wrappers already consume DuckDB vectors column-wise and avoid per-row host-wrapper crossings.
 - DuckDB nested types: `LIST`, `ARRAY`, `STRUCT`, and `MAP` are first-class SQL argument/return tokens with C descriptors; nested/non-fixed-width struct/map members remain future work.
-- Pointer utilities (next): adopt an Rtinycc-like helper layer for typed memory I/O (`read_i8/u8/.../f64/ptr`, `write_*`, `read_bytes`, `write_bytes`) on opaque pointer handles.
-- Pointer representation: use `UBIGINT` handles in SQL mapped to an internal pointer registry with ownership tags (`owned`, `borrowed`, `external`) and optional type tags.
+- Host helper ABI: wrappers now expose typed/bounds-checked buffer helpers (`ducktinycc_read_*`, `ducktinycc_write_*`, `ducktinycc_read_bytes`, `ducktinycc_write_bytes`, `ducktinycc_span_fits`) in addition to list/array/struct/map descriptor helpers.
+- Pointer representation (future SQL surface): use `UBIGINT` handles with ownership/type tags once pointer-table functions are introduced; current wrappers operate on direct in-process pointers only.
 - Real C structs (not DuckDB `STRUCT`): treat these as pointer-backed objects (`ptr<T>` style), with helper UDFs for `malloc/free`, field address, `container_of`, and typed field get/set/read/write.
-- Safety posture: no raw user-provided addresses by default; pointers should enter through controlled constructors/host symbols and be validated through the registry.
+- Safety posture for future pointer tables: no raw user-provided addresses by default; pointers should enter through controlled constructors/host symbols and be validated through a registry.
 
 ## Builds
 
@@ -502,6 +502,48 @@ FROM tcc_module(
   arg_types := ['map<i64;i64>']
 );
 SELECT map_sum(MAP([1::BIGINT,2::BIGINT],[10::BIGINT,20::BIGINT])::MAP(BIGINT, BIGINT)) AS s;
+SQL
+```
+
+Buffer helpers are available for manual byte-layout work (for local scratch buffers or BLOB payloads):
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long blob_read_i32(ducktinycc_blob_t b){
+  int32_t v = 0;
+  if (!b.ptr) return 0;
+  if (!ducktinycc_read_i32(b.ptr, b.len, 0, &v)) return -1;
+  return (long long)v;
+}',
+  symbol := 'blob_read_i32',
+  sql_name := 'blob_read_i32',
+  return_type := 'i64',
+  arg_types := ['blob']
+);
+SELECT blob_read_i32(from_hex('2A000000')) AS ok_value;
+SELECT blob_read_i32(from_hex('2A0000')) AS short_blob_error;
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long local_rw_i64(void){
+  uint8_t buf[16];
+  int64_t out = 0;
+  if (!ducktinycc_write_i64(buf, sizeof(buf), 8, 41)) return -1;
+  if (!ducktinycc_read_i64(buf, sizeof(buf), 8, &out)) return -2;
+  return out + 1;
+}',
+  symbol := 'local_rw_i64',
+  sql_name := 'local_rw_i64',
+  return_type := 'i64',
+  arg_types := []
+);
+SELECT local_rw_i64() AS local_roundtrip;
 SQL
 ```
 
