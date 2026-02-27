@@ -15,14 +15,14 @@ knitr::opts_chunk$set(
 
 # DuckTinyCC
 
-`DuckTinyCC` is a `DuckDB` `C` extension for in-process JIT compiled C UDFs allowing `C` scripting via `TinyCC`. Combined with `C` parsing facilities offered by for example the `[sitting duck extension]`(https://github.com/teaguesterling/sitting_duck), we can quickly generate declarative bindings.
+`DuckTinyCC` is a `DuckDB` `C` extension for in-process JIT compiled C UDFs allowing `C` scripting via `TinyCC`. Combined with `C` parsing facilities offered by for example the [`sitting duck extension`](https://github.com/teaguesterling/sitting_duck), we can quickly generate declarative bindings.
 
 ## API Surface
 
 All functionality is exposed through `tcc_module(...)` and selected with
 `mode := ...`.  
 Every mode returns one diagnostics row with `ok`, `code`, `message`, and
-context columns.
+context columns. Functions are prefixed by `tcc_`
 
 ### Session and Configuration
 
