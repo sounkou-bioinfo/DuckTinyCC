@@ -1423,3 +1423,152 @@ FROM tcc_module(
 );
 ----
 false	quick_compile	E_BAD_WRAPPER_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_struct',
+  source := 'struct point_i32_auto { int x; int y; };',
+  symbol := 'point_i32_auto',
+  arg_types := ['x:i32','y:i32']
+);
+----
+true	c_struct	OK
+
+query TT
+SELECT struct_point_i32_auto_sizeof() > 0, struct_point_i32_auto_alignof() > 0;
+----
+true	true
+
+query TTTTTT
+WITH p AS (
+  SELECT struct_point_i32_auto_new() AS p
+),
+s AS (
+  SELECT struct_point_i32_auto_set_y(struct_point_i32_auto_set_x(p, 12), 30) AS p
+  FROM p
+),
+r AS (
+  SELECT p,
+         struct_point_i32_auto_get_x(p) AS x,
+         struct_point_i32_auto_get_y(p) AS y,
+         struct_point_i32_auto_off_x() AS ox,
+         struct_point_i32_auto_off_y() AS oy,
+         CAST(struct_point_i32_auto_x_addr(p) AS BIGINT) - CAST(p AS BIGINT) AS dx
+  FROM s
+),
+f AS (
+  SELECT x, y, ox, oy, dx, struct_point_i32_auto_free(p) IS NULL AS freed FROM r
+)
+SELECT CAST(x AS VARCHAR), CAST(y AS VARCHAR), CAST(ox AS VARCHAR), CAST(oy AS VARCHAR), CAST(dx AS VARCHAR),
+       CAST(freed AS VARCHAR)
+FROM f;
+----
+12	30	0	4	0	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_struct',
+  source := 'struct buf_u8_auto { unsigned char data[4]; };',
+  symbol := 'buf_u8_auto',
+  arg_types := ['data:u8[4]']
+);
+----
+true	c_struct	OK
+
+query TTTTT
+WITH p AS (
+  SELECT struct_buf_u8_auto_new() AS p
+),
+s AS (
+  SELECT struct_buf_u8_auto_set_data_elt(struct_buf_u8_auto_set_data_elt(p, 0, 202), 1, 254) AS p
+  FROM p
+),
+r AS (
+  SELECT p,
+         struct_buf_u8_auto_get_data_elt(p, 0) AS a,
+         struct_buf_u8_auto_get_data_elt(p, 1) AS b,
+         struct_buf_u8_auto_off_data() AS od,
+         CAST(struct_buf_u8_auto_data_addr(p) AS BIGINT) - CAST(p AS BIGINT) AS dd
+  FROM s
+),
+f AS (
+  SELECT a, b, od, dd, struct_buf_u8_auto_free(p) IS NULL AS freed FROM r
+)
+SELECT CAST(a AS VARCHAR), CAST(b AS VARCHAR), CAST(od AS VARCHAR), CAST(dd AS VARCHAR), CAST(freed AS VARCHAR)
+FROM f;
+----
+202	254	0	0	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_bitfield',
+  source := 'struct flags_auto { unsigned int active : 1; unsigned int level : 4; };',
+  symbol := 'flags_auto',
+  arg_types := ['active:u8','level:u8']
+);
+----
+true	c_bitfield	OK
+
+query TTT
+WITH p AS (
+  SELECT struct_flags_auto_new() AS p
+),
+s AS (
+  SELECT struct_flags_auto_set_level(struct_flags_auto_set_active(p, 1), 9) AS p FROM p
+),
+f AS (
+  SELECT struct_flags_auto_get_active(p) AS active,
+         struct_flags_auto_get_level(p) AS level,
+         struct_flags_auto_free(p) IS NULL AS freed
+  FROM s
+)
+SELECT CAST(active AS VARCHAR), CAST(level AS VARCHAR), CAST(freed AS VARCHAR) FROM f;
+----
+1	9	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_union',
+  source := 'union number_auto { int i; float f; };',
+  symbol := 'number_auto',
+  arg_types := ['i:i32','f:f32']
+);
+----
+true	c_union	OK
+
+query TTT
+WITH p AS (
+  SELECT union_number_auto_new() AS p
+),
+s AS (
+  SELECT union_number_auto_set_i(p, 77) AS p FROM p
+),
+f AS (
+  SELECT union_number_auto_get_i(p) AS v, union_number_auto_free(p) IS NULL AS freed FROM s
+)
+SELECT CAST(v AS VARCHAR), CAST(union_number_auto_sizeof() > 0 AS VARCHAR), CAST(freed AS VARCHAR) FROM f;
+----
+77	true	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_enum',
+  source := 'enum color_auto { RED_AUTO = 0, GREEN_AUTO = 1, BLUE_AUTO = 2 };',
+  symbol := 'color_auto',
+  arg_types := ['RED_AUTO','GREEN_AUTO','BLUE_AUTO']
+);
+----
+true	c_enum	OK
+
+query TTTT
+SELECT CAST(enum_color_auto_RED_AUTO() AS VARCHAR),
+       CAST(enum_color_auto_BLUE_AUTO() AS VARCHAR),
+       CAST(enum_color_auto_sizeof() > 0 AS VARCHAR),
+       CAST((enum_color_auto_GREEN_AUTO() - enum_color_auto_RED_AUTO()) AS VARCHAR);
+----
+0	2	true	1
