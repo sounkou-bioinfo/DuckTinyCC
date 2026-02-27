@@ -125,9 +125,10 @@ Additional limits and behavior:
 - Arrow to reduce marshalling: not used directly; batch wrappers already consume DuckDB vectors column-wise and avoid per-row host-wrapper crossings.
 - DuckDB nested types: `LIST`, `ARRAY`, `STRUCT`, and `MAP` are first-class SQL argument/return tokens with C descriptors; nested/non-fixed-width struct/map members remain future work.
 - Host helper ABI: wrappers now expose typed/bounds-checked buffer helpers (`ducktinycc_read_*`, `ducktinycc_write_*`, `ducktinycc_read_bytes`, `ducktinycc_write_bytes`, `ducktinycc_span_fits`) in addition to list/array/struct/map descriptor helpers.
-- Pointer representation (future SQL surface): use `UBIGINT` handles with ownership/type tags once pointer-table functions are introduced; current wrappers operate on direct in-process pointers only.
+- SQL pointer helpers: `tcc_alloc`, `tcc_free_ptr`, `tcc_dataptr`, `tcc_ptr_size`, `tcc_ptr_add`, typed `tcc_read_*`/`tcc_write_*`, and `tcc_read_bytes`/`tcc_write_bytes` are registered at extension load.
+- Pointer representation: SQL uses `UBIGINT` handles backed by a per-database in-memory pointer registry.
 - Real C structs (not DuckDB `STRUCT`): treat these as pointer-backed objects (`ptr<T>` style), with helper UDFs for `malloc/free`, field address, `container_of`, and typed field get/set/read/write.
-- Safety posture for future pointer tables: no raw user-provided addresses by default; pointers should enter through controlled constructors/host symbols and be validated through a registry.
+- Safety posture: prefer handle-based helpers (`tcc_alloc` + `tcc_read/write_*`) over raw address arithmetic; `tcc_dataptr` is exposed for interop escape hatches.
 
 ## Builds
 
@@ -417,6 +418,30 @@ FROM tcc_module(
 );
 SELECT sum_i64([1,2,3]::BIGINT[]) AS sum_plain;
 SELECT sum_i64([1,NULL,3]::BIGINT[]) AS sum_with_null_child;
+SQL
+```
+
+### SQL Pointer Helpers (`tcc_alloc`/`tcc_read*`/`tcc_write*`)
+
+These helpers are directly callable from SQL and are registered at extension load.
+Memory is process-local and tied to a per-database registry; free handles with
+`tcc_free_ptr` when done.
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+WITH p AS (SELECT tcc_alloc(16) AS h),
+w AS (SELECT h, tcc_write_i64(h, 8, 42) AS ok FROM p),
+r AS (SELECT h, ok, tcc_read_i64(h, 8) AS v, tcc_ptr_size(h) AS sz, tcc_dataptr(h) AS addr FROM w),
+f AS (SELECT ok, v, sz, addr, tcc_free_ptr(h) AS freed FROM r)
+SELECT ok, v, sz, addr > 0 AS addr_nonzero, freed FROM f;
+
+WITH p AS (SELECT tcc_alloc(4) AS h),
+w AS (SELECT h, tcc_write_bytes(h, 0, from_hex('DEADBEEF')) AS ok FROM p),
+r AS (SELECT h, ok, hex(tcc_read_bytes(h, 0, 4)) AS hx FROM w),
+f AS (SELECT ok, hx, tcc_free_ptr(h) AS freed FROM r)
+SELECT ok, hx, freed FROM f;
 SQL
 ```
 

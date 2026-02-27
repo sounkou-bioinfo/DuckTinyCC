@@ -4,6 +4,44 @@
 
 require ducktinycc
 
+query T
+SELECT tcc_alloc(NULL);
+----
+NULL
+
+query T
+WITH p AS (SELECT tcc_alloc(16) AS h),
+w AS (SELECT h, tcc_write_i64(h, 8, 42) AS ok FROM p),
+r AS (SELECT h, ok, tcc_read_i64(h, 8) AS v, tcc_ptr_size(h) AS sz, tcc_dataptr(h) AS addr FROM w),
+f AS (SELECT ok, v, sz, addr, tcc_free_ptr(h) AS freed FROM r)
+SELECT CASE WHEN ok AND v = 42 AND sz = 16 AND addr > 0 AND freed THEN 'ok' ELSE 'bad' END
+FROM f;
+----
+ok
+
+query T
+WITH p AS (SELECT tcc_alloc(4) AS h),
+w AS (SELECT h, tcc_write_bytes(h, 0, from_hex('DEADBEEF')) AS ok FROM p),
+r AS (SELECT h, ok, hex(tcc_read_bytes(h, 0, 4)) AS hx FROM w),
+f AS (SELECT ok, hx, tcc_free_ptr(h) AS freed FROM r)
+SELECT CASE WHEN ok AND hx = 'DEADBEEF' AND freed THEN 'ok' ELSE 'bad' END
+FROM f;
+----
+ok
+
+query T
+WITH p AS (SELECT tcc_alloc(8) AS h),
+f AS (SELECT h, tcc_free_ptr(h) AS freed FROM p)
+SELECT CASE WHEN freed AND tcc_read_i64(h, 0) IS NULL THEN 'ok' ELSE 'bad' END
+FROM f;
+----
+ok
+
+query I
+SELECT CASE WHEN tcc_ptr_add(100::UBIGINT, 23::UBIGINT) = 123::UBIGINT THEN 1 ELSE 0 END;
+----
+1
+
 query TTTT
 SELECT ok, mode, code, detail
 FROM tcc_module(mode := 'config_set', runtime_path := '/tmp/runtime-a');
