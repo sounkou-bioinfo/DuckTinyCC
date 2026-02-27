@@ -69,7 +69,24 @@ typedef enum {
 	TCC_FFI_TIME = 16,
 	TCC_FFI_TIMESTAMP = 17,
 	TCC_FFI_INTERVAL = 18,
-	TCC_FFI_DECIMAL = 19
+	TCC_FFI_DECIMAL = 19,
+	TCC_FFI_LIST_BOOL = 64,
+	TCC_FFI_LIST_I8 = 65,
+	TCC_FFI_LIST_U8 = 66,
+	TCC_FFI_LIST_I16 = 67,
+	TCC_FFI_LIST_U16 = 68,
+	TCC_FFI_LIST_I32 = 69,
+	TCC_FFI_LIST_U32 = 70,
+	TCC_FFI_LIST_I64 = 71,
+	TCC_FFI_LIST_U64 = 72,
+	TCC_FFI_LIST_F32 = 73,
+	TCC_FFI_LIST_F64 = 74,
+	TCC_FFI_LIST_UUID = 75,
+	TCC_FFI_LIST_DATE = 76,
+	TCC_FFI_LIST_TIME = 77,
+	TCC_FFI_LIST_TIMESTAMP = 78,
+	TCC_FFI_LIST_INTERVAL = 79,
+	TCC_FFI_LIST_DECIMAL = 80
 } tcc_ffi_type_t;
 
 typedef struct {
@@ -105,6 +122,13 @@ typedef struct {
 	uint8_t scale;
 	ducktinycc_hugeint_t value;
 } ducktinycc_decimal_t;
+
+typedef struct {
+	const void *ptr;
+	const uint64_t *validity;
+	uint64_t offset;
+	uint64_t len;
+} ducktinycc_list_t;
 
 typedef enum {
 	TCC_WRAPPER_MODE_ROW = 0,
@@ -210,6 +234,9 @@ static bool tcc_equals_ci(const char *a, const char *b);
 static bool tcc_parse_wrapper_mode(const char *wrapper_mode, tcc_wrapper_mode_t *out_mode,
                                    tcc_error_buffer_t *error_buf);
 static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type);
+static bool tcc_ffi_type_is_list(tcc_ffi_type_t type);
+static bool tcc_ffi_list_child_type(tcc_ffi_type_t list_type, tcc_ffi_type_t *out_child);
+static bool tcc_ffi_list_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type_t *out_list_type);
 
 static char *tcc_strdup(const char *value) {
 	size_t len;
@@ -1010,6 +1037,153 @@ static void tcc_host_sig_ctx_destroy(void *ptr) {
 	duckdb_free(ctx);
 }
 
+static bool tcc_ffi_type_is_list(tcc_ffi_type_t type) {
+	switch (type) {
+	case TCC_FFI_LIST_BOOL:
+	case TCC_FFI_LIST_I8:
+	case TCC_FFI_LIST_U8:
+	case TCC_FFI_LIST_I16:
+	case TCC_FFI_LIST_U16:
+	case TCC_FFI_LIST_I32:
+	case TCC_FFI_LIST_U32:
+	case TCC_FFI_LIST_I64:
+	case TCC_FFI_LIST_U64:
+	case TCC_FFI_LIST_F32:
+	case TCC_FFI_LIST_F64:
+	case TCC_FFI_LIST_UUID:
+	case TCC_FFI_LIST_DATE:
+	case TCC_FFI_LIST_TIME:
+	case TCC_FFI_LIST_TIMESTAMP:
+	case TCC_FFI_LIST_INTERVAL:
+	case TCC_FFI_LIST_DECIMAL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool tcc_ffi_list_child_type(tcc_ffi_type_t list_type, tcc_ffi_type_t *out_child) {
+	if (!out_child) {
+		return false;
+	}
+	switch (list_type) {
+	case TCC_FFI_LIST_BOOL:
+		*out_child = TCC_FFI_BOOL;
+		return true;
+	case TCC_FFI_LIST_I8:
+		*out_child = TCC_FFI_I8;
+		return true;
+	case TCC_FFI_LIST_U8:
+		*out_child = TCC_FFI_U8;
+		return true;
+	case TCC_FFI_LIST_I16:
+		*out_child = TCC_FFI_I16;
+		return true;
+	case TCC_FFI_LIST_U16:
+		*out_child = TCC_FFI_U16;
+		return true;
+	case TCC_FFI_LIST_I32:
+		*out_child = TCC_FFI_I32;
+		return true;
+	case TCC_FFI_LIST_U32:
+		*out_child = TCC_FFI_U32;
+		return true;
+	case TCC_FFI_LIST_I64:
+		*out_child = TCC_FFI_I64;
+		return true;
+	case TCC_FFI_LIST_U64:
+		*out_child = TCC_FFI_U64;
+		return true;
+	case TCC_FFI_LIST_F32:
+		*out_child = TCC_FFI_F32;
+		return true;
+	case TCC_FFI_LIST_F64:
+		*out_child = TCC_FFI_F64;
+		return true;
+	case TCC_FFI_LIST_UUID:
+		*out_child = TCC_FFI_UUID;
+		return true;
+	case TCC_FFI_LIST_DATE:
+		*out_child = TCC_FFI_DATE;
+		return true;
+	case TCC_FFI_LIST_TIME:
+		*out_child = TCC_FFI_TIME;
+		return true;
+	case TCC_FFI_LIST_TIMESTAMP:
+		*out_child = TCC_FFI_TIMESTAMP;
+		return true;
+	case TCC_FFI_LIST_INTERVAL:
+		*out_child = TCC_FFI_INTERVAL;
+		return true;
+	case TCC_FFI_LIST_DECIMAL:
+		*out_child = TCC_FFI_DECIMAL;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool tcc_ffi_list_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type_t *out_list_type) {
+	if (!out_list_type) {
+		return false;
+	}
+	switch (child_type) {
+	case TCC_FFI_BOOL:
+		*out_list_type = TCC_FFI_LIST_BOOL;
+		return true;
+	case TCC_FFI_I8:
+		*out_list_type = TCC_FFI_LIST_I8;
+		return true;
+	case TCC_FFI_U8:
+		*out_list_type = TCC_FFI_LIST_U8;
+		return true;
+	case TCC_FFI_I16:
+		*out_list_type = TCC_FFI_LIST_I16;
+		return true;
+	case TCC_FFI_U16:
+		*out_list_type = TCC_FFI_LIST_U16;
+		return true;
+	case TCC_FFI_I32:
+		*out_list_type = TCC_FFI_LIST_I32;
+		return true;
+	case TCC_FFI_U32:
+		*out_list_type = TCC_FFI_LIST_U32;
+		return true;
+	case TCC_FFI_I64:
+		*out_list_type = TCC_FFI_LIST_I64;
+		return true;
+	case TCC_FFI_U64:
+		*out_list_type = TCC_FFI_LIST_U64;
+		return true;
+	case TCC_FFI_F32:
+		*out_list_type = TCC_FFI_LIST_F32;
+		return true;
+	case TCC_FFI_F64:
+		*out_list_type = TCC_FFI_LIST_F64;
+		return true;
+	case TCC_FFI_UUID:
+		*out_list_type = TCC_FFI_LIST_UUID;
+		return true;
+	case TCC_FFI_DATE:
+		*out_list_type = TCC_FFI_LIST_DATE;
+		return true;
+	case TCC_FFI_TIME:
+		*out_list_type = TCC_FFI_LIST_TIME;
+		return true;
+	case TCC_FFI_TIMESTAMP:
+		*out_list_type = TCC_FFI_LIST_TIMESTAMP;
+		return true;
+	case TCC_FFI_INTERVAL:
+		*out_list_type = TCC_FFI_LIST_INTERVAL;
+		return true;
+	case TCC_FFI_DECIMAL:
+		*out_list_type = TCC_FFI_LIST_DECIMAL;
+		return true;
+	default:
+		return false;
+	}
+}
+
 static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
 	switch (type) {
 	case TCC_FFI_BOOL:
@@ -1043,6 +1217,24 @@ static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
 		return sizeof(ducktinycc_interval_t);
 	case TCC_FFI_DECIMAL:
 		return sizeof(ducktinycc_decimal_t);
+	case TCC_FFI_LIST_BOOL:
+	case TCC_FFI_LIST_I8:
+	case TCC_FFI_LIST_U8:
+	case TCC_FFI_LIST_I16:
+	case TCC_FFI_LIST_U16:
+	case TCC_FFI_LIST_I32:
+	case TCC_FFI_LIST_U32:
+	case TCC_FFI_LIST_I64:
+	case TCC_FFI_LIST_U64:
+	case TCC_FFI_LIST_F32:
+	case TCC_FFI_LIST_F64:
+	case TCC_FFI_LIST_UUID:
+	case TCC_FFI_LIST_DATE:
+	case TCC_FFI_LIST_TIME:
+	case TCC_FFI_LIST_TIMESTAMP:
+	case TCC_FFI_LIST_INTERVAL:
+	case TCC_FFI_LIST_DECIMAL:
+		return sizeof(ducktinycc_list_t);
 	case TCC_FFI_VOID:
 	default:
 		return 0;
@@ -1092,6 +1284,24 @@ static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 		return DUCKDB_TYPE_INTERVAL;
 	case TCC_FFI_DECIMAL:
 		return DUCKDB_TYPE_DECIMAL;
+	case TCC_FFI_LIST_BOOL:
+	case TCC_FFI_LIST_I8:
+	case TCC_FFI_LIST_U8:
+	case TCC_FFI_LIST_I16:
+	case TCC_FFI_LIST_U16:
+	case TCC_FFI_LIST_I32:
+	case TCC_FFI_LIST_U32:
+	case TCC_FFI_LIST_I64:
+	case TCC_FFI_LIST_U64:
+	case TCC_FFI_LIST_F32:
+	case TCC_FFI_LIST_F64:
+	case TCC_FFI_LIST_UUID:
+	case TCC_FFI_LIST_DATE:
+	case TCC_FFI_LIST_TIME:
+	case TCC_FFI_LIST_TIMESTAMP:
+	case TCC_FFI_LIST_INTERVAL:
+	case TCC_FFI_LIST_DECIMAL:
+		return DUCKDB_TYPE_LIST;
 	default:
 		return DUCKDB_TYPE_INVALID;
 	}
@@ -1099,6 +1309,21 @@ static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 
 static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type) {
 	duckdb_type base_type;
+	if (tcc_ffi_type_is_list(type)) {
+		tcc_ffi_type_t child_type = TCC_FFI_VOID;
+		duckdb_logical_type child_logical = NULL;
+		duckdb_logical_type list_logical = NULL;
+		if (!tcc_ffi_list_child_type(type, &child_type)) {
+			return NULL;
+		}
+		child_logical = tcc_ffi_type_create_logical_type(child_type);
+		if (!child_logical) {
+			return NULL;
+		}
+		list_logical = duckdb_create_list_type(child_logical);
+		duckdb_destroy_logical_type(&child_logical);
+		return list_logical;
+	}
 	if (type == TCC_FFI_DECIMAL) {
 		/* Keep a stable default until typed signatures accept precision/scale parameters. */
 		return duckdb_create_decimal_type(18, 3);
@@ -1173,9 +1398,15 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 	idx_t row_varchar_alloc_count = 0;
 	idx_t row_varchar_alloc_capacity = 0;
 	ducktinycc_blob_t *row_blob_values = NULL;
+	ducktinycc_list_t *row_list_values = NULL;
 	ducktinycc_blob_t **batch_blob_columns = NULL;
+	ducktinycc_list_t **batch_list_columns = NULL;
 	const char ***batch_varchar_columns = NULL;
 	char ***batch_varchar_owned = NULL;
+	duckdb_list_entry **list_entries_columns = NULL;
+	uint8_t **list_child_data_columns = NULL;
+	uint64_t **list_child_validity_columns = NULL;
+	size_t *list_child_sizes = NULL;
 	const char **batch_out_varchar = NULL;
 	ducktinycc_blob_t *batch_out_blob = NULL;
 	uint8_t out_value[16];
@@ -1204,48 +1435,83 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 		duckdb_scalar_function_set_error(info, "ducktinycc arg count too large");
 		return;
 	}
-	if (ctx->arg_count > 0) {
-		in_data = (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)ctx->arg_count);
-		in_validity = (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)ctx->arg_count);
-		if (ctx->wrapper_mode == TCC_WRAPPER_MODE_ROW) {
-			arg_ptrs = (void **)duckdb_malloc(sizeof(void *) * (size_t)ctx->arg_count);
-			row_varchar_values = (const char **)duckdb_malloc(sizeof(const char *) * (size_t)ctx->arg_count);
-			row_blob_values = (ducktinycc_blob_t *)duckdb_malloc(sizeof(ducktinycc_blob_t) * (size_t)ctx->arg_count);
-		} else {
-			batch_arg_data = (void **)duckdb_malloc(sizeof(void *) * (size_t)ctx->arg_count);
-			batch_varchar_columns = (const char ***)duckdb_malloc(sizeof(const char **) * (size_t)ctx->arg_count);
-			batch_varchar_owned = (char ***)duckdb_malloc(sizeof(char **) * (size_t)ctx->arg_count);
-			batch_blob_columns =
-			    (ducktinycc_blob_t **)duckdb_malloc(sizeof(ducktinycc_blob_t *) * (size_t)ctx->arg_count);
-		}
-		if (!in_data || !in_validity ||
-		    (ctx->wrapper_mode == TCC_WRAPPER_MODE_ROW && (!arg_ptrs || !row_varchar_values || !row_blob_values)) ||
-		    (ctx->wrapper_mode == TCC_WRAPPER_MODE_BATCH &&
-		     (!batch_arg_data || !batch_varchar_columns || !batch_varchar_owned || !batch_blob_columns))) {
-			error = "ducktinycc out of memory";
-			goto cleanup;
-		}
+		if (ctx->arg_count > 0) {
+			in_data = (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)ctx->arg_count);
+			in_validity = (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			if (ctx->wrapper_mode == TCC_WRAPPER_MODE_ROW) {
+				arg_ptrs = (void **)duckdb_malloc(sizeof(void *) * (size_t)ctx->arg_count);
+				row_varchar_values = (const char **)duckdb_malloc(sizeof(const char *) * (size_t)ctx->arg_count);
+				row_blob_values = (ducktinycc_blob_t *)duckdb_malloc(sizeof(ducktinycc_blob_t) * (size_t)ctx->arg_count);
+				row_list_values = (ducktinycc_list_t *)duckdb_malloc(sizeof(ducktinycc_list_t) * (size_t)ctx->arg_count);
+			} else {
+				batch_arg_data = (void **)duckdb_malloc(sizeof(void *) * (size_t)ctx->arg_count);
+				batch_varchar_columns = (const char ***)duckdb_malloc(sizeof(const char **) * (size_t)ctx->arg_count);
+				batch_varchar_owned = (char ***)duckdb_malloc(sizeof(char **) * (size_t)ctx->arg_count);
+				batch_blob_columns =
+				    (ducktinycc_blob_t **)duckdb_malloc(sizeof(ducktinycc_blob_t *) * (size_t)ctx->arg_count);
+				batch_list_columns =
+				    (ducktinycc_list_t **)duckdb_malloc(sizeof(ducktinycc_list_t *) * (size_t)ctx->arg_count);
+			}
+			list_entries_columns =
+			    (duckdb_list_entry **)duckdb_malloc(sizeof(duckdb_list_entry *) * (size_t)ctx->arg_count);
+			list_child_data_columns = (uint8_t **)duckdb_malloc(sizeof(uint8_t *) * (size_t)ctx->arg_count);
+			list_child_validity_columns = (uint64_t **)duckdb_malloc(sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			list_child_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)ctx->arg_count);
+			if (!in_data || !in_validity ||
+			    (ctx->wrapper_mode == TCC_WRAPPER_MODE_ROW &&
+			     (!arg_ptrs || !row_varchar_values || !row_blob_values || !row_list_values)) ||
+			    (ctx->wrapper_mode == TCC_WRAPPER_MODE_BATCH &&
+			     (!batch_arg_data || !batch_varchar_columns || !batch_varchar_owned || !batch_blob_columns ||
+			      !batch_list_columns)) ||
+			    !list_entries_columns || !list_child_data_columns || !list_child_validity_columns || !list_child_sizes) {
+				error = "ducktinycc out of memory";
+				goto cleanup;
+			}
 		if (batch_varchar_columns) {
 			memset(batch_varchar_columns, 0, sizeof(const char **) * (size_t)ctx->arg_count);
 		}
 		if (batch_varchar_owned) {
 			memset(batch_varchar_owned, 0, sizeof(char **) * (size_t)ctx->arg_count);
 		}
-		if (batch_blob_columns) {
-			memset(batch_blob_columns, 0, sizeof(ducktinycc_blob_t *) * (size_t)ctx->arg_count);
+			if (batch_blob_columns) {
+				memset(batch_blob_columns, 0, sizeof(ducktinycc_blob_t *) * (size_t)ctx->arg_count);
+			}
+			if (batch_list_columns) {
+				memset(batch_list_columns, 0, sizeof(ducktinycc_list_t *) * (size_t)ctx->arg_count);
+			}
+			memset(list_entries_columns, 0, sizeof(duckdb_list_entry *) * (size_t)ctx->arg_count);
+			memset(list_child_data_columns, 0, sizeof(uint8_t *) * (size_t)ctx->arg_count);
+			memset(list_child_validity_columns, 0, sizeof(uint64_t *) * (size_t)ctx->arg_count);
+			memset(list_child_sizes, 0, sizeof(size_t) * (size_t)ctx->arg_count);
 		}
-	}
 	ret_size = tcc_ffi_type_size(ctx->return_type);
 
-	for (col = 0; col < ctx->arg_count; col++) {
-		duckdb_vector v = duckdb_data_chunk_get_vector(input, (idx_t)col);
-		in_data[col] = (uint8_t *)duckdb_vector_get_data(v);
-		in_validity[col] = duckdb_vector_get_validity(v);
-		if (!ctx->arg_sizes || ctx->arg_sizes[col] == 0) {
-			error = "ducktinycc invalid arg type size";
-			goto cleanup;
+		for (col = 0; col < ctx->arg_count; col++) {
+			duckdb_vector v = duckdb_data_chunk_get_vector(input, (idx_t)col);
+			in_data[col] = (uint8_t *)duckdb_vector_get_data(v);
+			in_validity[col] = duckdb_vector_get_validity(v);
+			if (!ctx->arg_sizes || ctx->arg_sizes[col] == 0) {
+				error = "ducktinycc invalid arg type size";
+				goto cleanup;
+			}
+			if (tcc_ffi_type_is_list(ctx->arg_types[col])) {
+				tcc_ffi_type_t child_type = TCC_FFI_VOID;
+				duckdb_vector child_vector;
+				if (!tcc_ffi_list_child_type(ctx->arg_types[col], &child_type)) {
+					error = "ducktinycc invalid list child type";
+					goto cleanup;
+				}
+				list_child_sizes[col] = tcc_ffi_type_size(child_type);
+				if (list_child_sizes[col] == 0) {
+					error = "ducktinycc invalid list child type size";
+					goto cleanup;
+				}
+				child_vector = duckdb_list_vector_get_child(v);
+				list_entries_columns[col] = (duckdb_list_entry *)in_data[col];
+				list_child_data_columns[col] = (uint8_t *)duckdb_vector_get_data(child_vector);
+				list_child_validity_columns[col] = duckdb_vector_get_validity(child_vector);
+			}
 		}
-	}
 
 	duckdb_vector_ensure_validity_writable(output);
 	out_validity = duckdb_vector_get_validity(output);
@@ -1293,10 +1559,10 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 					batch_varchar_owned[col] = NULL;
 				}
 				batch_arg_data[col] = (void *)decoded;
-			} else if (ctx->arg_types[col] == TCC_FFI_BLOB) {
-				duckdb_string_t *strings = (duckdb_string_t *)in_data[col];
-				ducktinycc_blob_t *decoded = NULL;
-				if (n > 0) {
+				} else if (ctx->arg_types[col] == TCC_FFI_BLOB) {
+					duckdb_string_t *strings = (duckdb_string_t *)in_data[col];
+					ducktinycc_blob_t *decoded = NULL;
+					if (n > 0) {
 					decoded = (ducktinycc_blob_t *)duckdb_malloc(sizeof(ducktinycc_blob_t) * (size_t)n);
 					if (!decoded) {
 						error = "ducktinycc out of memory";
@@ -1310,13 +1576,42 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 							decoded[row] = tcc_duckdb_string_to_blob(&strings[row]);
 						}
 					}
+					}
+					batch_blob_columns[col] = decoded;
+					batch_arg_data[col] = (void *)decoded;
+				} else if (tcc_ffi_type_is_list(ctx->arg_types[col])) {
+					ducktinycc_list_t *decoded = NULL;
+					if (n > 0) {
+						decoded = (ducktinycc_list_t *)duckdb_malloc(sizeof(ducktinycc_list_t) * (size_t)n);
+						if (!decoded) {
+							error = "ducktinycc out of memory";
+							goto cleanup;
+						}
+						for (row = 0; row < n; row++) {
+							if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
+								decoded[row].ptr = NULL;
+								decoded[row].validity = NULL;
+								decoded[row].offset = 0;
+								decoded[row].len = 0;
+							} else {
+								duckdb_list_entry entry = list_entries_columns[col][row];
+								decoded[row].ptr =
+								    list_child_data_columns[col]
+								        ? (const void *)(list_child_data_columns[col] +
+								                         ((size_t)entry.offset * list_child_sizes[col]))
+								        : NULL;
+								decoded[row].validity = list_child_validity_columns[col];
+								decoded[row].offset = (uint64_t)entry.offset;
+								decoded[row].len = (uint64_t)entry.length;
+							}
+						}
+					}
+					batch_list_columns[col] = decoded;
+					batch_arg_data[col] = (void *)decoded;
+				} else {
+					batch_arg_data[col] = (void *)in_data[col];
 				}
-				batch_blob_columns[col] = decoded;
-				batch_arg_data[col] = (void *)decoded;
-			} else {
-				batch_arg_data[col] = (void *)in_data[col];
 			}
-		}
 		if (ctx->return_type == TCC_FFI_VARCHAR && n > 0) {
 			batch_out_varchar = (const char **)duckdb_malloc(sizeof(const char *) * (size_t)n);
 			if (!batch_out_varchar) {
@@ -1403,14 +1698,24 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 				row_varchar_allocations[row_varchar_alloc_count++] = owned_cstr;
 				row_varchar_values[col] = owned_cstr;
 				arg_ptrs[col] = (void *)&row_varchar_values[col];
-			} else if (ctx->arg_types[col] == TCC_FFI_BLOB) {
-				duckdb_string_t *sv = (duckdb_string_t *)(in_data[col] + ((size_t)row * ctx->arg_sizes[col]));
-				row_blob_values[col] = tcc_duckdb_string_to_blob(sv);
-				arg_ptrs[col] = (void *)&row_blob_values[col];
-			} else {
-				arg_ptrs[col] = (void *)(in_data[col] + ((size_t)row * ctx->arg_sizes[col]));
+				} else if (ctx->arg_types[col] == TCC_FFI_BLOB) {
+					duckdb_string_t *sv = (duckdb_string_t *)(in_data[col] + ((size_t)row * ctx->arg_sizes[col]));
+					row_blob_values[col] = tcc_duckdb_string_to_blob(sv);
+					arg_ptrs[col] = (void *)&row_blob_values[col];
+				} else if (tcc_ffi_type_is_list(ctx->arg_types[col])) {
+					duckdb_list_entry entry = list_entries_columns[col][row];
+					row_list_values[col].ptr =
+					    list_child_data_columns[col]
+					        ? (const void *)(list_child_data_columns[col] + ((size_t)entry.offset * list_child_sizes[col]))
+					        : NULL;
+					row_list_values[col].validity = list_child_validity_columns[col];
+					row_list_values[col].offset = (uint64_t)entry.offset;
+					row_list_values[col].len = (uint64_t)entry.length;
+					arg_ptrs[col] = (void *)&row_list_values[col];
+				} else {
+					arg_ptrs[col] = (void *)(in_data[col] + ((size_t)row * ctx->arg_sizes[col]));
+				}
 			}
-		}
 		if (!valid) {
 			duckdb_validity_set_row_validity(out_validity, row, false);
 			continue;
@@ -1481,13 +1786,20 @@ cleanup:
 			}
 		}
 	}
-	if (batch_blob_columns) {
-		for (col = 0; col < ctx->arg_count; col++) {
-			if (batch_blob_columns[col]) {
-				duckdb_free((void *)batch_blob_columns[col]);
+		if (batch_blob_columns) {
+			for (col = 0; col < ctx->arg_count; col++) {
+				if (batch_blob_columns[col]) {
+					duckdb_free((void *)batch_blob_columns[col]);
+				}
 			}
 		}
-	}
+		if (batch_list_columns) {
+			for (col = 0; col < ctx->arg_count; col++) {
+				if (batch_list_columns[col]) {
+					duckdb_free((void *)batch_list_columns[col]);
+				}
+			}
+		}
 	if (batch_out_varchar) {
 		duckdb_free((void *)batch_out_varchar);
 	}
@@ -1509,21 +1821,39 @@ cleanup:
 	if (row_varchar_values) {
 		duckdb_free((void *)row_varchar_values);
 	}
-	if (row_blob_values) {
-		duckdb_free((void *)row_blob_values);
-	}
-	if (row_varchar_allocations) {
-		duckdb_free((void *)row_varchar_allocations);
-	}
+		if (row_blob_values) {
+			duckdb_free((void *)row_blob_values);
+		}
+		if (row_list_values) {
+			duckdb_free((void *)row_list_values);
+		}
+		if (row_varchar_allocations) {
+			duckdb_free((void *)row_varchar_allocations);
+		}
 	if (batch_varchar_columns) {
 		duckdb_free((void *)batch_varchar_columns);
 	}
-	if (batch_blob_columns) {
-		duckdb_free((void *)batch_blob_columns);
-	}
-	if (batch_varchar_owned) {
-		duckdb_free((void *)batch_varchar_owned);
-	}
+		if (batch_blob_columns) {
+			duckdb_free((void *)batch_blob_columns);
+		}
+		if (batch_list_columns) {
+			duckdb_free((void *)batch_list_columns);
+		}
+		if (batch_varchar_owned) {
+			duckdb_free((void *)batch_varchar_owned);
+		}
+		if (list_entries_columns) {
+			duckdb_free((void *)list_entries_columns);
+		}
+		if (list_child_data_columns) {
+			duckdb_free((void *)list_child_data_columns);
+		}
+		if (list_child_validity_columns) {
+			duckdb_free((void *)list_child_validity_columns);
+		}
+		if (list_child_sizes) {
+			duckdb_free((void *)list_child_sizes);
+		}
 	if (error) {
 		duckdb_scalar_function_set_error(info, error);
 	}
@@ -2254,9 +2584,11 @@ static bool tcc_parse_wrapper_mode(const char *wrapper_mode, tcc_wrapper_mode_t 
 }
 
 static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_type_t *out_type) {
+	size_t token_len;
 	if (!token || token[0] == '\0' || !out_type) {
 		return false;
 	}
+	token_len = strlen(token);
 	if (allow_void && tcc_equals_ci(token, "void")) {
 		*out_type = TCC_FFI_VOID;
 		return true;
@@ -2341,6 +2673,29 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 		*out_type = TCC_FFI_DECIMAL;
 		return true;
 	}
+	if (token_len >= 5 && (token[0] == 'l' || token[0] == 'L') && (token[1] == 'i' || token[1] == 'I') &&
+	    (token[2] == 's' || token[2] == 'S') && (token[3] == 't' || token[3] == 'T') && token[4] == '_') {
+		tcc_ffi_type_t child_type = TCC_FFI_VOID;
+		if (tcc_parse_type_token(token + 5, false, &child_type) &&
+		    !tcc_ffi_type_is_list(child_type) &&
+		    tcc_ffi_list_type_from_child(child_type, out_type)) {
+			return true;
+		}
+	}
+	if (token_len > 2 && token[token_len - 2] == '[' && token[token_len - 1] == ']') {
+		tcc_ffi_type_t child_type = TCC_FFI_VOID;
+		char child_token[64];
+		size_t child_len = token_len - 2;
+		if (child_len > 0 && child_len < sizeof(child_token)) {
+			memcpy(child_token, token, child_len);
+			child_token[child_len] = '\0';
+			if (tcc_parse_type_token(child_token, false, &child_type) &&
+			    !tcc_ffi_type_is_list(child_type) &&
+			    tcc_ffi_list_type_from_child(child_type, out_type)) {
+				return true;
+			}
+		}
+	}
 	return false;
 }
 
@@ -2362,6 +2717,10 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 	}
 	if (!tcc_parse_type_token(return_type, true, &ret_type)) {
 		tcc_set_error(error_buf, "return_type contains unsupported type token");
+		return false;
+	}
+	if (tcc_ffi_type_is_list(ret_type)) {
+		tcc_set_error(error_buf, "return_type list/array is not supported yet");
 		return false;
 	}
 	if (arg_types_csv[0] == '\0') {
@@ -2499,6 +2858,24 @@ static const char *tcc_ffi_type_to_c_type_name(tcc_ffi_type_t type) {
 		return "ducktinycc_interval_t";
 	case TCC_FFI_DECIMAL:
 		return "ducktinycc_decimal_t";
+	case TCC_FFI_LIST_BOOL:
+	case TCC_FFI_LIST_I8:
+	case TCC_FFI_LIST_U8:
+	case TCC_FFI_LIST_I16:
+	case TCC_FFI_LIST_U16:
+	case TCC_FFI_LIST_I32:
+	case TCC_FFI_LIST_U32:
+	case TCC_FFI_LIST_I64:
+	case TCC_FFI_LIST_U64:
+	case TCC_FFI_LIST_F32:
+	case TCC_FFI_LIST_F64:
+	case TCC_FFI_LIST_UUID:
+	case TCC_FFI_LIST_DATE:
+	case TCC_FFI_LIST_TIME:
+	case TCC_FFI_LIST_TIMESTAMP:
+	case TCC_FFI_LIST_INTERVAL:
+	case TCC_FFI_LIST_DECIMAL:
+		return "ducktinycc_list_t";
 	default:
 		return NULL;
 	}
@@ -2731,7 +3108,24 @@ static char *tcc_build_codegen_unit_source(const char *user_source, const char *
 	                      "  uint8_t width;\n"
 	                      "  uint8_t scale;\n"
 	                      "  ducktinycc_hugeint_t value;\n"
-	                      "} ducktinycc_decimal_t;\n";
+	                      "} ducktinycc_decimal_t;\n"
+	                      "typedef struct {\n"
+	                      "  const void *ptr;\n"
+	                      "  const uint64_t *validity;\n"
+	                      "  uint64_t offset;\n"
+	                      "  uint64_t len;\n"
+	                      "} ducktinycc_list_t;\n"
+	                      "static int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx) {\n"
+	                      "  uint64_t global_idx;\n"
+	                      "  if (!list || idx >= list->len) {\n"
+	                      "    return 0;\n"
+	                      "  }\n"
+	                      "  if (!list->validity) {\n"
+	                      "    return 1;\n"
+	                      "  }\n"
+	                      "  global_idx = list->offset + idx;\n"
+	                      "  return (list->validity[global_idx >> 6] & (1ULL << (global_idx & 63))) != 0;\n"
+	                      "}\n";
 	size_t n0;
 	size_t n1;
 	size_t n2;
