@@ -163,6 +163,19 @@ false	codegen_preview	E_BAD_SIGNATURE
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(
+  mode := 'codegen_preview',
+  symbol := 'add2',
+  sql_name := 'add2_preview_bad_mode',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  wrapper_mode := 'arrow'
+);
+----
+false	codegen_preview	E_BAD_WRAPPER_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
   mode := 'quick_compile',
   source := 'int add_i32(int a, int b){ return a + b; }',
   symbol := 'add_i32',

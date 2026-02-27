@@ -15,8 +15,7 @@ knitr::opts_chunk$set(
 
 # DuckTinyCC
 
-DuckTinyCC is a DuckDB C extension with a `tcc_*` SQL surface for TinyCC-based
-in-process C scripting workflows.
+`DuckTinyCC` is a `DuckDB` `C` extension for in-process JIT compiled C UDFs allowing `C` scripting via `TinyCC`.
 
 ## API Surface
 
