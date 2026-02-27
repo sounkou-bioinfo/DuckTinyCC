@@ -51,6 +51,10 @@ context columns. Functions are prefixed by `tcc_`
 | `compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name` |
 | `quick_compile` | One-shot fast lane compile + register | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types`; optional `wrapper_mode := 'row'|'batch'`; can also pass per-call `include_path`, `sysinclude_path`, `library_path`, `library`, `option`, `define_*`, `header` |
 | `codegen_preview` | Generate wrapper C source only (no compile/relocate/register) | Uses same signature inputs as compile path (including `wrapper_mode`); returns generated C in `detail` |
+| `c_struct` | Generate and register C struct helper UDFs | Uses `symbol := <struct_name>`, `arg_types := ['field:type', ...]`; emits `struct_<name>_*` helpers |
+| `c_union` | Generate and register C union helper UDFs | Uses `symbol := <union_name>`, `arg_types := ['field:type', ...]`; emits `union_<name>_*` helpers |
+| `c_bitfield` | Generate and register C bitfield struct helper UDFs | Same as `c_struct`, but marks fields as bitfields for helper generation |
+| `c_enum` | Generate and register C enum constant helper UDFs | Uses `symbol := <enum_name>`, `arg_types := ['CONST_A', ...]`; emits `enum_<name>_*` helpers |
 
 ### Discovery Helpers
 
@@ -142,7 +146,7 @@ Additional limits and behavior:
 - Host helper ABI: wrappers now expose typed/bounds-checked buffer helpers (`ducktinycc_read_*`, `ducktinycc_write_*`, `ducktinycc_read_bytes`, `ducktinycc_write_bytes`, `ducktinycc_span_fits`) in addition to list/array/struct/map descriptor helpers.
 - SQL pointer helpers: `tcc_alloc`, `tcc_free_ptr`, `tcc_dataptr`, `tcc_ptr_size`, `tcc_ptr_add`, typed `tcc_read_*`/`tcc_write_*`, and `tcc_read_bytes`/`tcc_write_bytes` are registered at extension load.
 - Pointer representation: SQL uses `UBIGINT` handles backed by a per-database in-memory pointer registry.
-- Real C structs (not DuckDB `STRUCT`): treat these as pointer-backed objects (`ptr<T>` style), with helper UDFs for `malloc/free`, field address, `container_of`, and typed field get/set/read/write.
+- Real C structs/unions/enums/bitfields: `c_struct`, `c_union`, `c_enum`, and `c_bitfield` now auto-generate helper UDFs (`*_new`, `*_free`, `*_get_*`, `*_set_*`, `*_off_*`, `*_addr`, `*_sizeof`, `*_alignof`) directly from C declarations + field specs.
 - Safety posture: prefer handle-based helpers (`tcc_alloc` + `tcc_read/write_*`) over raw address arithmetic; `tcc_dataptr` is exposed for interop escape hatches.
 
 ## Builds
@@ -441,6 +445,8 @@ SQL
 These helpers are directly callable from SQL and are registered at extension load.
 Memory is process-local and tied to a per-database registry; free handles with
 `tcc_free_ptr` when done.
+For real C composites, `c_struct`/`c_union`/`c_enum`/`c_bitfield` modes
+auto-generate accessor UDFs in the same session.
 
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
 duckdb -unsigned <<'SQL'
@@ -478,69 +484,65 @@ SELECT ok, v, freed FROM f;
 
 SELECT ok, mode, code
 FROM tcc_module(
-  mode := 'quick_compile',
-  source := 'struct point_i32 { int x; int y; };
-unsigned long long point_i32_sizeof(void){ return (unsigned long long)sizeof(struct point_i32); }',
-  symbol := 'point_i32_sizeof',
-  sql_name := 'point_i32_sizeof',
-  return_type := 'u64',
-  arg_types := []
+  mode := 'c_struct',
+  source := 'struct point_i32_auto { int x; int y; };',
+  symbol := 'point_i32_auto',
+  arg_types := ['x:i32','y:i32']
 );
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'quick_compile',
-  source := '#define OFFSETOF(type, member) ((unsigned long long)((char *)&(((type *)0)->member) - (char *)0))
-struct point_i32 { int x; int y; };
-unsigned long long point_i32_off_x(void){ return OFFSETOF(struct point_i32, x); }',
-  symbol := 'point_i32_off_x',
-  sql_name := 'point_i32_off_x',
-  return_type := 'u64',
-  arg_types := []
-);
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'quick_compile',
-  source := '#define OFFSETOF(type, member) ((unsigned long long)((char *)&(((type *)0)->member) - (char *)0))
-struct point_i32 { int x; int y; };
-unsigned long long point_i32_off_y(void){ return OFFSETOF(struct point_i32, y); }',
-  symbol := 'point_i32_off_y',
-  sql_name := 'point_i32_off_y',
-  return_type := 'u64',
-  arg_types := []
-);
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'quick_compile',
-  source := 'struct point_i32 { int x; int y; };
-long long point_i32_sum(void *p){
-  struct point_i32 *q = (struct point_i32 *)p;
-  if (!q) return -1;
-  return (long long)q->x + (long long)q->y;
-}',
-  symbol := 'point_i32_sum',
-  sql_name := 'point_i32_sum',
-  return_type := 'i64',
-  arg_types := ['ptr']
-);
-WITH m AS (
-  SELECT point_i32_sizeof() AS sz, point_i32_off_x() AS ox, point_i32_off_y() AS oy
-),
+WITH
 p AS (
-  SELECT sz, ox, oy, tcc_alloc(sz) AS h FROM m
+  SELECT struct_point_i32_auto_new() AS p
 ),
 w AS (
-  SELECT sz, ox, oy, h,
-         tcc_write_i32(h, ox, 7) AS ok1,
-         tcc_write_i32(h, oy, 9) AS ok2
+  SELECT struct_point_i32_auto_set_y(struct_point_i32_auto_set_x(p, 7), 9) AS p
   FROM p
 ),
 r AS (
-  SELECT h, sz, ox, oy, ok1, ok2, point_i32_sum(tcc_dataptr(h)) AS s FROM w
+  SELECT p,
+         struct_point_i32_auto_get_x(p) AS x,
+         struct_point_i32_auto_get_y(p) AS y,
+         struct_point_i32_auto_off_x() AS ox,
+         struct_point_i32_auto_off_y() AS oy
+  FROM w
 ),
 f AS (
-  SELECT ok1, ok2, s, tcc_free_ptr(h) AS freed FROM r
+  SELECT x, y, ox, oy, struct_point_i32_auto_free(p) IS NULL AS freed FROM r
 )
-SELECT ok1, ok2, s, freed FROM f;
+SELECT x, y, ox, oy, freed FROM f;
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_union',
+  source := 'union number_auto { int i; float f; };',
+  symbol := 'number_auto',
+  arg_types := ['i:i32','f:f32']
+);
+WITH p AS (SELECT union_number_auto_new() AS p),
+w AS (SELECT union_number_auto_set_i(p, 77) AS p FROM p),
+f AS (SELECT union_number_auto_get_i(p) AS v, union_number_auto_free(p) IS NULL AS freed FROM w)
+SELECT v, freed FROM f;
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_enum',
+  source := 'enum color_auto { RED_AUTO = 0, GREEN_AUTO = 1, BLUE_AUTO = 2 };',
+  symbol := 'color_auto',
+  arg_types := ['RED_AUTO','GREEN_AUTO','BLUE_AUTO']
+);
+SELECT enum_color_auto_RED_AUTO() AS red, enum_color_auto_BLUE_AUTO() AS blue;
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_bitfield',
+  source := 'struct flags_auto { unsigned int active : 1; unsigned int level : 4; };',
+  symbol := 'flags_auto',
+  arg_types := ['active:u8','level:u8']
+);
+WITH p AS (SELECT struct_flags_auto_new() AS p),
+w AS (SELECT struct_flags_auto_set_level(struct_flags_auto_set_active(p, 1), 9) AS p FROM p),
+f AS (SELECT struct_flags_auto_get_active(p) AS active, struct_flags_auto_get_level(p) AS lvl,
+             struct_flags_auto_free(p) IS NULL AS freed FROM w)
+SELECT active, lvl, freed FROM f;
 SQL
 ```
 
