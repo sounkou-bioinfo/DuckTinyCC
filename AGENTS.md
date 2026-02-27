@@ -43,25 +43,23 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - Host symbols injected into each TCC state today are fixed: `duckdb_ext_api`, `ducktinycc_register_signature`.
   - Supported SQL-visible signature tokens include:
     - Scalars: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64`, `ptr`, `varchar/cstring`, `blob`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`.
-    - Nested: fixed-child `LIST` (`list_*` / `type[]`), fixed-size `ARRAY` (`type[N]`), `STRUCT` (`struct<...>`), `MAP` (`map<...>`).
-    - `UNION` (`union<name:type;...>`) is parsed, but SQL runtime marshalling is intentionally rejected with `E_BAD_SIGNATURE` until C API vector access is available.
+    - Nested/composite: `LIST` (`list_*`, `type[]`, `list<...>`), fixed-size `ARRAY` (`type[N]`), `STRUCT` (`struct<...>`), `MAP` (`map<k;v>`), `UNION` (`union<name:type;...>`), with recursive nesting.
 
 ## Progress Snapshot (2026-02-27)
-- Parser/type metadata refactor completed for nested signatures:
-  - top-level split helpers for nested tokens.
-  - struct metadata now retains per-field raw type tokens.
-  - map metadata now retains key/value raw type tokens.
-- Recursive logical-type construction groundwork is in place:
-  - nested `STRUCT`/`MAP` child logical types are built recursively from stored tokens.
-- Memory hygiene improvements landed for nested metadata:
-  - explicit map metadata destroy helpers and cleanup wiring added across parse/bind/codegen paths.
-- Runtime bridge status:
-  - full recursive DuckDB vector marshalling for nested/composite values is still WIP.
-  - nested `STRUCT` argument bridging now materializes inner `ducktinycc_struct_t` descriptors (one recursive level) so `struct<...struct<...>>` arguments are callable from C UDFs.
-  - struct-field composite bridging now also materializes `LIST`/`ARRAY`/`MAP` descriptor rows inside struct arguments, so C UDFs can safely consume `struct<...list_...>`, `struct<...T[N]>`, and `struct<...map<...;...>>` patterns.
-  - `UNION` signatures remain intentionally blocked at runtime (`E_BAD_SIGNATURE`) until bridge support is implemented.
+- Parser/type metadata refactor completed for recursive signatures:
+  - top-level token splitting for nested delimiters (`<...>`, `[...]`).
+  - typedesc tree parsing (`tcc_typedesc_*`) now handles recursive `LIST/ARRAY/STRUCT/MAP/UNION`.
+  - union metadata now keeps member raw tokens (`member_tokens`) for recursive lowering.
+- Signature/runtime registration now stores typedescs in host signature context and derives DuckDB logical types recursively from typedescs.
+- Runtime bridge refactor landed:
+  - added generic recursive vector bridge (`tcc_value_bridge_*`) for composite input marshalling.
+  - added recursive descriptor-to-vector writer (`tcc_write_value_to_vector`) for composite returns.
+  - `UNION` signatures are enabled (no longer blocked at parse time).
+- Compatibility notes:
+  - legacy list/array tokens (`list_i64`, `i64[]`, `i64[3]`) are still accepted.
+  - descriptor semantics for list/map/array keep `ptr` as row-sliced base with `offset` retained for validity/global indexing (matching existing helper behavior).
 - Validation:
-  - `make debug`, `make release`, `make test_debug`, and `make test_release` pass after this refactor.
+  - `make debug`, `make release`, `make test_debug`, and `make test_release` pass.
 
 ## Working Rules for This Repo
 - API is intentionally evolving; document and implement the current surface, not backward-compatibility shims.

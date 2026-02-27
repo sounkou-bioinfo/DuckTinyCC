@@ -510,7 +510,7 @@ FROM tcc_module(
   arg_types := ['struct<a:map<i64;struct<x:i64;y:i64>>>']
 );
 ----
-E_BAD_SIGNATURE
+OK
 
 query TTT
 SELECT ok, mode, code
@@ -1481,7 +1481,7 @@ FROM tcc_module(
   arg_types := ['i64']
 );
 ----
-false	quick_compile	E_BAD_SIGNATURE
+false	quick_compile	E_COMPILE_FAILED
 
 query TTT
 SELECT ok, mode, code
@@ -1494,7 +1494,7 @@ FROM tcc_module(
   arg_types := ['union<i:i64;d:f64>']
 );
 ----
-false	quick_compile	E_BAD_SIGNATURE
+false	quick_compile	E_COMPILE_FAILED
 
 query TTT
 SELECT ok, mode, code
@@ -1507,7 +1507,7 @@ FROM tcc_module(
   arg_types := ['union<a:list_i64;b:i64>']
 );
 ----
-false	quick_compile	E_BAD_SIGNATURE
+true	quick_compile	OK
 
 query TTT
 SELECT ok, mode, code
