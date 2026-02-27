@@ -379,6 +379,126 @@ FROM tcc_module(
 ----
 false	quick_compile	E_BAD_SIGNATURE
 
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long nested_struct_sum(ducktinycc_struct_t s){
+  const ducktinycc_struct_t *p = (const ducktinycc_struct_t *)ducktinycc_struct_field_ptr(&s, 0);
+  const long long *x;
+  const long long *y;
+  if (!p || !ducktinycc_struct_field_is_valid(&s, 0)) return -1;
+  x = (const long long *)ducktinycc_struct_field_ptr(p, 0);
+  y = (const long long *)ducktinycc_struct_field_ptr(p, 1);
+  if (!x || !y) return -1;
+  if (!ducktinycc_struct_field_is_valid(p, 0) || !ducktinycc_struct_field_is_valid(p, 1)) return -1;
+  return x[p->offset] + y[p->offset];
+}',
+  symbol := 'nested_struct_sum',
+  sql_name := 'nested_struct_sum',
+  return_type := 'i64',
+  arg_types := ['struct<p:struct<x:i64;y:i64>>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT nested_struct_sum(
+  {'p': {'x': 7::BIGINT, 'y': 9::BIGINT}}::STRUCT(p STRUCT(x BIGINT, y BIGINT))
+);
+----
+16
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long struct_list_sum(ducktinycc_struct_t s){
+  const ducktinycc_list_t *base = (const ducktinycc_list_t *)ducktinycc_struct_field_ptr(&s, 0);
+  const ducktinycc_list_t *l;
+  long long out = 0;
+  unsigned long long i;
+  if (!base || !ducktinycc_struct_field_is_valid(&s, 0)) return -1;
+  l = &base[s.offset];
+  for (i = 0; i < l->len; i++) {
+    const long long *p = (const long long *)ducktinycc_list_elem_ptr(l, i, sizeof(long long));
+    if (p && ducktinycc_list_is_valid(l, i)) out += *p;
+  }
+  return out;
+}',
+  symbol := 'struct_list_sum',
+  sql_name := 'struct_list_sum',
+  return_type := 'i64',
+  arg_types := ['struct<s:list_i64>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT struct_list_sum({'s': [1::BIGINT,2::BIGINT,3::BIGINT]}::STRUCT(s BIGINT[]));
+----
+6
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long struct_array_sum(ducktinycc_struct_t s){
+  const ducktinycc_array_t *base = (const ducktinycc_array_t *)ducktinycc_struct_field_ptr(&s, 0);
+  const ducktinycc_array_t *a;
+  long long out = 0;
+  unsigned long long i;
+  if (!base || !ducktinycc_struct_field_is_valid(&s, 0)) return -1;
+  a = &base[s.offset];
+  for (i = 0; i < a->len; i++) {
+    const long long *p = (const long long *)ducktinycc_array_elem_ptr(a, i, sizeof(long long));
+    if (p && ducktinycc_array_is_valid(a, i)) out += *p;
+  }
+  return out;
+}',
+  symbol := 'struct_array_sum',
+  sql_name := 'struct_array_sum',
+  return_type := 'i64',
+  arg_types := ['struct<a:i64[3]>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT struct_array_sum({'a': [2::BIGINT,4::BIGINT,6::BIGINT]}::STRUCT(a BIGINT[3]));
+----
+12
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long struct_map_get1(ducktinycc_struct_t s){
+  const ducktinycc_map_t *base = (const ducktinycc_map_t *)ducktinycc_struct_field_ptr(&s, 0);
+  const ducktinycc_map_t *m;
+  unsigned long long i;
+  if (!base || !ducktinycc_struct_field_is_valid(&s, 0)) return -1;
+  m = &base[s.offset];
+  for (i = 0; i < m->len; i++) {
+    const long long *k = (const long long *)ducktinycc_map_key_ptr(m, i, sizeof(long long));
+    const long long *v = (const long long *)ducktinycc_map_value_ptr(m, i, sizeof(long long));
+    if (k && v && ducktinycc_map_key_is_valid(m, i) && ducktinycc_map_value_is_valid(m, i) && *k == 1) return *v;
+  }
+  return -1;
+}',
+  symbol := 'struct_map_get1',
+  sql_name := 'struct_map_get1',
+  return_type := 'i64',
+  arg_types := ['struct<m:map<i64;i64>>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT struct_map_get1({'m': MAP([1::BIGINT,2::BIGINT],[11::BIGINT,22::BIGINT])}::STRUCT(m MAP(BIGINT, BIGINT)));
+----
+11
+
 query T
 SELECT code
 FROM tcc_module(
@@ -390,7 +510,7 @@ FROM tcc_module(
   arg_types := ['struct<a:map<i64;struct<x:i64;y:i64>>>']
 );
 ----
-E_INIT_FAILED
+E_BAD_SIGNATURE
 
 query TTT
 SELECT ok, mode, code
@@ -1400,7 +1520,7 @@ FROM tcc_module(
   arg_types := ['struct<a:varchar>']
 );
 ----
-false	quick_compile	E_COMPILE_FAILED
+false	quick_compile	E_BAD_SIGNATURE
 
 query TTT
 SELECT ok, mode, code

@@ -57,6 +57,8 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - explicit map metadata destroy helpers and cleanup wiring added across parse/bind/codegen paths.
 - Runtime bridge status:
   - full recursive DuckDB vector marshalling for nested/composite values is still WIP.
+  - nested `STRUCT` argument bridging now materializes inner `ducktinycc_struct_t` descriptors (one recursive level) so `struct<...struct<...>>` arguments are callable from C UDFs.
+  - struct-field composite bridging now also materializes `LIST`/`ARRAY`/`MAP` descriptor rows inside struct arguments, so C UDFs can safely consume `struct<...list_...>`, `struct<...T[N]>`, and `struct<...map<...;...>>` patterns.
   - `UNION` signatures remain intentionally blocked at runtime (`E_BAD_SIGNATURE`) until bridge support is implemented.
 - Validation:
   - `make debug`, `make release`, `make test_debug`, and `make test_release` pass after this refactor.
