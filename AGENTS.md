@@ -41,8 +41,28 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - DuckTinyCC generates C wrappers during compile that unpack typed args, call target C symbols, and re-pack result for DuckDB scalar UDF execution.
   - Wrapper modules are compiled+relocated in-memory via libtcc; no separate shared library artifact is produced.
   - Host symbols injected into each TCC state today are fixed: `duckdb_ext_api`, `ducktinycc_register_signature`.
-  - Supported SQL-visible signature tokens today are scalar-only: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64` with dynamic arity.
-- Tests currently passing: `make test_debug`, `make test_release`
+  - Supported SQL-visible signature tokens include:
+    - Scalars: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64`, `ptr`, `varchar/cstring`, `blob`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`.
+    - Nested/composite: `LIST` (`list_*`, `type[]`, `list<...>`), fixed-size `ARRAY` (`type[N]`), `STRUCT` (`struct<...>`), `MAP` (`map<k;v>`), `UNION` (`union<name:type;...>`), with recursive nesting.
+
+## Progress Snapshot (2026-02-27)
+- Parser/type metadata refactor completed for recursive signatures:
+  - top-level token splitting for nested delimiters (`<...>`, `[...]`).
+  - typedesc tree parsing (`tcc_typedesc_*`) now handles recursive `LIST/ARRAY/STRUCT/MAP/UNION`.
+  - union metadata now keeps member raw tokens (`member_tokens`) for recursive lowering.
+- Signature/runtime registration now stores typedescs in host signature context and derives DuckDB logical types recursively from typedescs.
+- Runtime bridge refactor landed:
+  - added generic recursive vector bridge (`tcc_value_bridge_*`) for composite input marshalling.
+  - added recursive descriptor-to-vector writer (`tcc_write_value_to_vector`) for composite returns.
+  - `UNION` signatures are enabled (no longer blocked at parse time).
+- Compatibility notes:
+  - legacy list/array tokens (`list_i64`, `i64[]`, `i64[3]`) are still accepted.
+  - descriptor semantics for list/map/array keep `ptr` as row-sliced base with `offset` retained for validity/global indexing (matching existing helper behavior).
+- Validation:
+  - `make debug` and `make release` pass.
+  - With `TARGET_DUCKDB_VERSION=v1.4.3`, extension loading currently requires ABI-mode/runtime matching:
+    - stable ABI (`C_STRUCT`) is capped by current DuckDB loader policy (`v1.2.0` and lower),
+    - unstable ABI (`USE_UNSTABLE_C_API=1`) requires an exact DuckDB runtime version match (`v1.4.3`).
 
 ## Working Rules for This Repo
 - API is intentionally evolving; document and implement the current surface, not backward-compatibility shims.
