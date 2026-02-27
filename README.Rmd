@@ -51,6 +51,7 @@ context columns.
 |---|---|---|
 | `compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name` |
 | `quick_compile` | One-shot fast lane compile + register | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types`; can also pass per-call `include_path`, `sysinclude_path`, `library_path`, `library`, `option`, `define_*`, `header` |
+| `codegen_preview` | Generate wrapper C source only (no compile/relocate/register) | Uses same signature inputs as compile path; returns generated C in `detail` |
 
 ### Discovery Helpers
 
@@ -61,7 +62,7 @@ context columns.
 
 ## Supported Types
 
-Type metadata is explicit for `compile` and `quick_compile`:
+Type metadata is explicit for `compile`, `quick_compile`, and `codegen_preview`:
 
 - `return_type := ...` is required
 - `arg_types := [...]` is required (use `[]` for zero arguments)
@@ -75,13 +76,13 @@ Current executable SQL registration support:
 
 Additional limits and behavior:
 
-- Arity: `0..10` arguments
+- Arity: `0..N` arguments (no fixed hard-coded cap)
 - NULL handling: NULL-in/NULL-out
 - `void` return registers as a SQL function that emits `NULL` values
 
 ## How It Works (Current)
 
-- `compile` and `quick_compile` generate C wrapper code around the target `symbol`.
+- `compile`, `quick_compile`, and `codegen_preview` generate C wrapper code around the target `symbol`.
 - Generated wrappers use a typed row ABI (`void **args`, `out_value`, `out_is_null`), unpack inputs, call the C symbol, and write back the result.
 - A generated module init function calls `ducktinycc_register_signature(...)` to register the SQL scalar UDF in the active DuckDB connection.
 - TinyCC compile + relocate is fully in-memory (no shared library file is emitted).
@@ -301,7 +302,57 @@ FROM tcc_module(mode := 'config_reset');
 SQL
 ```
 
-### 8) CLI Benchmark Snippet
+### 8) Codegen Preview (No Compile)
+
+This shows generated wrapper/module-init source without compiling or registering
+the SQL function.
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+SELECT ok, phase, code, artifact_id, LEFT(detail, 220) AS preview
+FROM tcc_module(
+  mode := 'codegen_preview',
+  source := 'int add_i32(int a, int b){ return a + b; }',
+  symbol := 'add_i32',
+  sql_name := 'add_i32',
+  return_type := 'i32',
+  arg_types := ['i32', 'i32']
+);
+SQL
+```
+
+### 9) `config_reset` Semantics
+
+`config_reset` clears runtime/build staging state, but does not remove already
+registered SQL UDF catalog entries.
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'int reset_demo(int x){ return x + 1; }',
+  symbol := 'reset_demo',
+  sql_name := 'reset_demo',
+  return_type := 'i32',
+  arg_types := ['i32']
+);
+SELECT reset_demo(41) AS before_reset;
+
+SELECT ok, mode, code
+FROM tcc_module(mode := 'config_reset');
+SELECT ok, mode, code, detail
+FROM tcc_module(mode := 'list');
+
+SELECT reset_demo(41) AS after_reset;
+SQL
+```
+
+### 10) CLI Benchmark Snippet
 
 Use the DuckDB CLI timer to benchmark compile and call latency quickly:
 
@@ -325,7 +376,7 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
 
-### 9) Cleanup
+### 11) Cleanup
 
 No explicit cleanup is required in the CLI example flow.
 
