@@ -639,9 +639,6 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
 
-### 13) Cleanup
-
-No explicit cleanup is required in the CLI example flow.
 
 ## Notes
 
