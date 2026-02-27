@@ -176,6 +176,7 @@ SQL
 - Callback signatures (planned): support explicit callback tokens in bindings, e.g. `callback:<ret(args...)>` and `callback_async:<ret(args...)>`, so wrapper code can model function-pointer arguments intentionally.
 - Callback registry (planned): map DuckDB-side callable handles to registry entries (signature + callable + lifecycle token); compiled C receives only a generated trampoline pointer plus opaque callback context (`ptr`), not raw SQL/runtime addresses.
 - Typed trampoline codegen (planned): generate one trampoline per callback argument from the declared signature, then marshal C args -> DuckDB call values -> C return with explicit conversion rules.
+- Rtinycc precedent: mirror the `callback_token` + `invoke_callback_id` + trampoline user-data pattern used in `.sync/Rtinycc/src/RC_libtcc.c` and `.sync/Rtinycc/R/callbacks.R`, adapted to DuckDB callable dispatch.
 - Callback failure/default policy (planned): follow Rtinycc-style defaults (`0`/`false`/`NULL`/`void`) when callback dispatch fails; async mode enqueues work and returns the type-default immediately.
 - Host symbol wiring for callbacks (planned): expose callback runtime entrypoints as host symbols via `tcc_add_symbol(...)` before relocation (same ordering discipline used by Rtinycc for callback invoke/schedule hooks).
 - Callback feature status: planned only (not yet part of the executable SQL API surface).
@@ -762,6 +763,96 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
+
+### 13) Advanced Demo: Embed R in DuckDB (Unix-like)
+
+This demo compiles a C UDF that boots embedded R once and evaluates a tiny R
+expression.
+
+Requirements:
+
+- Unix-like platform with `R` installed and built with shared library support (`--enable-R-shlib`).
+- `R CMD config --cppflags` and `R CMD config --ldflags` must resolve valid include/link flags on your machine.
+- `R_HOME` must be set for embedded startup (`export R_HOME="$(R RHOME)"`).
+- Demo source lives in `demo/embed_r_udf.c`.
+
+```sh
+export R_HOME="${R_HOME:-$(R RHOME)}"
+R_INCLUDE_FLAGS="$(R CMD config --cppflags | tr ' ' '\n' | grep '^-I' | tr '\n' ' ')"
+R_LIBDIR_FLAGS="$(R CMD config --ldflags | tr ' ' '\n' | grep '^-L' | tr '\n' ' ')"
+SOURCE_SQL="$(sed "s/'/''/g" demo/embed_r_udf.c)"
+
+duckdb -unsigned <<SQL
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+
+-- Embedded R is process-global: keep this demo single-threaded.
+PRAGMA threads=1;
+
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tcc_new_state');
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_include',
+  include_path := 'third_party/tinycc/include'
+);
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_sysinclude',
+  sysinclude_path := 'third_party/tinycc/include'
+);
+
+-- TinyCC compatibility for R headers
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_define',
+  define_name := 'R_LEGACY_RCOMPLEX',
+  define_value := '1'
+);
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_option',
+  option := '${R_INCLUDE_FLAGS} ${R_LIBDIR_FLAGS}'
+);
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_library',
+  library := 'R'
+);
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_source',
+  source := '${SOURCE_SQL}'
+);
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'tinycc_bind',
+  symbol := 'r_hello_from_embedded',
+  sql_name := 'r_hello_from_embedded'
+);
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'compile',
+  return_type := 'varchar',
+  arg_types := []
+);
+
+SELECT r_hello_from_embedded() AS msg;
+SQL
+```
+
+Notes for this demo:
+
+- `Rf_initEmbeddedR` is one-time per process; do not attempt repeated init/shutdown cycles in random query paths.
+- Treat this as an advanced interop pattern, not a default production setup.
+- A ready-to-run wrapper script is included: `demo/embed_r_demo.sh`.
 
 
 ## Notes
