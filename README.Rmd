@@ -71,7 +71,7 @@ Current executable SQL registration support:
 | Signature Piece | Accepted Tokens | DuckDB Type |
 |---|---|---|
 | `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`, `numeric` | `BIGINT` for `void`; otherwise matching scalar type |
-| each `arg_types` element | same scalar tokens as `return_type`, plus fixed-child list tokens `list_i64` or `i64[]` style, and fixed-size array tokens like `i64[3]` (also for `bool/i8/u8/i16/u16/i32/u32/u64/f32/f64/uuid/date/time/timestamp/interval/decimal`) | scalar type, `LIST(child)`, or `ARRAY(child,N)` |
+| each `arg_types` element | same scalar tokens as `return_type`, plus fixed-child list tokens `list_i64` or `i64[]`, fixed-size array tokens like `i64[3]`, `struct<name:type;...>`, and `map<key_type;value_type>` | scalar type, `LIST(child)`, `ARRAY(child,N)`, `STRUCT(...)`, or `MAP(...)` |
 
 Additional limits and behavior:
 
@@ -85,7 +85,11 @@ Additional limits and behavior:
 - list arguments bridge to C `ducktinycc_list_t { const void *ptr; const uint64_t *validity; uint64_t offset; uint64_t len }`
 - list returns are supported via `ducktinycc_list_t` (`ptr == NULL` yields SQL `NULL`)
 - fixed-size array arguments/returns use `ducktinycc_array_t { const void *ptr; const uint64_t *validity; uint64_t offset; uint64_t len }`
+- struct arguments/returns use `ducktinycc_struct_t { const void *const *field_ptrs; const uint64_t *const *field_validity; uint64_t field_count; uint64_t offset }`
+- map arguments/returns use `ducktinycc_map_t { key_ptr, key_validity, value_ptr, value_validity, offset, len }`
 - `i64[]` means variable-length `LIST`; `i64[3]` means fixed-size `ARRAY`
+- current `struct<...>` and `map<...>` members support fixed-width scalar families only (`bool/i8/u8/i16/u16/i32/u32/i64/u64/f32/f64/uuid/date/time/timestamp/interval/decimal`)
+- `struct<...>` and `map<...>` use `;` separators in tokens to avoid ambiguity inside `arg_types := [...]`
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
 
 ## How It Works (Current)
@@ -101,6 +105,8 @@ Additional limits and behavior:
 - BLOB inputs are presented as `ducktinycc_blob_t` views over DuckDB buffers.
 - LIST inputs are presented as `ducktinycc_list_t` slices over DuckDB child vectors (`ptr` + `len` + validity bitmask + child offset).
 - ARRAY inputs are presented as `ducktinycc_array_t` fixed-size slices over DuckDB array child vectors.
+- STRUCT inputs are presented as `ducktinycc_struct_t` views over struct child vectors.
+- MAP inputs are presented as `ducktinycc_map_t` slices over map key/value child vectors.
 
 ## Memory Ownership and Lifecycle
 
@@ -117,7 +123,7 @@ Additional limits and behavior:
 
 - Host symbol registration mode: feasible and aligned with Rtinycc-style embedding; prefer an allow-listed registry (name -> host address) over raw SQL-provided addresses.
 - Arrow to reduce marshalling: not used directly; batch wrappers already consume DuckDB vectors column-wise and avoid per-row host-wrapper crossings.
-- Structs: usable inside compiled C code today, but not yet first-class SQL argument/return types.
+- Structs and maps: now first-class SQL argument/return tokens with C descriptors; nested/non-fixed-width members remain future work.
 - Pointers: best exposed as `UBIGINT` handles with helper functions and type/ownership tags, rather than untyped raw pointer values.
 
 ## Builds
@@ -437,6 +443,62 @@ FROM tcc_module(
 );
 SELECT sum_array3([1,2,3]::BIGINT[3]) AS sum_plain;
 SELECT sum_array3([1,NULL,3]::BIGINT[3]) AS sum_with_null_child;
+SQL
+```
+
+Structs use `struct<name:type;...>` and `ducktinycc_struct_t`:
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long struct_sum2(ducktinycc_struct_t s){
+  const long long *a;
+  const long long *b;
+  if (!s.field_ptrs || s.field_count < 2) return 0;
+  a = (const long long *)ducktinycc_struct_field_ptr(&s, 0);
+  b = (const long long *)ducktinycc_struct_field_ptr(&s, 1);
+  return (a && ducktinycc_struct_field_is_valid(&s, 0) ? a[s.offset] : 0) +
+         (b && ducktinycc_struct_field_is_valid(&s, 1) ? b[s.offset] : 0);
+}',
+  symbol := 'struct_sum2',
+  sql_name := 'struct_sum2',
+  return_type := 'i64',
+  arg_types := ['struct<a:i64;b:i64>']
+);
+SELECT struct_sum2({'a': 2::BIGINT, 'b': 5::BIGINT}::STRUCT(a BIGINT, b BIGINT)) AS s;
+SQL
+```
+
+Maps use `map<key_type;value_type>` and `ducktinycc_map_t`:
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long map_sum(ducktinycc_map_t m){
+  const long long *k = (const long long *)m.key_ptr;
+  const long long *v = (const long long *)m.value_ptr;
+  unsigned long long i;
+  long long out = 0;
+  if (!m.key_ptr || !m.value_ptr) return 0;
+  for (i = 0; i < m.len; i++) {
+    if (ducktinycc_map_key_is_valid(&m, i) && ducktinycc_map_value_is_valid(&m, i)) out += k[i] + v[i];
+  }
+  return out;
+}',
+  symbol := 'map_sum',
+  sql_name := 'map_sum',
+  return_type := 'i64',
+  arg_types := ['map<i64;i64>']
+);
+SELECT map_sum(MAP([1::BIGINT,2::BIGINT],[10::BIGINT,20::BIGINT])::MAP(BIGINT, BIGINT)) AS s;
 SQL
 ```
 

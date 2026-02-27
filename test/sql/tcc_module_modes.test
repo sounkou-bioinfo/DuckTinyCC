@@ -822,6 +822,233 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'long long struct_sum2(ducktinycc_struct_t s){
+  const long long *a;
+  const long long *b;
+  long long out = 0;
+  if (!s.field_ptrs || s.field_count < 2) return 0;
+  a = (const long long *)ducktinycc_struct_field_ptr(&s, 0);
+  b = (const long long *)ducktinycc_struct_field_ptr(&s, 1);
+  if (a && ducktinycc_struct_field_is_valid(&s, 0)) out += a[s.offset];
+  if (b && ducktinycc_struct_field_is_valid(&s, 1)) out += b[s.offset];
+  return out;
+}',
+  symbol := 'struct_sum2',
+  sql_name := 'struct_sum2',
+  return_type := 'i64',
+  arg_types := ['struct<a:i64;b:i64>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT struct_sum2({'a': 2::BIGINT, 'b': 5::BIGINT}::STRUCT(a BIGINT, b BIGINT));
+----
+7
+
+query I
+SELECT struct_sum2({'a': 2::BIGINT, 'b': NULL::BIGINT}::STRUCT(a BIGINT, b BIGINT));
+----
+2
+
+query T
+SELECT struct_sum2(NULL::STRUCT(a BIGINT, b BIGINT));
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_struct_t make_pair_struct(long long x){
+  static long long a[1];
+  static long long b[1];
+  static uint64_t va[1];
+  static uint64_t vb[1];
+  static const void *ptrs[2];
+  static const uint64_t *validity[2];
+  ducktinycc_struct_t out;
+  a[0] = x;
+  b[0] = x + 1;
+  va[0] = 1ULL;
+  vb[0] = 0ULL;
+  ptrs[0] = a;
+  ptrs[1] = b;
+  validity[0] = va;
+  validity[1] = vb;
+  out.field_ptrs = ptrs;
+  out.field_validity = validity;
+  out.field_count = 2;
+  out.offset = 0;
+  return out;
+}',
+  symbol := 'make_pair_struct',
+  sql_name := 'make_pair_struct',
+  return_type := 'struct<a:i64;b:i64>',
+  arg_types := ['i64']
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT CAST((make_pair_struct(10)).a AS VARCHAR), CAST((make_pair_struct(10)).b AS VARCHAR);
+----
+10	NULL
+
+query T
+SELECT make_pair_struct(NULL);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_struct_t batch_echo_struct(ducktinycc_struct_t s){ return s; }',
+  symbol := 'batch_echo_struct',
+  sql_name := 'batch_echo_struct',
+  return_type := 'struct<a:i64;b:i64>',
+  arg_types := ['struct<a:i64;b:i64>'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT CAST((batch_echo_struct(v)).a AS VARCHAR), CAST((batch_echo_struct(v)).b AS VARCHAR)
+FROM (
+  VALUES
+    ({'a': 1::BIGINT, 'b': 2::BIGINT}::STRUCT(a BIGINT, b BIGINT)),
+    ({'a': 3::BIGINT, 'b': NULL::BIGINT}::STRUCT(a BIGINT, b BIGINT))
+) t(v);
+----
+1	2
+3	NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long map_sum(ducktinycc_map_t m){
+  const long long *k = (const long long *)m.key_ptr;
+  const long long *v = (const long long *)m.value_ptr;
+  unsigned long long i;
+  long long out = 0;
+  if (!m.key_ptr || !m.value_ptr) return 0;
+  for (i = 0; i < m.len; i++) {
+    if (ducktinycc_map_key_is_valid(&m, i) && ducktinycc_map_value_is_valid(&m, i)) {
+      out += k[i] + v[i];
+    }
+  }
+  return out;
+}',
+  symbol := 'map_sum',
+  sql_name := 'map_sum',
+  return_type := 'i64',
+  arg_types := ['map<i64;i64>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT map_sum(MAP([1::BIGINT,2::BIGINT],[10::BIGINT,20::BIGINT])::MAP(BIGINT,BIGINT));
+----
+33
+
+query I
+SELECT map_sum(MAP([1::BIGINT,2::BIGINT],[10::BIGINT,NULL::BIGINT])::MAP(BIGINT,BIGINT));
+----
+11
+
+query T
+SELECT map_sum(NULL::MAP(BIGINT,BIGINT));
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_map_t make_map2(long long x){
+  static long long keys[2];
+  static long long values[2];
+  static uint64_t key_validity[1];
+  static uint64_t value_validity[1];
+  ducktinycc_map_t out;
+  keys[0] = 1;
+  keys[1] = 2;
+  values[0] = x;
+  values[1] = x + 1;
+  key_validity[0] = 3ULL;
+  value_validity[0] = 1ULL;
+  out.key_ptr = keys;
+  out.key_validity = key_validity;
+  out.value_ptr = values;
+  out.value_validity = value_validity;
+  out.offset = 0;
+  out.len = 2;
+  return out;
+}',
+  symbol := 'make_map2',
+  sql_name := 'make_map2',
+  return_type := 'map<i64;i64>',
+  arg_types := ['i64']
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT CAST(map_extract_value(make_map2(10), 1) AS VARCHAR), CAST(map_extract_value(make_map2(10), 2) AS VARCHAR);
+----
+10	NULL
+
+query T
+SELECT make_map2(NULL);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_map_t batch_echo_map(ducktinycc_map_t m){ return m; }',
+  symbol := 'batch_echo_map',
+  sql_name := 'batch_echo_map',
+  return_type := 'map<i64;i64>',
+  arg_types := ['map<i64;i64>'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT CAST(map_extract_value(batch_echo_map(v), 1) AS VARCHAR), CAST(map_extract_value(batch_echo_map(v), 2) AS VARCHAR)
+FROM (
+  VALUES
+    (MAP([1::BIGINT,2::BIGINT],[5::BIGINT,6::BIGINT])::MAP(BIGINT,BIGINT)),
+    (MAP([1::BIGINT,2::BIGINT],[7::BIGINT,NULL::BIGINT])::MAP(BIGINT,BIGINT))
+) t(v);
+----
+5	6
+7	NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_struct(ducktinycc_struct_t s){ (void)s; return 0; }',
+  symbol := 'bad_struct',
+  sql_name := 'bad_struct',
+  return_type := 'i64',
+  arg_types := ['struct<a:varchar>']
+);
+----
+false	quick_compile	E_BAD_SIGNATURE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'long long batch_add(long long a, long long b){ return a + b; }',
   symbol := 'batch_add',
   sql_name := 'batch_add',
