@@ -309,6 +309,9 @@ static bool tcc_ffi_list_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type
 static bool tcc_ffi_type_is_array(tcc_ffi_type_t type);
 static bool tcc_ffi_array_child_type(tcc_ffi_type_t array_type, tcc_ffi_type_t *out_child);
 static bool tcc_ffi_array_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type_t *out_array_type);
+static bool tcc_ffi_type_is_struct(tcc_ffi_type_t type);
+static bool tcc_ffi_type_is_map(tcc_ffi_type_t type);
+static size_t tcc_ffi_type_size(tcc_ffi_type_t type);
 static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type);
 static void tcc_struct_meta_destroy(tcc_ffi_struct_meta_t *meta);
 static void tcc_struct_meta_array_destroy(tcc_ffi_struct_meta_t *metas, int count);
@@ -1097,6 +1100,7 @@ static void tcc_configure_runtime_paths(TCCState *s, const char *runtime_path) {
 	(void)tcc_add_library_path(s, lib_path);
 	(void)tcc_add_library_path(s, lib_tcc_path);
 }
+#endif
 
 static void tcc_host_sig_ctx_destroy(void *ptr) {
 	tcc_host_sig_ctx_t *ctx = (tcc_host_sig_ctx_t *)ptr;
@@ -3402,6 +3406,7 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	return true;
 }
 
+#ifndef DUCKTINYCC_WASM_UNSUPPORTED
 static void tcc_add_host_symbols(TCCState *s) {
 	if (!s) {
 		return;
