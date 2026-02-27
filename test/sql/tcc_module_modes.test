@@ -154,7 +154,7 @@ FROM tcc_module(
   mode := 'codegen_preview',
   symbol := 'add2',
   sql_name := 'add2_preview_bad',
-  return_type := 'blob',
+  return_type := 'json',
   arg_types := ['i64']
 );
 ----
@@ -335,7 +335,7 @@ FROM tcc_module(
   source := 'long long bad(long long x){ return x; }',
   symbol := 'bad',
   sql_name := 'bad',
-  return_type := 'blob',
+  return_type := 'json',
   arg_types := ['i64']
 );
 ----
@@ -424,6 +424,179 @@ query T
 SELECT batch_echo('abcdefghijklmnopqrstuvwxyz0123456789');
 ----
 abcdefghijklmnopqrstuvwxyz0123456789
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'unsigned long long blob_len(ducktinycc_blob_t b){ return b.ptr ? b.len : 0ULL; }',
+  symbol := 'blob_len',
+  sql_name := 'blob_len',
+  return_type := 'u64',
+  arg_types := ['blob']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT CAST(blob_len(from_hex('DEADBEEF')) AS BIGINT);
+----
+4
+
+query T
+SELECT blob_len(NULL);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_blob_t blob_echo(ducktinycc_blob_t b){ return b; }',
+  symbol := 'blob_echo',
+  sql_name := 'blob_echo',
+  return_type := 'bytea',
+  arg_types := ['varbinary']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT hex(blob_echo(from_hex('00FF10')));
+----
+00FF10
+
+query T
+SELECT blob_echo(NULL);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_blob_t batch_blob_echo(ducktinycc_blob_t b){ return b; }',
+  symbol := 'batch_blob_echo',
+  sql_name := 'batch_blob_echo',
+  return_type := 'buffer',
+  arg_types := ['bytes'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT hex(batch_blob_echo(from_hex('ABCD'))), batch_blob_echo(NULL) IS NULL;
+----
+ABCD	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_date_t next_day(ducktinycc_date_t d){ d.days += 1; return d; }',
+  symbol := 'next_day',
+  sql_name := 'next_day',
+  return_type := 'date',
+  arg_types := ['date']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT next_day(DATE '2024-01-01');
+----
+2024-01-02
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_time_t add_second_time(ducktinycc_time_t t){ t.micros += 1000000; return t; }',
+  symbol := 'add_second_time',
+  sql_name := 'add_second_time',
+  return_type := 'time',
+  arg_types := ['time']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT add_second_time(TIME '01:02:03');
+----
+01:02:04
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_timestamp_t add_second_ts(ducktinycc_timestamp_t t){ t.micros += 1000000; return t; }',
+  symbol := 'add_second_ts',
+  sql_name := 'add_second_ts',
+  return_type := 'timestamp',
+  arg_types := ['timestamp']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT add_second_ts(TIMESTAMP '2024-01-01 00:00:00');
+----
+2024-01-01 00:00:01
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long interval_days(ducktinycc_interval_t v){ return (long long)v.days; }',
+  symbol := 'interval_days',
+  sql_name := 'interval_days',
+  return_type := 'i64',
+  arg_types := ['interval']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT interval_days(INTERVAL '3 days 5 hours');
+----
+3
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_hugeint_t uuid_echo(ducktinycc_hugeint_t u){ return u; }',
+  symbol := 'uuid_echo',
+  sql_name := 'uuid_echo',
+  return_type := 'uuid',
+  arg_types := ['uuid']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT uuid_echo('00000000-0000-0000-0000-00000000000a'::UUID) = '00000000-0000-0000-0000-00000000000a'::UUID;
+----
+true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_decimal_t decimal_echo(ducktinycc_decimal_t d){ return d; }',
+  symbol := 'decimal_echo',
+  sql_name := 'decimal_echo',
+  return_type := 'decimal',
+  arg_types := ['decimal']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT decimal_echo(12.345::DECIMAL(18,3)) = 12.345::DECIMAL(18,3);
+----
+true
 
 query TTT
 SELECT ok, mode, code
