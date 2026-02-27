@@ -345,3 +345,77 @@ query I
 SELECT too_many(1,2,3,4,5,6,7,8,9,10,11);
 ----
 12
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long batch_add(long long a, long long b){ return a + b; }',
+  symbol := 'batch_add',
+  sql_name := 'batch_add',
+  return_type := 'i64',
+  arg_types := ['i64','i64'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT CAST(SUM(batch_add(i, 2)) AS BIGINT)
+FROM range(1000) AS t(i);
+----
+501500
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long batch_double(long long x){ return x * 2; }',
+  symbol := 'batch_double',
+  sql_name := 'batch_double',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT batch_double(NULL), batch_double(21);
+----
+NULL	42
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'void batch_touch(long long x){ (void)x; }',
+  symbol := 'batch_touch',
+  sql_name := 'batch_touch',
+  return_type := 'void',
+  arg_types := ['i64'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT COUNT(*)::BIGINT
+FROM range(128) AS t(i)
+WHERE batch_touch(i) IS NULL;
+----
+128
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_wrapper(long long x){ return x; }',
+  symbol := 'bad_wrapper',
+  sql_name := 'bad_wrapper',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  wrapper_mode := 'arrow'
+);
+----
+false	quick_compile	E_BAD_WRAPPER_MODE
