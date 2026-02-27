@@ -3472,6 +3472,147 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	return true;
 }
 
+static int ducktinycc_valid_is_set(const uint64_t *validity, uint64_t idx) {
+	if (!validity) {
+		return 1;
+	}
+	return (validity[idx >> 6] & (1ULL << (idx & 63))) != 0;
+}
+
+static void ducktinycc_valid_set(uint64_t *validity, uint64_t idx, int valid) {
+	uint64_t bit;
+	if (!validity) {
+		return;
+	}
+	bit = 1ULL << (idx & 63);
+	if (valid) {
+		validity[idx >> 6] |= bit;
+	} else {
+		validity[idx >> 6] &= ~bit;
+	}
+}
+
+static int ducktinycc_span_contains(uint64_t len, uint64_t idx) {
+	return idx < len;
+}
+
+static const void *ducktinycc_ptr_add(const void *base, uint64_t byte_offset) {
+	const uint8_t *p = (const uint8_t *)base;
+	if (!p) {
+		return NULL;
+	}
+	return (const void *)(p + byte_offset);
+}
+
+static void *ducktinycc_ptr_add_mut(void *base, uint64_t byte_offset) {
+	uint8_t *p = (uint8_t *)base;
+	if (!p) {
+		return NULL;
+	}
+	return (void *)(p + byte_offset);
+}
+
+static int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx) {
+	uint64_t global_idx;
+	if (!list || idx >= list->len) {
+		return 0;
+	}
+	if (!list->validity) {
+		return 1;
+	}
+	global_idx = list->offset + idx;
+	return ducktinycc_valid_is_set(list->validity, global_idx);
+}
+
+static const void *ducktinycc_list_elem_ptr(const ducktinycc_list_t *list, uint64_t idx, uint64_t elem_size) {
+	uint64_t global_idx;
+	if (!list || !list->ptr || idx >= list->len || elem_size == 0) {
+		return NULL;
+	}
+	global_idx = list->offset + idx;
+	return ducktinycc_ptr_add(list->ptr, global_idx * elem_size);
+}
+
+static int ducktinycc_array_is_valid(const ducktinycc_array_t *arr, uint64_t idx) {
+	uint64_t global_idx;
+	if (!arr || idx >= arr->len) {
+		return 0;
+	}
+	if (!arr->validity) {
+		return 1;
+	}
+	global_idx = arr->offset + idx;
+	return ducktinycc_valid_is_set(arr->validity, global_idx);
+}
+
+static const void *ducktinycc_array_elem_ptr(const ducktinycc_array_t *arr, uint64_t idx, uint64_t elem_size) {
+	uint64_t global_idx;
+	if (!arr || !arr->ptr || idx >= arr->len || elem_size == 0) {
+		return NULL;
+	}
+	global_idx = arr->offset + idx;
+	return ducktinycc_ptr_add(arr->ptr, global_idx * elem_size);
+}
+
+static const void *ducktinycc_struct_field_ptr(const ducktinycc_struct_t *st, uint64_t idx) {
+	if (!st || !st->field_ptrs || idx >= st->field_count) {
+		return NULL;
+	}
+	return st->field_ptrs[idx];
+}
+
+static int ducktinycc_struct_field_is_valid(const ducktinycc_struct_t *st, uint64_t field_idx) {
+	if (!st || !st->field_ptrs || field_idx >= st->field_count) {
+		return 0;
+	}
+	if (!st->field_validity || !st->field_validity[field_idx]) {
+		return 1;
+	}
+	return ducktinycc_valid_is_set(st->field_validity[field_idx], st->offset);
+}
+
+static const void *ducktinycc_map_key_ptr(const ducktinycc_map_t *m, uint64_t idx, uint64_t key_size) {
+	uint64_t global_idx;
+	if (!m || !m->key_ptr || idx >= m->len || key_size == 0) {
+		return NULL;
+	}
+	global_idx = m->offset + idx;
+	return ducktinycc_ptr_add(m->key_ptr, global_idx * key_size);
+}
+
+static const void *ducktinycc_map_value_ptr(const ducktinycc_map_t *m, uint64_t idx, uint64_t value_size) {
+	uint64_t global_idx;
+	if (!m || !m->value_ptr || idx >= m->len || value_size == 0) {
+		return NULL;
+	}
+	global_idx = m->offset + idx;
+	return ducktinycc_ptr_add(m->value_ptr, global_idx * value_size);
+}
+
+static int ducktinycc_map_key_is_valid(const ducktinycc_map_t *m, uint64_t idx) {
+	uint64_t global_idx;
+	if (!m || idx >= m->len) {
+		return 0;
+	}
+	if (!m->key_validity) {
+		return 1;
+	}
+	global_idx = m->offset + idx;
+	return ducktinycc_valid_is_set(m->key_validity, global_idx);
+}
+
+static int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx) {
+	uint64_t global_idx;
+	if (!m || idx >= m->len) {
+		return 0;
+	}
+	if (!m->value_validity) {
+		return 1;
+	}
+	global_idx = m->offset + idx;
+	return ducktinycc_valid_is_set(m->value_validity, global_idx);
+}
+
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
 static void tcc_add_host_symbols(TCCState *s) {
 	if (!s) {
@@ -3479,6 +3620,21 @@ static void tcc_add_host_symbols(TCCState *s) {
 	}
 	(void)tcc_add_symbol(s, "duckdb_ext_api", &duckdb_ext_api);
 	(void)tcc_add_symbol(s, "ducktinycc_register_signature", ducktinycc_register_signature);
+	(void)tcc_add_symbol(s, "ducktinycc_valid_is_set", ducktinycc_valid_is_set);
+	(void)tcc_add_symbol(s, "ducktinycc_valid_set", ducktinycc_valid_set);
+	(void)tcc_add_symbol(s, "ducktinycc_span_contains", ducktinycc_span_contains);
+	(void)tcc_add_symbol(s, "ducktinycc_ptr_add", ducktinycc_ptr_add);
+	(void)tcc_add_symbol(s, "ducktinycc_ptr_add_mut", ducktinycc_ptr_add_mut);
+	(void)tcc_add_symbol(s, "ducktinycc_list_is_valid", ducktinycc_list_is_valid);
+	(void)tcc_add_symbol(s, "ducktinycc_list_elem_ptr", ducktinycc_list_elem_ptr);
+	(void)tcc_add_symbol(s, "ducktinycc_array_is_valid", ducktinycc_array_is_valid);
+	(void)tcc_add_symbol(s, "ducktinycc_array_elem_ptr", ducktinycc_array_elem_ptr);
+	(void)tcc_add_symbol(s, "ducktinycc_struct_field_ptr", ducktinycc_struct_field_ptr);
+	(void)tcc_add_symbol(s, "ducktinycc_struct_field_is_valid", ducktinycc_struct_field_is_valid);
+	(void)tcc_add_symbol(s, "ducktinycc_map_key_ptr", ducktinycc_map_key_ptr);
+	(void)tcc_add_symbol(s, "ducktinycc_map_value_ptr", ducktinycc_map_value_ptr);
+	(void)tcc_add_symbol(s, "ducktinycc_map_key_is_valid", ducktinycc_map_key_is_valid);
+	(void)tcc_add_symbol(s, "ducktinycc_map_value_is_valid", ducktinycc_map_value_is_valid);
 }
 
 static void tcc_artifact_destroy(void *ptr) {
@@ -5206,69 +5362,25 @@ static char *tcc_build_codegen_unit_source(const char *user_source, const char *
 	                      "  const void *key_ptr;\n"
 	                      "  const uint64_t *key_validity;\n"
 	                      "  const void *value_ptr;\n"
-	                      "  const uint64_t *value_validity;\n"
-	                      "  uint64_t offset;\n"
-	                      "  uint64_t len;\n"
-	                      "} ducktinycc_map_t;\n"
-	                      "static int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx) {\n"
-	                      "  uint64_t global_idx;\n"
-	                      "  if (!list || idx >= list->len) {\n"
-	                      "    return 0;\n"
-	                      "  }\n"
-	                      "  if (!list->validity) {\n"
-	                      "    return 1;\n"
-	                      "  }\n"
-	                      "  global_idx = list->offset + idx;\n"
-	                      "  return (list->validity[global_idx >> 6] & (1ULL << (global_idx & 63))) != 0;\n"
-	                      "}\n"
-	                      "static int ducktinycc_array_is_valid(const ducktinycc_array_t *arr, uint64_t idx) {\n"
-	                      "  uint64_t global_idx;\n"
-	                      "  if (!arr || idx >= arr->len) {\n"
-	                      "    return 0;\n"
-	                      "  }\n"
-	                      "  if (!arr->validity) {\n"
-	                      "    return 1;\n"
-	                      "  }\n"
-	                      "  global_idx = arr->offset + idx;\n"
-	                      "  return (arr->validity[global_idx >> 6] & (1ULL << (global_idx & 63))) != 0;\n"
-	                      "}\n"
-	                      "static const void *ducktinycc_struct_field_ptr(const ducktinycc_struct_t *st, uint64_t idx) {\n"
-	                      "  if (!st || !st->field_ptrs || idx >= st->field_count) {\n"
-	                      "    return (const void *)0;\n"
-	                      "  }\n"
-	                      "  return st->field_ptrs[idx];\n"
-	                      "}\n"
-	                      "static int ducktinycc_struct_field_is_valid(const ducktinycc_struct_t *st, uint64_t field_idx) {\n"
-	                      "  if (!st || !st->field_ptrs || field_idx >= st->field_count) {\n"
-	                      "    return 0;\n"
-	                      "  }\n"
-	                      "  if (!st->field_validity || !st->field_validity[field_idx]) {\n"
-	                      "    return 1;\n"
-	                      "  }\n"
-	                      "  return (st->field_validity[field_idx][st->offset >> 6] & (1ULL << (st->offset & 63))) != 0;\n"
-	                      "}\n"
-	                      "static int ducktinycc_map_key_is_valid(const ducktinycc_map_t *m, uint64_t idx) {\n"
-	                      "  uint64_t global_idx;\n"
-	                      "  if (!m || idx >= m->len) {\n"
-	                      "    return 0;\n"
-	                      "  }\n"
-	                      "  if (!m->key_validity) {\n"
-	                      "    return 1;\n"
-	                      "  }\n"
-	                      "  global_idx = m->offset + idx;\n"
-	                      "  return (m->key_validity[global_idx >> 6] & (1ULL << (global_idx & 63))) != 0;\n"
-	                      "}\n"
-	                      "static int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx) {\n"
-	                      "  uint64_t global_idx;\n"
-	                      "  if (!m || idx >= m->len) {\n"
-	                      "    return 0;\n"
-	                      "  }\n"
-	                      "  if (!m->value_validity) {\n"
-	                      "    return 1;\n"
-	                      "  }\n"
-	                      "  global_idx = m->offset + idx;\n"
-	                      "  return (m->value_validity[global_idx >> 6] & (1ULL << (global_idx & 63))) != 0;\n"
-	                      "}\n";
+		                      "  const uint64_t *value_validity;\n"
+		                      "  uint64_t offset;\n"
+		                      "  uint64_t len;\n"
+		                      "} ducktinycc_map_t;\n"
+		                      "extern int ducktinycc_valid_is_set(const uint64_t *validity, uint64_t idx);\n"
+		                      "extern void ducktinycc_valid_set(uint64_t *validity, uint64_t idx, int valid);\n"
+		                      "extern int ducktinycc_span_contains(uint64_t len, uint64_t idx);\n"
+		                      "extern const void *ducktinycc_ptr_add(const void *base, uint64_t byte_offset);\n"
+		                      "extern void *ducktinycc_ptr_add_mut(void *base, uint64_t byte_offset);\n"
+		                      "extern int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx);\n"
+		                      "extern const void *ducktinycc_list_elem_ptr(const ducktinycc_list_t *list, uint64_t idx, uint64_t elem_size);\n"
+		                      "extern int ducktinycc_array_is_valid(const ducktinycc_array_t *arr, uint64_t idx);\n"
+		                      "extern const void *ducktinycc_array_elem_ptr(const ducktinycc_array_t *arr, uint64_t idx, uint64_t elem_size);\n"
+		                      "extern const void *ducktinycc_struct_field_ptr(const ducktinycc_struct_t *st, uint64_t idx);\n"
+		                      "extern int ducktinycc_struct_field_is_valid(const ducktinycc_struct_t *st, uint64_t field_idx);\n"
+		                      "extern const void *ducktinycc_map_key_ptr(const ducktinycc_map_t *m, uint64_t idx, uint64_t key_size);\n"
+		                      "extern const void *ducktinycc_map_value_ptr(const ducktinycc_map_t *m, uint64_t idx, uint64_t value_size);\n"
+		                      "extern int ducktinycc_map_key_is_valid(const ducktinycc_map_t *m, uint64_t idx);\n"
+		                      "extern int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx);\n";
 	size_t n0;
 	size_t n1;
 	size_t n2;

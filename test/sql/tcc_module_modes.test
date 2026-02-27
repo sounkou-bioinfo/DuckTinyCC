@@ -639,6 +639,33 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'long long sum_i64_host_ptr(ducktinycc_list_t a){
+  unsigned long long i;
+  long long s = 0;
+  if (!a.ptr) return 0;
+  for (i = 0; i < a.len; i++) {
+    const long long *p = (const long long *)ducktinycc_list_elem_ptr(&a, i, sizeof(long long));
+    if (p && ducktinycc_list_is_valid(&a, i)) s += *p;
+  }
+  return s;
+}',
+  symbol := 'sum_i64_host_ptr',
+  sql_name := 'sum_i64_host_ptr',
+  return_type := 'i64',
+  arg_types := ['i64[]']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT sum_i64_host_ptr([1,NULL,3]::BIGINT[]);
+----
+4
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'long long sum_i64_batch(ducktinycc_list_t a){
   const long long *p = (const long long *)a.ptr;
   unsigned long long i;
@@ -964,6 +991,36 @@ query T
 SELECT map_sum(NULL::MAP(BIGINT,BIGINT));
 ----
 NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long map_sum_ptr(ducktinycc_map_t m){
+  unsigned long long i;
+  long long out = 0;
+  if (!m.key_ptr || !m.value_ptr) return 0;
+  for (i = 0; i < m.len; i++) {
+    const long long *k = (const long long *)ducktinycc_map_key_ptr(&m, i, sizeof(long long));
+    const long long *v = (const long long *)ducktinycc_map_value_ptr(&m, i, sizeof(long long));
+    if (k && v && ducktinycc_map_key_is_valid(&m, i) && ducktinycc_map_value_is_valid(&m, i)) {
+      out += *k + *v;
+    }
+  }
+  return out;
+}',
+  symbol := 'map_sum_ptr',
+  sql_name := 'map_sum_ptr',
+  return_type := 'i64',
+  arg_types := ['map<i64;i64>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT map_sum_ptr(MAP([1::BIGINT,2::BIGINT],[10::BIGINT,NULL::BIGINT])::MAP(BIGINT,BIGINT));
+----
+11
 
 query TTT
 SELECT ok, mode, code
