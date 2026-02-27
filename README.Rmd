@@ -83,7 +83,8 @@ Additional limits and behavior:
 - `blob`/`buffer` bridge to C `ducktinycc_blob_t { const void *ptr; uint64_t len }`; returned `ptr == NULL` produces SQL `NULL`
 - easy scalar structs use C aliases: `ducktinycc_hugeint_t` (UUID), `ducktinycc_date_t`, `ducktinycc_time_t`, `ducktinycc_timestamp_t`, `ducktinycc_interval_t`, `ducktinycc_decimal_t`
 - list arguments bridge to C `ducktinycc_list_t { const void *ptr; const uint64_t *validity; uint64_t offset; uint64_t len }`
-- list/array return types are not implemented yet
+- list returns are supported via `ducktinycc_list_t` (`ptr == NULL` yields SQL `NULL`)
+- fixed-size `ARRAY` signatures (e.g. `i64[3]`) are not yet parsed; `i64[]` maps to variable-size `LIST`
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
 
 ## How It Works (Current)
