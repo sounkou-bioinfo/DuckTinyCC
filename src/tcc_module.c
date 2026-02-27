@@ -1409,9 +1409,15 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 	size_t *list_child_sizes = NULL;
 	const char **batch_out_varchar = NULL;
 	ducktinycc_blob_t *batch_out_blob = NULL;
-	uint8_t out_value[16];
+	ducktinycc_list_t *batch_out_list = NULL;
+	duckdb_list_entry *out_list_entries = NULL;
+	duckdb_vector out_list_child_vector = NULL;
+	size_t out_list_child_size = 0;
+	idx_t out_list_child_count = 0;
+	uint8_t out_value[64];
 	const char *out_varchar_value = NULL;
 	ducktinycc_blob_t out_blob_value;
+	ducktinycc_list_t out_list_value;
 	idx_t row;
 	int col;
 	const char *error = NULL;
@@ -1519,6 +1525,29 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 		error = "ducktinycc output validity missing";
 		goto cleanup;
 	}
+	if (tcc_ffi_type_is_list(ctx->return_type)) {
+		tcc_ffi_type_t out_child_type = TCC_FFI_VOID;
+		if (!tcc_ffi_list_child_type(ctx->return_type, &out_child_type)) {
+			error = "ducktinycc invalid list return type";
+			goto cleanup;
+		}
+		out_list_child_size = tcc_ffi_type_size(out_child_type);
+		if (out_list_child_size == 0) {
+			error = "ducktinycc invalid list child type size";
+			goto cleanup;
+		}
+		out_list_entries = (duckdb_list_entry *)out_data;
+		out_list_child_vector = duckdb_list_vector_get_child(output);
+		if (!out_list_child_vector) {
+			error = "ducktinycc list return child vector missing";
+			goto cleanup;
+		}
+		if (duckdb_list_vector_set_size(output, 0) != DuckDBSuccess) {
+			error = "ducktinycc failed to initialize list return vector";
+			goto cleanup;
+		}
+		out_list_child_count = 0;
+	}
 
 	if (ctx->wrapper_mode == TCC_WRAPPER_MODE_BATCH) {
 		for (col = 0; col < ctx->arg_count; col++) {
@@ -1612,30 +1641,39 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 					batch_arg_data[col] = (void *)in_data[col];
 				}
 			}
-		if (ctx->return_type == TCC_FFI_VARCHAR && n > 0) {
-			batch_out_varchar = (const char **)duckdb_malloc(sizeof(const char *) * (size_t)n);
-			if (!batch_out_varchar) {
-				error = "ducktinycc out of memory";
+			if (ctx->return_type == TCC_FFI_VARCHAR && n > 0) {
+				batch_out_varchar = (const char **)duckdb_malloc(sizeof(const char *) * (size_t)n);
+				if (!batch_out_varchar) {
+					error = "ducktinycc out of memory";
+					goto cleanup;
+				}
+				memset((void *)batch_out_varchar, 0, sizeof(const char *) * (size_t)n);
+			} else if (ctx->return_type == TCC_FFI_BLOB && n > 0) {
+				batch_out_blob = (ducktinycc_blob_t *)duckdb_malloc(sizeof(ducktinycc_blob_t) * (size_t)n);
+				if (!batch_out_blob) {
+					error = "ducktinycc out of memory";
+					goto cleanup;
+				}
+				memset((void *)batch_out_blob, 0, sizeof(ducktinycc_blob_t) * (size_t)n);
+			} else if (tcc_ffi_type_is_list(ctx->return_type) && n > 0) {
+				batch_out_list = (ducktinycc_list_t *)duckdb_malloc(sizeof(ducktinycc_list_t) * (size_t)n);
+				if (!batch_out_list) {
+					error = "ducktinycc out of memory";
+					goto cleanup;
+				}
+				memset((void *)batch_out_list, 0, sizeof(ducktinycc_list_t) * (size_t)n);
+			}
+			tcc_validity_set_all(out_validity, n, ctx->return_type != TCC_FFI_VOID);
+			if (!ctx->batch_wrapper(batch_arg_data, in_validity, (uint64_t)n,
+			                        ctx->return_type == TCC_FFI_VARCHAR
+			                            ? (void *)batch_out_varchar
+			                            : (ctx->return_type == TCC_FFI_BLOB
+			                                   ? (void *)batch_out_blob
+			                                   : (tcc_ffi_type_is_list(ctx->return_type) ? (void *)batch_out_list : out_data)),
+			                        out_validity)) {
+				error = "ducktinycc invoke failed";
 				goto cleanup;
 			}
-			memset((void *)batch_out_varchar, 0, sizeof(const char *) * (size_t)n);
-		} else if (ctx->return_type == TCC_FFI_BLOB && n > 0) {
-			batch_out_blob = (ducktinycc_blob_t *)duckdb_malloc(sizeof(ducktinycc_blob_t) * (size_t)n);
-			if (!batch_out_blob) {
-				error = "ducktinycc out of memory";
-				goto cleanup;
-			}
-			memset((void *)batch_out_blob, 0, sizeof(ducktinycc_blob_t) * (size_t)n);
-		}
-		tcc_validity_set_all(out_validity, n, ctx->return_type != TCC_FFI_VOID);
-		if (!ctx->batch_wrapper(batch_arg_data, in_validity, (uint64_t)n,
-		                        ctx->return_type == TCC_FFI_VARCHAR
-		                            ? (void *)batch_out_varchar
-		                            : (ctx->return_type == TCC_FFI_BLOB ? (void *)batch_out_blob : out_data),
-		                        out_validity)) {
-			error = "ducktinycc invoke failed";
-			goto cleanup;
-		}
 		if (ctx->return_type == TCC_FFI_VOID) {
 			tcc_validity_set_all(out_validity, n, false);
 		} else if (ctx->return_type == TCC_FFI_VARCHAR) {
@@ -1649,21 +1687,63 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 				}
 				duckdb_vector_assign_string_element(output, row, batch_out_varchar[row]);
 			}
-		} else if (ctx->return_type == TCC_FFI_BLOB) {
-			for (row = 0; row < n; row++) {
-				if (!duckdb_validity_row_is_valid(out_validity, row)) {
-					continue;
-				}
+			} else if (ctx->return_type == TCC_FFI_BLOB) {
+				for (row = 0; row < n; row++) {
+					if (!duckdb_validity_row_is_valid(out_validity, row)) {
+						continue;
+					}
 				if (!batch_out_blob || !batch_out_blob[row].ptr) {
 					duckdb_validity_set_row_validity(out_validity, row, false);
 					continue;
 				}
-				duckdb_vector_assign_string_element_len(output, row, (const char *)batch_out_blob[row].ptr,
-				                                        (idx_t)batch_out_blob[row].len);
+					duckdb_vector_assign_string_element_len(output, row, (const char *)batch_out_blob[row].ptr,
+					                                        (idx_t)batch_out_blob[row].len);
+				}
+			} else if (tcc_ffi_type_is_list(ctx->return_type)) {
+				for (row = 0; row < n; row++) {
+					idx_t elem_idx;
+					ducktinycc_list_t desc;
+					uint8_t *child_data;
+					uint64_t *child_validity;
+					if (!duckdb_validity_row_is_valid(out_validity, row)) {
+						continue;
+					}
+					if (!batch_out_list || !batch_out_list[row].ptr) {
+						duckdb_validity_set_row_validity(out_validity, row, false);
+						continue;
+					}
+					desc = batch_out_list[row];
+					if (duckdb_list_vector_reserve(output, out_list_child_count + (idx_t)desc.len) != DuckDBSuccess) {
+						error = "ducktinycc list return reserve failed";
+						goto cleanup;
+					}
+					if (duckdb_list_vector_set_size(output, out_list_child_count + (idx_t)desc.len) != DuckDBSuccess) {
+						error = "ducktinycc list return set_size failed";
+						goto cleanup;
+					}
+					child_data = (uint8_t *)duckdb_vector_get_data(out_list_child_vector);
+					if (desc.len > 0 && child_data) {
+						memcpy(child_data + ((size_t)out_list_child_count * out_list_child_size), desc.ptr,
+						       (size_t)desc.len * out_list_child_size);
+					}
+					duckdb_vector_ensure_validity_writable(out_list_child_vector);
+					child_validity = duckdb_vector_get_validity(out_list_child_vector);
+					for (elem_idx = 0; elem_idx < (idx_t)desc.len; elem_idx++) {
+						bool child_is_valid = true;
+						if (desc.validity) {
+							uint64_t src_idx = desc.offset + (uint64_t)elem_idx;
+							child_is_valid =
+							    (desc.validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
+						}
+						duckdb_validity_set_row_validity(child_validity, out_list_child_count + elem_idx, child_is_valid);
+					}
+					out_list_entries[row].offset = out_list_child_count;
+					out_list_entries[row].length = (idx_t)desc.len;
+					out_list_child_count += (idx_t)desc.len;
+				}
 			}
+			goto cleanup;
 		}
-		goto cleanup;
-	}
 
 	for (row = 0; row < n; row++) {
 		bool valid = true;
@@ -1720,17 +1800,24 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 			duckdb_validity_set_row_validity(out_validity, row, false);
 			continue;
 		}
-		out_varchar_value = NULL;
-		out_blob_value.ptr = NULL;
-		out_blob_value.len = 0;
-		if (!ctx->row_wrapper(arg_ptrs,
-		                      ctx->return_type == TCC_FFI_VARCHAR
-		                          ? (void *)&out_varchar_value
-		                          : (ctx->return_type == TCC_FFI_BLOB ? (void *)&out_blob_value : (void *)out_value),
-		                      &out_is_null)) {
-			error = "ducktinycc invoke failed";
-			goto cleanup;
-		}
+			out_varchar_value = NULL;
+			out_blob_value.ptr = NULL;
+			out_blob_value.len = 0;
+			out_list_value.ptr = NULL;
+			out_list_value.validity = NULL;
+			out_list_value.offset = 0;
+			out_list_value.len = 0;
+			if (!ctx->row_wrapper(arg_ptrs,
+			                      ctx->return_type == TCC_FFI_VARCHAR
+			                          ? (void *)&out_varchar_value
+			                          : (ctx->return_type == TCC_FFI_BLOB
+			                                 ? (void *)&out_blob_value
+			                                 : (tcc_ffi_type_is_list(ctx->return_type) ? (void *)&out_list_value
+			                                                                            : (void *)out_value)),
+			                      &out_is_null)) {
+				error = "ducktinycc invoke failed";
+				goto cleanup;
+			}
 		if (ctx->return_type == TCC_FFI_VOID || out_is_null) {
 			duckdb_validity_set_row_validity(out_validity, row, false);
 			continue;
@@ -1744,20 +1831,58 @@ static void tcc_host_signature_scalar(duckdb_function_info info, duckdb_data_chu
 			duckdb_vector_assign_string_element(output, row, out_varchar_value);
 			continue;
 		}
-		if (ctx->return_type == TCC_FFI_BLOB) {
-			if (!out_blob_value.ptr) {
-				duckdb_validity_set_row_validity(out_validity, row, false);
+			if (ctx->return_type == TCC_FFI_BLOB) {
+				if (!out_blob_value.ptr) {
+					duckdb_validity_set_row_validity(out_validity, row, false);
+					continue;
+			}
+			duckdb_validity_set_row_validity(out_validity, row, true);
+				duckdb_vector_assign_string_element_len(output, row, (const char *)out_blob_value.ptr,
+				                                        (idx_t)out_blob_value.len);
+				continue;
+			}
+			if (tcc_ffi_type_is_list(ctx->return_type)) {
+				idx_t elem_idx;
+				uint8_t *child_data;
+				uint64_t *child_validity;
+				if (!out_list_value.ptr) {
+					duckdb_validity_set_row_validity(out_validity, row, false);
+					continue;
+				}
+				if (duckdb_list_vector_reserve(output, out_list_child_count + (idx_t)out_list_value.len) != DuckDBSuccess) {
+					error = "ducktinycc list return reserve failed";
+					goto cleanup;
+				}
+				if (duckdb_list_vector_set_size(output, out_list_child_count + (idx_t)out_list_value.len) != DuckDBSuccess) {
+					error = "ducktinycc list return set_size failed";
+					goto cleanup;
+				}
+				child_data = (uint8_t *)duckdb_vector_get_data(out_list_child_vector);
+				if (out_list_value.len > 0 && child_data) {
+					memcpy(child_data + ((size_t)out_list_child_count * out_list_child_size), out_list_value.ptr,
+					       (size_t)out_list_value.len * out_list_child_size);
+				}
+				duckdb_vector_ensure_validity_writable(out_list_child_vector);
+				child_validity = duckdb_vector_get_validity(out_list_child_vector);
+				for (elem_idx = 0; elem_idx < (idx_t)out_list_value.len; elem_idx++) {
+					bool child_is_valid = true;
+					if (out_list_value.validity) {
+						uint64_t src_idx = out_list_value.offset + (uint64_t)elem_idx;
+						child_is_valid =
+						    (out_list_value.validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
+					}
+					duckdb_validity_set_row_validity(child_validity, out_list_child_count + elem_idx, child_is_valid);
+				}
+				duckdb_validity_set_row_validity(out_validity, row, true);
+				out_list_entries[row].offset = out_list_child_count;
+				out_list_entries[row].length = (idx_t)out_list_value.len;
+				out_list_child_count += (idx_t)out_list_value.len;
 				continue;
 			}
 			duckdb_validity_set_row_validity(out_validity, row, true);
-			duckdb_vector_assign_string_element_len(output, row, (const char *)out_blob_value.ptr,
-			                                        (idx_t)out_blob_value.len);
-			continue;
-		}
-		duckdb_validity_set_row_validity(out_validity, row, true);
-		if (ret_size > 0) {
-			memcpy(out_data + ((size_t)row * ret_size), out_value, ret_size);
-		}
+			if (ret_size > 0) {
+				memcpy(out_data + ((size_t)row * ret_size), out_value, ret_size);
+			}
 	}
 cleanup:
 	if (row_varchar_allocations) {
@@ -1803,9 +1928,12 @@ cleanup:
 	if (batch_out_varchar) {
 		duckdb_free((void *)batch_out_varchar);
 	}
-	if (batch_out_blob) {
-		duckdb_free((void *)batch_out_blob);
-	}
+		if (batch_out_blob) {
+			duckdb_free((void *)batch_out_blob);
+		}
+		if (batch_out_list) {
+			duckdb_free((void *)batch_out_list);
+		}
 	if (in_data) {
 		duckdb_free(in_data);
 	}
@@ -2719,10 +2847,6 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 		tcc_set_error(error_buf, "return_type contains unsupported type token");
 		return false;
 	}
-	if (tcc_ffi_type_is_list(ret_type)) {
-		tcc_set_error(error_buf, "return_type list/array is not supported yet");
-		return false;
-	}
 	if (arg_types_csv[0] == '\0') {
 		*out_return_type = ret_type;
 		*out_arg_types = NULL;
@@ -2967,23 +3091,36 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 			                          "}\n",
 			                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
 			                          ret_c_type);
-		} else if (ok && ret_type == TCC_FFI_BLOB) {
-			ok = tcc_text_buf_appendf(&src,
-			                          "  %s result = %s(%s);\n"
-			                          "  if (!result.ptr) {\n"
-			                          "    if (out_is_null) { *out_is_null = 1; }\n"
-			                          "    return 1;\n"
-			                          "  }\n"
-			                          "  *(%s *)out_value = result;\n"
-			                          "  if (out_is_null) { *out_is_null = 0; }\n"
-			                          "  return 1;\n"
-			                          "}\n",
-			                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
-			                          ret_c_type);
-		} else if (ok) {
-			ok = tcc_text_buf_appendf(&src,
-			                          "  %s result = %s(%s);\n"
-			                          "  *(%s *)out_value = result;\n"
+			} else if (ok && ret_type == TCC_FFI_BLOB) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "  %s result = %s(%s);\n"
+				                          "  if (!result.ptr) {\n"
+				                          "    if (out_is_null) { *out_is_null = 1; }\n"
+				                          "    return 1;\n"
+				                          "  }\n"
+				                          "  *(%s *)out_value = result;\n"
+				                          "  if (out_is_null) { *out_is_null = 0; }\n"
+				                          "  return 1;\n"
+				                          "}\n",
+				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
+				                          ret_c_type);
+			} else if (ok && tcc_ffi_type_is_list(ret_type)) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "  %s result = %s(%s);\n"
+				                          "  if (!result.ptr) {\n"
+				                          "    if (out_is_null) { *out_is_null = 1; }\n"
+				                          "    return 1;\n"
+				                          "  }\n"
+				                          "  *(%s *)out_value = result;\n"
+				                          "  if (out_is_null) { *out_is_null = 0; }\n"
+				                          "  return 1;\n"
+				                          "}\n",
+				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
+				                          ret_c_type);
+			} else if (ok) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "  %s result = %s(%s);\n"
+				                          "  *(%s *)out_value = result;\n"
 			                          "  if (out_is_null) { *out_is_null = 0; }\n"
 			                          "  return 1;\n"
 			                          "}\n",
@@ -3032,19 +3169,28 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 			                          "    }\n"
 			                          "    out[row] = result;\n",
 			                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
-		} else if (ok && ret_type == TCC_FFI_BLOB) {
-			ok = tcc_text_buf_appendf(&src,
-			                          "    %s result = %s(%s);\n"
-			                          "    if (!result.ptr) {\n"
-			                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
-			                          "      continue;\n"
-			                          "    }\n"
-			                          "    out[row] = result;\n",
-			                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
-		} else if (ok) {
-			ok = tcc_text_buf_appendf(&src, "    out[row] = %s(%s);\n", target_symbol,
-			                          batch_call_args.data ? batch_call_args.data : "");
-		}
+			} else if (ok && ret_type == TCC_FFI_BLOB) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "    %s result = %s(%s);\n"
+				                          "    if (!result.ptr) {\n"
+				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
+				                          "      continue;\n"
+				                          "    }\n"
+				                          "    out[row] = result;\n",
+				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
+			} else if (ok && tcc_ffi_type_is_list(ret_type)) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "    %s result = %s(%s);\n"
+				                          "    if (!result.ptr) {\n"
+				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
+				                          "      continue;\n"
+				                          "    }\n"
+				                          "    out[row] = result;\n",
+				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
+			} else if (ok) {
+				ok = tcc_text_buf_appendf(&src, "    out[row] = %s(%s);\n", target_symbol,
+				                          batch_call_args.data ? batch_call_args.data : "");
+			}
 		if (ok) {
 			ok = tcc_text_buf_appendf(&src,
 			                          "  }\n"

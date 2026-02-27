@@ -670,14 +670,58 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
-  source := 'long long bad_list_ret(ducktinycc_list_t a){ return (long long)a.len; }',
-  symbol := 'bad_list_ret',
-  sql_name := 'bad_list_ret',
+  source := 'ducktinycc_list_t make_pair_list(long long x){
+  static long long values[2];
+  static uint64_t validity[1];
+  ducktinycc_list_t out;
+  values[0] = x;
+  values[1] = x + 1;
+  validity[0] = 1ULL;
+  out.ptr = values;
+  out.validity = validity;
+  out.offset = 0;
+  out.len = 2;
+  return out;
+}',
+  symbol := 'make_pair_list',
+  sql_name := 'make_pair_list',
   return_type := 'i64[]',
-  arg_types := ['i64[]']
+  arg_types := ['i64']
 );
 ----
-false	quick_compile	E_BAD_SIGNATURE
+true	quick_compile	OK
+
+query T
+SELECT CAST(make_pair_list(10) AS VARCHAR);
+----
+[10, NULL]
+
+query T
+SELECT make_pair_list(NULL);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_list_t batch_echo_list(ducktinycc_list_t a){ return a; }',
+  symbol := 'batch_echo_list',
+  sql_name := 'batch_echo_list',
+  return_type := 'i64[]',
+  arg_types := ['i64[]'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT CAST(batch_echo_list(v) AS VARCHAR)
+FROM (VALUES ([1,2]::BIGINT[]), ([3,NULL,5]::BIGINT[]), (NULL::BIGINT[])) t(v);
+----
+[1, 2]
+[3, NULL, 5]
+NULL
 
 query TTT
 SELECT ok, mode, code
