@@ -34,8 +34,10 @@ typedef struct {
 } tcc_string_list_t;
 
 typedef struct {
-	atomic_flag flag;
-} tcc_spinlock_t;
+	atomic_bool writer;
+	atomic_uint readers;
+	atomic_uint pending_writers;
+} tcc_rwlock_t;
 
 typedef struct {
 	char *runtime_path;
@@ -210,7 +212,7 @@ typedef struct {
 typedef struct {
 	duckdb_connection connection;
 	duckdb_database database;
-	tcc_spinlock_t lock;
+	tcc_rwlock_t lock;
 	tcc_session_t session;
 	tcc_registered_entry_t *entries;
 	idx_t entry_count;
@@ -322,26 +324,62 @@ static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type);
 static void tcc_struct_meta_destroy(tcc_ffi_struct_meta_t *meta);
 static void tcc_struct_meta_array_destroy(tcc_ffi_struct_meta_t *metas, int count);
 
-static void tcc_spinlock_init(tcc_spinlock_t *lock) {
+static void tcc_rwlock_init(tcc_rwlock_t *lock) {
 	if (!lock) {
 		return;
 	}
-	atomic_flag_clear_explicit(&lock->flag, memory_order_release);
+	atomic_store_explicit(&lock->writer, false, memory_order_relaxed);
+	atomic_store_explicit(&lock->readers, 0, memory_order_relaxed);
+	atomic_store_explicit(&lock->pending_writers, 0, memory_order_relaxed);
 }
 
-static void tcc_spinlock_lock(tcc_spinlock_t *lock) {
+static void tcc_rwlock_read_lock(tcc_rwlock_t *lock) {
 	if (!lock) {
 		return;
 	}
-	while (atomic_flag_test_and_set_explicit(&lock->flag, memory_order_acquire)) {
+	for (;;) {
+		while (atomic_load_explicit(&lock->writer, memory_order_acquire) ||
+		       atomic_load_explicit(&lock->pending_writers, memory_order_acquire) > 0) {
+		}
+		atomic_fetch_add_explicit(&lock->readers, 1, memory_order_acquire);
+		if (!atomic_load_explicit(&lock->writer, memory_order_acquire) &&
+		    atomic_load_explicit(&lock->pending_writers, memory_order_acquire) == 0) {
+			break;
+		}
+		atomic_fetch_sub_explicit(&lock->readers, 1, memory_order_release);
 	}
 }
 
-static void tcc_spinlock_unlock(tcc_spinlock_t *lock) {
+static void tcc_rwlock_read_unlock(tcc_rwlock_t *lock) {
 	if (!lock) {
 		return;
 	}
-	atomic_flag_clear_explicit(&lock->flag, memory_order_release);
+	atomic_fetch_sub_explicit(&lock->readers, 1, memory_order_release);
+}
+
+static void tcc_rwlock_write_lock(tcc_rwlock_t *lock) {
+	bool expected = false;
+	if (!lock) {
+		return;
+	}
+	atomic_fetch_add_explicit(&lock->pending_writers, 1, memory_order_acq_rel);
+	for (;;) {
+		expected = false;
+		if (atomic_compare_exchange_weak_explicit(&lock->writer, &expected, true, memory_order_acq_rel,
+		                                          memory_order_acquire)) {
+			break;
+		}
+	}
+	while (atomic_load_explicit(&lock->readers, memory_order_acquire) != 0) {
+	}
+	atomic_fetch_sub_explicit(&lock->pending_writers, 1, memory_order_release);
+}
+
+static void tcc_rwlock_write_unlock(tcc_rwlock_t *lock) {
+	if (!lock) {
+		return;
+	}
+	atomic_store_explicit(&lock->writer, false, memory_order_release);
 }
 
 static char *tcc_strdup(const char *value) {
@@ -5390,19 +5428,37 @@ static int tcc_compile_and_load_codegen_module(const char *runtime_path, tcc_mod
 }
 #endif
 
+static bool tcc_mode_requires_write_lock(const char *mode) {
+	if (!mode) {
+		return false;
+	}
+	return strcmp(mode, "config_set") == 0 || strcmp(mode, "config_reset") == 0 ||
+	       strcmp(mode, "tcc_new_state") == 0 || strcmp(mode, "add_include") == 0 ||
+	       strcmp(mode, "add_sysinclude") == 0 || strcmp(mode, "add_library_path") == 0 ||
+	       strcmp(mode, "add_library") == 0 || strcmp(mode, "add_option") == 0 ||
+	       strcmp(mode, "add_header") == 0 || strcmp(mode, "add_source") == 0 ||
+	       strcmp(mode, "add_define") == 0 || strcmp(mode, "tinycc_bind") == 0 ||
+	       strcmp(mode, "compile") == 0 || strcmp(mode, "quick_compile") == 0;
+}
+
 static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk output) {
 	tcc_module_state_t *state = (tcc_module_state_t *)duckdb_function_get_extra_info(info);
 	tcc_module_bind_data_t *bind = (tcc_module_bind_data_t *)duckdb_function_get_bind_data(info);
 	tcc_module_init_data_t *init = (tcc_module_init_data_t *)duckdb_function_get_init_data(info);
 	const char *runtime_path;
-	bool locked = false;
+	int lock_mode = 0; /* 0 none, 1 read, 2 write */
 
 	if (!state || !bind || !init) {
 		duckdb_data_chunk_set_size(output, 0);
 		return;
 	}
-	tcc_spinlock_lock(&state->lock);
-	locked = true;
+	if (tcc_mode_requires_write_lock(bind->mode)) {
+		tcc_rwlock_write_lock(&state->lock);
+		lock_mode = 2;
+	} else {
+		tcc_rwlock_read_lock(&state->lock);
+		lock_mode = 1;
+	}
 	if (init->emitted) {
 		duckdb_data_chunk_set_size(output, 0);
 		goto tcc_module_done;
@@ -5719,8 +5775,10 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 
 tcc_module_done:
 	init->emitted = true;
-	if (locked) {
-		tcc_spinlock_unlock(&state->lock);
+	if (lock_mode == 2) {
+		tcc_rwlock_write_unlock(&state->lock);
+	} else if (lock_mode == 1) {
+		tcc_rwlock_read_unlock(&state->lock);
 	}
 }
 
@@ -6018,7 +6076,7 @@ bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 		return false;
 	}
 	memset(state, 0, sizeof(tcc_module_state_t));
-	tcc_spinlock_init(&state->lock);
+	tcc_rwlock_init(&state->lock);
 	state->connection = connection;
 	state->database = database;
 

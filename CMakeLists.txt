@@ -26,6 +26,8 @@ endif()
 # Build
 ###
 project(${EXTENSION_NAME} LANGUAGES C)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Create Extension library
 set(EXTENSION_SOURCES
@@ -38,6 +40,7 @@ if (DUCKDB_WASM_EXTENSION)
 else()
 	add_library(${EXTENSION_NAME} SHARED ${EXTENSION_SOURCES})
 endif()
+set_target_properties(${EXTENSION_NAME} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
 
 # Hide symbols
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
