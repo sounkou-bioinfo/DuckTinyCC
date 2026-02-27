@@ -50,8 +50,8 @@ context columns.
 | Mode | Purpose | Notes |
 |---|---|---|
 | `compile` | Compile staged session code and register SQL UDF | Uses `tinycc_bind` or explicit `symbol`/`sql_name` |
-| `quick_compile` | One-shot fast lane compile + register | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types`; can also pass per-call `include_path`, `sysinclude_path`, `library_path`, `library`, `option`, `define_*`, `header` |
-| `codegen_preview` | Generate wrapper C source only (no compile/relocate/register) | Uses same signature inputs as compile path; returns generated C in `detail` |
+| `quick_compile` | One-shot fast lane compile + register | Requires `source`, `symbol`, `sql_name`, `return_type`, `arg_types`; optional `wrapper_mode := 'row'|'batch'`; can also pass per-call `include_path`, `sysinclude_path`, `library_path`, `library`, `option`, `define_*`, `header` |
+| `codegen_preview` | Generate wrapper C source only (no compile/relocate/register) | Uses same signature inputs as compile path (including `wrapper_mode`); returns generated C in `detail` |
 
 ### Discovery Helpers
 
@@ -77,22 +77,33 @@ Current executable SQL registration support:
 Additional limits and behavior:
 
 - Arity: `0..N` arguments (no fixed hard-coded cap)
+- Wrapper mode: `row` (default) or `batch`
 - NULL handling: NULL-in/NULL-out
 - `void` return registers as a SQL function that emits `NULL` values
 
 ## How It Works (Current)
 
 - `compile`, `quick_compile`, and `codegen_preview` generate C wrapper code around the target `symbol`.
-- Generated wrappers use a typed row ABI (`void **args`, `out_value`, `out_is_null`), unpack inputs, call the C symbol, and write back the result.
+- `wrapper_mode := 'row'` generates a row ABI wrapper (`void **args`, `out_value`, `out_is_null`).
+- `wrapper_mode := 'batch'` generates a chunk ABI wrapper (`arg_data`, validity masks, `count`, output buffer/mask) and runs once per DuckDB chunk.
 - A generated module init function calls `ducktinycc_register_signature(...)` to register the SQL scalar UDF in the active DuckDB connection.
 - TinyCC compile + relocate is fully in-memory (no shared library file is emitted).
 - Host symbols injected into each TinyCC state are currently fixed: `duckdb_ext_api` and `ducktinycc_register_signature`.
-- Execution uses DuckDB vectors but invokes the generated wrapper row-by-row inside the scalar UDF loop.
+- DuckDB still owns all vectors/buffers; wrappers operate on borrowed chunk memory and should not retain pointers past the call.
+
+## Memory Ownership and Lifecycle
+
+- Input argument memory is borrowed from DuckDB vectors for the duration of a scalar callback only.
+- Output memory is DuckDB-managed; wrappers write directly into DuckDB output buffers.
+- Host-side marshalling scratch buffers (`arg_ptrs`, column pointer arrays) are allocated with `duckdb_malloc` and freed before callback return.
+- Compiled code and symbols live inside each TinyCC relocated state (`TCCState`) and are released when that artifact is destroyed.
+- `config_reset` and `tcc_new_state` clear staged build/session inputs, but do not remove already registered SQL UDF catalog entries.
+- Current DuckDB C API behavior treats these API-registered scalar functions as internal catalog entries, so SQL `DROP FUNCTION` is not available for them.
 
 ## Design Direction (API Still Evolving)
 
 - Host symbol registration mode: feasible and aligned with Rtinycc-style embedding; prefer an allow-listed registry (name -> host address) over raw SQL-provided addresses.
-- Arrow to reduce marshalling: not used in the current scalar UDF path; DuckDB already provides columnar vectors, and remaining overhead is mainly per-row wrapper calls.
+- Arrow to reduce marshalling: not used directly; batch wrappers already consume DuckDB vectors column-wise and avoid per-row host-wrapper crossings.
 - Structs: usable inside compiled C code today, but not yet first-class SQL argument/return types.
 - Pointers: best exposed as `UBIGINT` handles with helper functions and type/ownership tags, rather than untyped raw pointer values.
 
@@ -318,12 +329,37 @@ FROM tcc_module(
   symbol := 'add_i32',
   sql_name := 'add_i32',
   return_type := 'i32',
-  arg_types := ['i32', 'i32']
+  arg_types := ['i32', 'i32'],
+  wrapper_mode := 'batch'
 );
 SQL
 ```
 
-### 9) `config_reset` Semantics
+### 9) Batch Wrapper Mode
+
+Use `wrapper_mode := 'batch'` to generate a chunk-oriented wrapper and invoke it
+once per DuckDB chunk.
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long batch_add(long long a, long long b){ return a + b; }',
+  symbol := 'batch_add',
+  sql_name := 'batch_add',
+  return_type := 'i64',
+  arg_types := ['i64', 'i64'],
+  wrapper_mode := 'batch'
+);
+SELECT CAST(SUM(batch_add(i, 2)) AS BIGINT) AS s
+FROM range(1000000) AS t(i);
+SQL
+```
+
+### 10) `config_reset` Semantics
 
 `config_reset` clears runtime/build staging state, but does not remove already
 registered SQL UDF catalog entries.
@@ -352,7 +388,7 @@ SELECT reset_demo(41) AS after_reset;
 SQL
 ```
 
-### 10) CLI Benchmark Snippet
+### 11) CLI Benchmark Snippet
 
 Use the DuckDB CLI timer to benchmark compile and call latency quickly:
 
@@ -376,7 +412,7 @@ SELECT SUM(add_i32(i::INTEGER, 42::INTEGER)) AS s FROM range(1000000) t(i);
 SQL
 ```
 
-### 11) Cleanup
+### 12) Cleanup
 
 No explicit cleanup is required in the CLI example flow.
 
