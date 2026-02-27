@@ -692,6 +692,164 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'void *ptr_add_bytes(void *p, unsigned long long n){
+  if (!p) return (void *)0;
+  return (void *)(((unsigned char *)p) + n);
+}',
+  symbol := 'ptr_add_bytes',
+  sql_name := 'ptr_add_bytes',
+  return_type := 'ptr',
+  arg_types := ['ptr', 'u64']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT CAST(ptr_add_bytes(100::UBIGINT, 23::UBIGINT) AS BIGINT);
+----
+123
+
+query T
+SELECT ptr_add_bytes(NULL::UBIGINT, 1::UBIGINT);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long read_ptr_i64(void *p){
+  if (!p) return -1;
+  return *(const long long *)p;
+}',
+  symbol := 'read_ptr_i64',
+  sql_name := 'read_ptr_i64',
+  return_type := 'i64',
+  arg_types := ['ptr']
+);
+----
+true	quick_compile	OK
+
+query T
+WITH p AS (SELECT tcc_alloc(8) AS h),
+w AS (SELECT h, tcc_write_i64(h, 0, 42) AS ok FROM p),
+r AS (SELECT h, ok, read_ptr_i64(tcc_dataptr(h)) AS v FROM w),
+f AS (SELECT ok, v, tcc_free_ptr(h) AS freed FROM r)
+SELECT CASE WHEN ok AND v = 42 AND freed THEN 'ok' ELSE 'bad' END FROM f;
+----
+ok
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'void *batch_id_ptr(void *p){ return p; }',
+  symbol := 'batch_id_ptr',
+  sql_name := 'batch_id_ptr',
+  return_type := 'ptr',
+  arg_types := ['ptr'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT CAST(batch_id_ptr(v) AS VARCHAR), batch_id_ptr(v) IS NULL
+FROM (VALUES (123::UBIGINT), (NULL::UBIGINT)) t(v);
+----
+123	false
+NULL	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'struct point_i32 { int x; int y; };
+unsigned long long point_i32_sizeof(void){ return (unsigned long long)sizeof(struct point_i32); }',
+  symbol := 'point_i32_sizeof',
+  sql_name := 'point_i32_sizeof',
+  return_type := 'u64',
+  arg_types := []
+);
+----
+true	quick_compile	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#define OFFSETOF(type, member) ((unsigned long long)((char *)&(((type *)0)->member) - (char *)0))
+struct point_i32 { int x; int y; };
+unsigned long long point_i32_off_x(void){ return OFFSETOF(struct point_i32, x); }',
+  symbol := 'point_i32_off_x',
+  sql_name := 'point_i32_off_x',
+  return_type := 'u64',
+  arg_types := []
+);
+----
+true	quick_compile	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#define OFFSETOF(type, member) ((unsigned long long)((char *)&(((type *)0)->member) - (char *)0))
+struct point_i32 { int x; int y; };
+unsigned long long point_i32_off_y(void){ return OFFSETOF(struct point_i32, y); }',
+  symbol := 'point_i32_off_y',
+  sql_name := 'point_i32_off_y',
+  return_type := 'u64',
+  arg_types := []
+);
+----
+true	quick_compile	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'struct point_i32 { int x; int y; };
+long long point_i32_sum(void *p){
+  struct point_i32 *q = (struct point_i32 *)p;
+  if (!q) return -1;
+  return (long long)q->x + (long long)q->y;
+}',
+  symbol := 'point_i32_sum',
+  sql_name := 'point_i32_sum',
+  return_type := 'i64',
+  arg_types := ['ptr']
+);
+----
+true	quick_compile	OK
+
+query T
+WITH m AS (
+  SELECT point_i32_sizeof() AS sz, point_i32_off_x() AS ox, point_i32_off_y() AS oy
+),
+p AS (
+  SELECT sz, ox, oy, tcc_alloc(sz) AS h FROM m
+),
+w AS (
+  SELECT sz, ox, oy, h,
+         tcc_write_i32(h, ox, 7) AS ok1,
+         tcc_write_i32(h, oy, 9) AS ok2
+  FROM p
+),
+r AS (
+  SELECT h, sz, ox, oy, ok1, ok2, point_i32_sum(tcc_dataptr(h)) AS s FROM w
+),
+f AS (
+  SELECT ok1, ok2, s, sz, ox, oy, tcc_free_ptr(h) AS freed FROM r
+)
+SELECT CASE WHEN ok1 AND ok2 AND freed AND s = 16 AND sz >= 8 AND oy > ox THEN 'ok' ELSE 'bad' END
+FROM f;
+----
+ok
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'long long sum_i64(ducktinycc_list_t a){
   const long long *p = (const long long *)a.ptr;
   unsigned long long i;

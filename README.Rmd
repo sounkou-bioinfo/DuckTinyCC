@@ -84,7 +84,7 @@ Current executable SQL registration support:
 
 | Signature Piece | Accepted Tokens | DuckDB Type |
 |---|---|---|
-| `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`, `numeric` | `BIGINT` for `void`; otherwise matching scalar type |
+| `return_type` | `void`, `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `ptr`, `pointer`, `f32`, `f64`, `varchar`, `text`, `string`, `cstring`, `blob`, `bytea`, `binary`, `varbinary`, `buffer`, `bytes`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`, `numeric` | `BIGINT` for `void`; otherwise matching scalar type (`ptr` maps to `UBIGINT`) |
 | each `arg_types` element | same scalar tokens as `return_type`, plus fixed-child list tokens `list_i64` or `i64[]`, fixed-size array tokens like `i64[3]`, `struct<name:type;...>`, and `map<key_type;value_type>` | scalar type, `LIST(child)`, `ARRAY(child,N)`, `STRUCT(...)`, or `MAP(...)` |
 
 Additional limits and behavior:
@@ -93,6 +93,7 @@ Additional limits and behavior:
 - Wrapper mode: `row` (default) or `batch`
 - NULL handling: NULL-in/NULL-out
 - `void` return registers as a SQL function that emits `NULL` values
+- `ptr`/`pointer` use explicit pointer ABI in generated wrappers and map to SQL `UBIGINT`
 - `varchar`/`cstring` bridge to C `const char *`; returned `NULL` pointers produce SQL `NULL`
 - `blob`/`buffer` bridge to C `ducktinycc_blob_t { const void *ptr; uint64_t len }`; returned `ptr == NULL` produces SQL `NULL`
 - easy scalar structs use C aliases: `ducktinycc_hugeint_t` (UUID), `ducktinycc_date_t`, `ducktinycc_time_t`, `ducktinycc_timestamp_t`, `ducktinycc_interval_t`, `ducktinycc_decimal_t`
@@ -102,7 +103,7 @@ Additional limits and behavior:
 - struct arguments/returns use `ducktinycc_struct_t { const void *const *field_ptrs; const uint64_t *const *field_validity; uint64_t field_count; uint64_t offset }`
 - map arguments/returns use `ducktinycc_map_t { key_ptr, key_validity, value_ptr, value_validity, offset, len }`
 - `i64[]` means variable-length `LIST`; `i64[3]` means fixed-size `ARRAY`
-- current `struct<...>` and `map<...>` members support fixed-width scalar families only (`bool/i8/u8/i16/u16/i32/u32/i64/u64/f32/f64/uuid/date/time/timestamp/interval/decimal`)
+- current `struct<...>` and `map<...>` members support fixed-width scalar families only (`bool/i8/u8/i16/u16/i32/u32/i64/u64/ptr/f32/f64/uuid/date/time/timestamp/interval/decimal`)
 - `struct<...>` and `map<...>` use `;` separators in tokens to avoid ambiguity inside `arg_types := [...]`
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
 
@@ -456,6 +457,90 @@ w AS (SELECT h, tcc_write_bytes(h, 0, from_hex('DEADBEEF')) AS ok FROM p),
 r AS (SELECT h, ok, hex(tcc_read_bytes(h, 0, 4)) AS hx FROM w),
 f AS (SELECT ok, hx, tcc_free_ptr(h) AS freed FROM r)
 SELECT ok, hx, freed FROM f;
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long read_ptr_i64(void *p){
+  if (!p) return -1;
+  return *(const long long *)p;
+}',
+  symbol := 'read_ptr_i64',
+  sql_name := 'read_ptr_i64',
+  return_type := 'i64',
+  arg_types := ['ptr']
+);
+WITH p AS (SELECT tcc_alloc(8) AS h),
+w AS (SELECT h, tcc_write_i64(h, 0, 42) AS ok FROM p),
+r AS (SELECT h, ok, read_ptr_i64(tcc_dataptr(h)) AS v FROM w),
+f AS (SELECT ok, v, tcc_free_ptr(h) AS freed FROM r)
+SELECT ok, v, freed FROM f;
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'struct point_i32 { int x; int y; };
+unsigned long long point_i32_sizeof(void){ return (unsigned long long)sizeof(struct point_i32); }',
+  symbol := 'point_i32_sizeof',
+  sql_name := 'point_i32_sizeof',
+  return_type := 'u64',
+  arg_types := []
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#define OFFSETOF(type, member) ((unsigned long long)((char *)&(((type *)0)->member) - (char *)0))
+struct point_i32 { int x; int y; };
+unsigned long long point_i32_off_x(void){ return OFFSETOF(struct point_i32, x); }',
+  symbol := 'point_i32_off_x',
+  sql_name := 'point_i32_off_x',
+  return_type := 'u64',
+  arg_types := []
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#define OFFSETOF(type, member) ((unsigned long long)((char *)&(((type *)0)->member) - (char *)0))
+struct point_i32 { int x; int y; };
+unsigned long long point_i32_off_y(void){ return OFFSETOF(struct point_i32, y); }',
+  symbol := 'point_i32_off_y',
+  sql_name := 'point_i32_off_y',
+  return_type := 'u64',
+  arg_types := []
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'struct point_i32 { int x; int y; };
+long long point_i32_sum(void *p){
+  struct point_i32 *q = (struct point_i32 *)p;
+  if (!q) return -1;
+  return (long long)q->x + (long long)q->y;
+}',
+  symbol := 'point_i32_sum',
+  sql_name := 'point_i32_sum',
+  return_type := 'i64',
+  arg_types := ['ptr']
+);
+WITH m AS (
+  SELECT point_i32_sizeof() AS sz, point_i32_off_x() AS ox, point_i32_off_y() AS oy
+),
+p AS (
+  SELECT sz, ox, oy, tcc_alloc(sz) AS h FROM m
+),
+w AS (
+  SELECT sz, ox, oy, h,
+         tcc_write_i32(h, ox, 7) AS ok1,
+         tcc_write_i32(h, oy, 9) AS ok2
+  FROM p
+),
+r AS (
+  SELECT h, sz, ox, oy, ok1, ok2, point_i32_sum(tcc_dataptr(h)) AS s FROM w
+),
+f AS (
+  SELECT ok1, ok2, s, tcc_free_ptr(h) AS freed FROM r
+)
+SELECT ok1, ok2, s, freed FROM f;
 SQL
 ```
 

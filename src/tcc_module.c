@@ -95,6 +95,7 @@ typedef enum {
 	TCC_FFI_DECIMAL = 19,
 	TCC_FFI_STRUCT = 20,
 	TCC_FFI_MAP = 21,
+	TCC_FFI_PTR = 22,
 	TCC_FFI_LIST_BOOL = 64,
 	TCC_FFI_LIST_I8 = 65,
 	TCC_FFI_LIST_U8 = 66,
@@ -2031,6 +2032,7 @@ static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type) {
 	case TCC_FFI_TIMESTAMP:
 	case TCC_FFI_INTERVAL:
 	case TCC_FFI_DECIMAL:
+	case TCC_FFI_PTR:
 		return true;
 	default:
 		return false;
@@ -2366,6 +2368,7 @@ static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
 	case TCC_FFI_I64:
 	case TCC_FFI_U64:
 	case TCC_FFI_F64:
+	case TCC_FFI_PTR:
 		return 8;
 	case TCC_FFI_VARCHAR:
 		return sizeof(duckdb_string_t);
@@ -2451,6 +2454,8 @@ static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 	case TCC_FFI_I64:
 		return DUCKDB_TYPE_BIGINT;
 	case TCC_FFI_U64:
+		return DUCKDB_TYPE_UBIGINT;
+	case TCC_FFI_PTR:
 		return DUCKDB_TYPE_UBIGINT;
 	case TCC_FFI_F32:
 		return DUCKDB_TYPE_FLOAT;
@@ -5209,6 +5214,10 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 		*out_type = TCC_FFI_U64;
 		return true;
 	}
+	if (tcc_equals_ci(token, "ptr") || tcc_equals_ci(token, "pointer") || tcc_equals_ci(token, "c_ptr")) {
+		*out_type = TCC_FFI_PTR;
+		return true;
+	}
 	if (tcc_equals_ci(token, "f32") || tcc_equals_ci(token, "float") || tcc_equals_ci(token, "real")) {
 		*out_type = TCC_FFI_F32;
 		return true;
@@ -5898,6 +5907,8 @@ static const char *tcc_ffi_type_to_c_type_name(tcc_ffi_type_t type) {
 		return "long long";
 	case TCC_FFI_U64:
 		return "unsigned long long";
+	case TCC_FFI_PTR:
+		return "void *";
 	case TCC_FFI_F32:
 		return "float";
 	case TCC_FFI_F64:
@@ -6000,18 +6011,37 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 			ok = false;
 			break;
 		}
-		if (!tcc_text_buf_appendf(&args_decl, "%s%s a%d", i == 0 ? "" : ", ", arg_c_type, i) ||
-		    !tcc_text_buf_appendf(&row_unpack_lines, "  %s a%d = *(%s *)args[%d];\n", arg_c_type, i, arg_c_type, i) ||
-		    !tcc_text_buf_appendf(&row_call_args, "%sa%d", i == 0 ? "" : ", ", i) ||
-		    !tcc_text_buf_appendf(&batch_col_decls, "  %s *col%d = (%s *)arg_data[%d];\n", arg_c_type, i, arg_c_type,
-		                          i) ||
-		    !tcc_text_buf_appendf(&batch_call_args, "%scol%d[row]", i == 0 ? "" : ", ", i) ||
-		    !tcc_text_buf_appendf(
-		        &batch_null_checks,
-		        "%s(arg_validity[%d] && ((arg_validity[%d][row >> 6] & (1ULL << (row & 63))) == 0))",
-		        i == 0 ? "" : " || ", i, i)) {
+		if (!tcc_text_buf_appendf(&args_decl, "%s%s a%d", i == 0 ? "" : ", ", arg_c_type, i)) {
 			ok = false;
 			break;
+		}
+		if (arg_types[i] == TCC_FFI_PTR) {
+			if (!tcc_text_buf_appendf(&row_unpack_lines,
+			                          "  void *a%d = (void *)(uintptr_t)(*(unsigned long long *)args[%d]);\n", i, i) ||
+			    !tcc_text_buf_appendf(&row_call_args, "%sa%d", i == 0 ? "" : ", ", i) ||
+			    !tcc_text_buf_appendf(&batch_col_decls, "  unsigned long long *col%d_ptr = (unsigned long long *)arg_data[%d];\n",
+			                          i, i) ||
+			    !tcc_text_buf_appendf(&batch_call_args, "%s(void *)(uintptr_t)col%d_ptr[row]", i == 0 ? "" : ", ", i) ||
+			    !tcc_text_buf_appendf(
+			        &batch_null_checks,
+			        "%s(arg_validity[%d] && ((arg_validity[%d][row >> 6] & (1ULL << (row & 63))) == 0))",
+			        i == 0 ? "" : " || ", i, i)) {
+				ok = false;
+				break;
+			}
+		} else {
+			if (!tcc_text_buf_appendf(&row_unpack_lines, "  %s a%d = *(%s *)args[%d];\n", arg_c_type, i, arg_c_type, i) ||
+			    !tcc_text_buf_appendf(&row_call_args, "%sa%d", i == 0 ? "" : ", ", i) ||
+			    !tcc_text_buf_appendf(&batch_col_decls, "  %s *col%d = (%s *)arg_data[%d];\n", arg_c_type, i, arg_c_type,
+			                          i) ||
+			    !tcc_text_buf_appendf(&batch_call_args, "%scol%d[row]", i == 0 ? "" : ", ", i) ||
+			    !tcc_text_buf_appendf(
+			        &batch_null_checks,
+			        "%s(arg_validity[%d] && ((arg_validity[%d][row >> 6] & (1ULL << (row & 63))) == 0))",
+			        i == 0 ? "" : " || ", i, i)) {
+				ok = false;
+				break;
+			}
 		}
 	}
 	if (ok && arg_count == 0) {
@@ -6062,6 +6092,18 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 				                          "}\n",
 				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
 				                          ret_c_type);
+			} else if (ok && ret_type == TCC_FFI_PTR) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "  void *result = (void *)%s(%s);\n"
+				                          "  if (!result) {\n"
+				                          "    if (out_is_null) { *out_is_null = 1; }\n"
+				                          "    return 1;\n"
+				                          "  }\n"
+				                          "  *(unsigned long long *)out_value = (unsigned long long)(uintptr_t)result;\n"
+				                          "  if (out_is_null) { *out_is_null = 0; }\n"
+				                          "  return 1;\n"
+				                          "}\n",
+				                          target_symbol, row_call_args.data ? row_call_args.data : "");
 			} else if (ok && (tcc_ffi_type_is_list(ret_type) || tcc_ffi_type_is_array(ret_type))) {
 				ok = tcc_text_buf_appendf(&src,
 				                          "  %s result = %s(%s);\n"
@@ -6125,6 +6167,8 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 		    batch_col_decls.data ? batch_col_decls.data : "");
 		if (ok && ret_type == TCC_FFI_VOID) {
 			ok = tcc_text_buf_appendf(&src, "  (void)out_data;\n");
+		} else if (ok && ret_type == TCC_FFI_PTR) {
+			ok = tcc_text_buf_appendf(&src, "  unsigned long long *out = (unsigned long long *)out_data;\n");
 		} else if (ok) {
 			ok = tcc_text_buf_appendf(&src, "  %s *out = (%s *)out_data;\n", ret_c_type, ret_c_type);
 		}
@@ -6162,6 +6206,15 @@ static char *tcc_generate_ffi_loader_source(const char *module_symbol, const cha
 				                          "    }\n"
 				                          "    out[row] = result;\n",
 				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
+			} else if (ok && ret_type == TCC_FFI_PTR) {
+				ok = tcc_text_buf_appendf(&src,
+				                          "    void *result = (void *)%s(%s);\n"
+				                          "    if (!result) {\n"
+				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
+				                          "      continue;\n"
+				                          "    }\n"
+				                          "    out[row] = (unsigned long long)(uintptr_t)result;\n",
+				                          target_symbol, batch_call_args.data ? batch_call_args.data : "");
 			} else if (ok && (tcc_ffi_type_is_list(ret_type) || tcc_ffi_type_is_array(ret_type))) {
 				ok = tcc_text_buf_appendf(&src,
 				                          "    %s result = %s(%s);\n"
