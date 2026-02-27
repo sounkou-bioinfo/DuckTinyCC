@@ -15,7 +15,7 @@ knitr::opts_chunk$set(
 
 # DuckTinyCC
 
-`DuckTinyCC` is a `DuckDB` `C` extension for in-process JIT compiled C UDFs allowing `C` scripting via `TinyCC`.
+`DuckTinyCC` is a `DuckDB` `C` extension for in-process JIT compiled C UDFs allowing `C` scripting via `TinyCC`. Combined with `C` parsing facilities offered by for example the `[sitting duck extension]`(https://github.com/teaguesterling/sitting_duck), we can quickly generate declarative bindings.
 
 ## API Surface
 
@@ -92,7 +92,7 @@ Additional limits and behavior:
 - `struct<...>` and `map<...>` use `;` separators in tokens to avoid ambiguity inside `arg_types := [...]`
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)`
 
-## How It Works (Current)
+## How It Works
 
 - `compile`, `quick_compile`, and `codegen_preview` generate C wrapper code around the target `symbol`.
 - `wrapper_mode := 'row'` generates a row ABI wrapper (`void **args`, `out_value`, `out_is_null`).
