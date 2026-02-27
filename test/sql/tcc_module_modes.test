@@ -163,6 +163,19 @@ false	codegen_preview	E_BAD_SIGNATURE
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(
+  mode := 'codegen_preview',
+  symbol := 'add2',
+  sql_name := 'add2_preview_bad_mode',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  wrapper_mode := 'arrow'
+);
+----
+false	codegen_preview	E_BAD_WRAPPER_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
   mode := 'quick_compile',
   source := 'int add_i32(int a, int b){ return a + b; }',
   symbol := 'add_i32',
@@ -345,6 +358,72 @@ query I
 SELECT too_many(1,2,3,4,5,6,7,8,9,10,11);
 ----
 12
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *echo_cstr(const char *s){ return s; }',
+  symbol := 'echo_cstr',
+  sql_name := 'echo_cstr',
+  return_type := 'varchar',
+  arg_types := ['cstring']
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT echo_cstr('duck'), echo_cstr('abcdefghijklmnopqrstuvwxyz0123456789');
+----
+duck	abcdefghijklmnopqrstuvwxyz0123456789
+
+query T
+SELECT echo_cstr(NULL);
+----
+NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *empty_to_null(const char *s){ if (!s || s[0] == 0) return 0; return s; }',
+  symbol := 'empty_to_null',
+  sql_name := 'empty_to_null',
+  return_type := 'text',
+  arg_types := ['string']
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT empty_to_null('ok'), empty_to_null('');
+----
+ok	NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *batch_echo(const char *s){ return s; }',
+  symbol := 'batch_echo',
+  sql_name := 'batch_echo',
+  return_type := 'varchar',
+  arg_types := ['varchar'],
+  wrapper_mode := 'batch'
+);
+----
+true	quick_compile	OK
+
+query TTT
+SELECT batch_echo(a), batch_echo(b), batch_echo(c)
+FROM (SELECT 'x' AS a, 'yy' AS b, NULL AS c);
+----
+x	yy	NULL
+
+query T
+SELECT batch_echo('abcdefghijklmnopqrstuvwxyz0123456789');
+----
+abcdefghijklmnopqrstuvwxyz0123456789
 
 query TTT
 SELECT ok, mode, code
