@@ -6689,6 +6689,12 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 		tcc_struct_meta_destroy(&return_struct_meta);
 		return false;
 	}
+	if (ret_type == TCC_FFI_UNION) {
+		tcc_struct_meta_destroy(&return_struct_meta);
+		tcc_union_meta_destroy(&return_union_meta);
+		tcc_set_error(error_buf, "union tokens are parsed but SQL runtime marshalling is not supported yet");
+		return false;
+	}
 	if (arg_types_csv[0] == '\0') {
 		*out_return_type = ret_type;
 		*out_return_array_size = ret_array_size;
@@ -6879,6 +6885,28 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 				tcc_struct_meta_destroy(&return_struct_meta);
 				tcc_union_meta_destroy(&return_union_meta);
 				tcc_set_error(error_buf, "arg_types contains unsupported type token");
+				return false;
+			}
+			if (arg_types[argc] == TCC_FFI_UNION) {
+				duckdb_free(args_copy);
+				if (arg_types) {
+					duckdb_free(arg_types);
+				}
+				if (arg_array_sizes) {
+					duckdb_free(arg_array_sizes);
+				}
+				if (arg_struct_metas) {
+					tcc_struct_meta_array_destroy(arg_struct_metas, argc + 1);
+				}
+				if (arg_map_metas) {
+					duckdb_free(arg_map_metas);
+				}
+				if (arg_union_metas) {
+					tcc_union_meta_array_destroy(arg_union_metas, argc + 1);
+				}
+				tcc_struct_meta_destroy(&return_struct_meta);
+				tcc_union_meta_destroy(&return_union_meta);
+				tcc_set_error(error_buf, "union tokens are parsed but SQL runtime marshalling is not supported yet");
 				return false;
 			}
 			if (arg_types[argc] == TCC_FFI_STRUCT &&
@@ -8303,7 +8331,8 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 					message = "invalid wrapper_mode";
 				} else if (strstr(err.message, "return_type") || strstr(err.message, "arg_types") ||
 				           strstr(err.message, "struct token") || strstr(err.message, "map token") ||
-				           strstr(err.message, "fixed-width scalar tokens only")) {
+				           strstr(err.message, "fixed-width scalar tokens only") ||
+				           strstr(err.message, "union tokens are parsed")) {
 					phase = "bind";
 					code = "E_BAD_SIGNATURE";
 					message = "invalid helper signature";
@@ -8508,7 +8537,8 @@ tcc_c_helpers_done:
 						message = "invalid wrapper_mode";
 					} else if (strstr(err.message, "return_type") || strstr(err.message, "arg_types") ||
 					           strstr(err.message, "struct token") || strstr(err.message, "map token") ||
-					           strstr(err.message, "fixed-width scalar tokens only")) {
+					           strstr(err.message, "fixed-width scalar tokens only") ||
+					           strstr(err.message, "union tokens are parsed")) {
 						phase = "bind";
 						code = "E_BAD_SIGNATURE";
 						message = "invalid return_type/arg_types";

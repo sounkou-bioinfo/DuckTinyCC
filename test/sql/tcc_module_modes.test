@@ -1341,6 +1341,45 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'long long bad_union_return(long long x){ return x; }',
+  symbol := 'bad_union_return',
+  sql_name := 'bad_union_return',
+  return_type := 'union<i:i64;d:f64>',
+  arg_types := ['i64']
+);
+----
+false	quick_compile	E_BAD_SIGNATURE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_union_arg(long long x){ return x; }',
+  symbol := 'bad_union_arg',
+  sql_name := 'bad_union_arg',
+  return_type := 'i64',
+  arg_types := ['union<i:i64;d:f64>']
+);
+----
+false	quick_compile	E_BAD_SIGNATURE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_union(ducktinycc_union_t u){ (void)u; return 0; }',
+  symbol := 'bad_union',
+  sql_name := 'bad_union',
+  return_type := 'i64',
+  arg_types := ['union<a:list_i64;b:i64>']
+);
+----
+false	quick_compile	E_BAD_SIGNATURE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'long long bad_struct(ducktinycc_struct_t s){ (void)s; return 0; }',
   symbol := 'bad_struct',
   sql_name := 'bad_struct',

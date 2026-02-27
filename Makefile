@@ -12,6 +12,8 @@ USE_UNSTABLE_C_API=0
 
 # The DuckDB version to target
 TARGET_DUCKDB_VERSION=v1.2.0
+# The DuckDB release to fetch headers from
+DUCKDB_HEADER_VERSION=v1.4.3
 
 all: configure release
 
@@ -27,6 +29,11 @@ release: build_extension_library_release build_extension_with_metadata_release
 test: test_debug
 test_debug: test_extension_debug
 test_release: test_extension_release
+
+# Override header fetch to use the actual DuckDB release version, not the C API version
+update_duckdb_headers_custom:
+	$(PYTHON_VENV_BIN) -c "import urllib.request;urllib.request.urlretrieve('https://raw.githubusercontent.com/duckdb/duckdb/$(DUCKDB_HEADER_VERSION)/src/include/duckdb.h', 'duckdb_capi/duckdb.h')"
+	$(PYTHON_VENV_BIN) -c "import urllib.request;urllib.request.urlretrieve('https://raw.githubusercontent.com/duckdb/duckdb/$(DUCKDB_HEADER_VERSION)/src/include/duckdb_extension.h', 'duckdb_capi/duckdb_extension.h')"
 
 clean: clean_build clean_cmake
 clean_all: clean clean_configure
