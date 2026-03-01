@@ -40,10 +40,28 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Wrapper/runtime model (Rtinycc-style API-mode codegen):
   - DuckTinyCC generates C wrappers during compile that unpack typed args, call target C symbols, and re-pack result for DuckDB scalar UDF execution.
   - Wrapper modules are compiled+relocated in-memory via libtcc; no separate shared library artifact is produced.
-  - Host symbols injected into each TCC state today are fixed: `duckdb_ext_api`, `ducktinycc_register_signature`.
+  - Host symbols injected into each TCC state include `duckdb_ext_api`, `ducktinycc_register_signature`, and `ducktinycc_*` helper/runtime symbols used by generated wrappers.
   - Supported SQL-visible signature tokens include:
     - Scalars: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64`, `ptr`, `varchar/cstring`, `blob`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`.
     - Nested/composite: `LIST` (`list_*`, `type[]`, `list<...>`), fixed-size `ARRAY` (`type[N]`), `STRUCT` (`struct<...>`), `MAP` (`map<k;v>`), `UNION` (`union<name:type;...>`), with recursive nesting.
+
+## TinyCC State and Relocation Model
+- TinyCC states (`TCCState`) are created only in compile/codegen paths (`tcc_build_module_artifact` via `tcc_new`), not by `tcc_new_state`.
+- `tcc_new_state` resets staged session build inputs and increments `session.state_id`; it does not allocate a new `TCCState`.
+- `compile`/`quick_compile` usually produce one relocated in-memory module artifact (one `TCCState`) per invocation.
+- `c_struct`/`c_union`/`c_bitfield`/`c_enum` may produce multiple artifacts because helper bindings are compiled/registered per generated helper function.
+- Relocation flow is: `tcc_new` -> configure paths/options/includes/defines/source -> `tcc_relocate` -> `tcc_get_symbol(module_init)` -> call `module_init(connection)`.
+- Artifact finalization is explicit:
+  - error path: `tcc_delete` immediately,
+  - replacement or shutdown path: `tcc_artifact_destroy` via registry entry cleanup and module-state destructor.
+
+## Library Linking Rules
+- `add_library_path` appends explicit search directories for `tcc_add_library_path`.
+- `add_library` accepts:
+  - bare names (for example `m`, `z`, `sqlite3`),
+  - names with platform suffixes (`libfoo.so`, `foo.dll`, `libfoo.dylib`, `.a`, `.lib`),
+  - full library paths (absolute or relative path-like values).
+- `tcc_library_probe(...)` should be used to confirm effective search paths/candidates before demos or release examples.
 
 ## Progress Snapshot (2026-02-27)
 - Parser/type metadata refactor completed for recursive signatures:
@@ -64,8 +82,42 @@ This repository uses local precedent references under `.sync/` to guide implemen
     - stable ABI (`C_STRUCT`) is capped by current DuckDB loader policy (`v1.2.0` and lower),
     - unstable ABI (`USE_UNSTABLE_C_API=1`) requires an exact DuckDB runtime version match (`v1.4.3`).
 
+## Progress Snapshot (2026-03-01)
+- Community submission/docs alignment work started:
+  - corrected claims to match actual signature grammar and recursive type support.
+  - documented that `libtcc1.a` is conditional for runtime compile/codegen paths (not universally required).
+  - added `NEWS.md` to track API/runtime/documentation changes going forward.
+- C helper/codegen coverage in current API surface is explicit:
+  - helper generators: `c_struct`, `c_union`, `c_bitfield`, `c_enum`.
+  - codegen/compile modes: `codegen_preview`, `compile`, `quick_compile`.
+
+## Versioning and NEWS Policy
+- Use R-style development versions: `x.y.z.9000` means in-development; `x.y.z` means release.
+- Pre-`1.0.0` compatibility stance: prioritize correctness, simplification, and API clarity over backward compatibility.
+- Pre-`1.0.0` breaking changes are acceptable without shims when they reduce complexity or fix incorrect behavior, but they must be called out in `NEWS.md`.
+- Version bump rules:
+  - On any user-visible API/behavior/docs change on development branch, keep/bump to `.9000`.
+  - At release cut, drop `.9000` (for example `0.0.3.9000` -> `0.0.3`).
+  - Immediately after release, bump next development version (for example `0.0.3` -> `0.0.4.9000`).
+- `NEWS.md` is mandatory and manually maintained (not generated).
+- Every change that affects SQL surface, C bridge behavior, runtime requirements, or helper ABI must add an entry under the current top development section in `NEWS.md`.
+- `NEWS.md` entry format should stay concise and explicit:
+  - Header: `## ducktinycc x.y.z(.9000) (YYYY-MM-DD)`
+  - Bullets: what changed, why it matters, and any compatibility/runtime note.
+
+## Tasks Ahead (Near Term)
+- Deduplicate code paths in runtime bridge/marshalling:
+  - row vs batch decode/encode for nested `LIST/ARRAY/STRUCT/MAP/UNION`.
+  - repeated allocation/cleanup branches in `tcc_execute_compiled_scalar_udf`.
+- Deduplicate codegen helper assembly for `c_struct`/`c_union`/`c_bitfield` where patterns are shared.
+- Add explicit lifetime/allocation documentation for C-facing helper/runtime functions:
+  - borrowed vs owned memory for descriptor structs (`ducktinycc_list_t`, `ducktinycc_array_t`, `ducktinycc_struct_t`, `ducktinycc_map_t`, `ducktinycc_union_t`).
+  - validity bitmap lifetime and indexing semantics (`offset` handling).
+  - pointer helper ownership rules (`tcc_alloc`, `tcc_free_ptr`, read/write helpers).
+  - contracts for generated helper functions (`*_new`, `*_free`, getters/setters, enum helpers).
+
 ## Working Rules for This Repo
-- API is intentionally evolving; document and implement the current surface, not backward-compatibility shims.
+- API is intentionally evolving; pre-`1.0.0`, do not spend effort on backward-compatibility shims unless explicitly required for a release.
 - Prefix public SQL/API surface with `tcc_*`.
 - Use `.sync/Rtinycc` for TinyCC build/runtime decisions.
 - Use `.sync/duckhts` for DuckDB C extension API and CMake patterns.
