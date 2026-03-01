@@ -1,3 +1,16 @@
+/*
+ * DuckTinyCC
+ * SPDX-License-Identifier: MIT
+ *
+ * Architecture overview:
+ * - Extension entrypoint keeps one persistent DuckDB connection per database handle.
+ * - Registration is idempotent per database and installs the `tcc_module` surface.
+ * - Runtime/codegen implementation lives in `src/tcc_module.c`.
+ *
+ * TinyCC embedding precedent:
+ * - https://github.com/sounkou-bioinfo/Rtinycc
+ */
+
 #include "duckdb_extension.h"
 #include "tcc_module.h"
 #include <stdatomic.h>
@@ -16,15 +29,18 @@ static idx_t g_registry_count = 0;
 static idx_t g_registry_capacity = 0;
 static atomic_flag g_registry_lock = ATOMIC_FLAG_INIT;
 
+/* Serializes updates to the global per-database registry. */
 static void ducktinycc_registry_lock(void) {
 	while (atomic_flag_test_and_set_explicit(&g_registry_lock, memory_order_acquire)) {
 	}
 }
 
+/* Releases global registry lock acquired by `ducktinycc_registry_lock`. */
 static void ducktinycc_registry_unlock(void) {
 	atomic_flag_clear_explicit(&g_registry_lock, memory_order_release);
 }
 
+/* Finds registry entry index for a DuckDB database handle. */
 static idx_t ducktinycc_registry_find(duckdb_database database) {
 	idx_t i;
 	for (i = 0; i < g_registry_count; i++) {
@@ -35,6 +51,7 @@ static idx_t ducktinycc_registry_find(duckdb_database database) {
 	return (idx_t)-1;
 }
 
+/* Ensures registry storage can hold at least `wanted` entries. */
 static bool ducktinycc_registry_reserve(idx_t wanted) {
 	ducktinycc_registry_entry_t *new_entries;
 	idx_t new_capacity;
@@ -59,6 +76,7 @@ static bool ducktinycc_registry_reserve(idx_t wanted) {
 	return true;
 }
 
+/* DuckDB extension entrypoint: initializes persistent connection and registers module functions. */
 DUCKDB_EXTENSION_ENTRYPOINT_CUSTOM(duckdb_extension_info info, struct duckdb_extension_access *access) {
 	duckdb_database database = NULL;
 	idx_t idx;

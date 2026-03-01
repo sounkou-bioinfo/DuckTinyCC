@@ -75,6 +75,8 @@ This repository uses local precedent references under `.sync/` to guide implemen
 
 ## Versioning and NEWS Policy
 - Use R-style development versions: `x.y.z.9000` means in-development; `x.y.z` means release.
+- Pre-`1.0.0` compatibility stance: prioritize correctness, simplification, and API clarity over backward compatibility.
+- Pre-`1.0.0` breaking changes are acceptable without shims when they reduce complexity or fix incorrect behavior, but they must be called out in `NEWS.md`.
 - Version bump rules:
   - On any user-visible API/behavior/docs change on development branch, keep/bump to `.9000`.
   - At release cut, drop `.9000` (for example `0.0.3.9000` -> `0.0.3`).
@@ -97,7 +99,7 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - contracts for generated helper functions (`*_new`, `*_free`, getters/setters, enum helpers).
 
 ## Working Rules for This Repo
-- API is intentionally evolving; document and implement the current surface, not backward-compatibility shims.
+- API is intentionally evolving; pre-`1.0.0`, do not spend effort on backward-compatibility shims unless explicitly required for a release.
 - Prefix public SQL/API surface with `tcc_*`.
 - Use `.sync/Rtinycc` for TinyCC build/runtime decisions.
 - Use `.sync/duckhts` for DuckDB C extension API and CMake patterns.

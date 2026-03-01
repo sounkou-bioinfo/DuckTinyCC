@@ -1,3 +1,39 @@
+/*
+ * DuckTinyCC
+ * SPDX-License-Identifier: MIT
+ *
+ * Strategy overview:
+ * - `tcc_module(...)` is the control plane: it stages session-scoped TinyCC inputs (headers, sources, include/lib
+ *   paths, options, defines) and dispatches modes through DuckDB table-function lifecycle callbacks.
+ * - Compile/codegen paths build wrappers as C source, compile + relocate them in memory via libtcc, and resolve a
+ *   module init symbol (no per-UDF shared-library artifact on disk).
+ * - Each generated module self-registers scalar UDFs by calling `ducktinycc_register_signature(...)` against a
+ *   persistent host DuckDB connection, using host-exported symbols injected into the TCC state.
+ * - Runtime execution (`tcc_execute_compiled_scalar_udf`) bridges DuckDB vectors to C descriptors for row/batch
+ *   wrappers, including recursive LIST/ARRAY/STRUCT/MAP/UNION marshalling and write-back.
+ * - This file intentionally centralizes SQL surface, compile/load, and runtime bridge logic to keep behavior
+ *   diagnosable while the pre-1.0 API remains fast-moving.
+ *
+ * TinyCC embedding precedent:
+ * - https://github.com/sounkou-bioinfo/Rtinycc
+ */
+
+/*
+ * Allocation/Lifetime Model (heap domains):
+ * - DuckDB-owned heap (`duckdb_malloc`/`duckdb_free`):
+ *   used for extension state, bind/init payloads, parsed metadata, bridge scratch buffers, and generated source text.
+ * - libc heap (`malloc`/`free`):
+ *   used by pointer-registry payload allocations and generated helper `*_new`/`*_free` functions.
+ * - Borrowed DuckDB vector/chunk memory:
+ *   pointers fetched from vectors/validity buffers/string payloads are non-owning views and valid only for call scope.
+ *
+ * Ownership rules:
+ * - `destroy_*` callbacks release DuckDB-owned bind/init/extra-info payloads.
+ * - `tcc_host_sig_ctx_destroy` owns/releases parsed signature metadata attached to registered UDFs.
+ * - `tcc_artifact_destroy` owns/releases in-memory relocated TinyCC modules.
+ * - Descriptor structs (`ducktinycc_list_t`/`array_t`/`struct_t`/`map_t`/`union_t`) are borrowed views, never freed by wrappers.
+ */
+
 #include "duckdb_extension.h"
 #include "tcc_module.h"
 
@@ -27,12 +63,261 @@
 
 DUCKDB_EXTENSION_EXTERN
 
+/* BEGIN: TCC_FUNCTION_CATALOG
+ * Function Catalog (`src/tcc_module.c`)
+ *
+ * Scope: complete function list compiled from this translation unit.
+ * Purpose: quick ownership/audit reference when changing runtime, codegen, and bridge logic.
+ */
+/* - RegisterTccModuleFunction: Registers `tcc_module` plus diagnostic/probe table functions on a DuckDB connection. */
+/* - destroy_tcc_diag_bind_data: Destructor callback for bind/init/state allocations owned by DuckDB function/table contexts. */
+/* - destroy_tcc_diag_init_data: Destructor callback for bind/init/state allocations owned by DuckDB function/table contexts. */
+/* - destroy_tcc_module_bind_data: Destructor callback for bind/init/state allocations owned by DuckDB function/table contexts. */
+/* - destroy_tcc_module_init_data: Destructor callback for bind/init/state allocations owned by DuckDB function/table contexts. */
+/* - destroy_tcc_module_state: Destructor callback for bind/init/state allocations owned by DuckDB function/table contexts. */
+/* - ducktinycc_array_elem_ptr: ARRAY descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_array_is_valid: ARRAY descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_buf_ptr_at: Range-checked pointer lookup inside raw byte buffers. */
+/* - ducktinycc_buf_ptr_at_mut: Range-checked pointer lookup inside raw byte buffers. */
+/* - ducktinycc_list_elem_ptr: LIST descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_list_is_valid: LIST descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_map_key_is_valid: MAP descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_map_key_ptr: MAP descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_map_value_is_valid: MAP descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_map_value_ptr: MAP descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_ptr_add: Pointer arithmetic helper for generated wrapper code. */
+/* - ducktinycc_ptr_add_mut: Pointer arithmetic helper for generated wrapper code. */
+/* - ducktinycc_read_bytes: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_f32: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_f64: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_i16: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_i32: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_i64: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_i8: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_ptr: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_u16: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_u32: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_u64: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_read_u8: Typed read helper from raw memory or bridge descriptors. */
+/* - ducktinycc_register_signature: Registers a generated wrapper symbol as a DuckDB scalar UDF with parsed type metadata. */
+/* - ducktinycc_span_contains: Bounds-check helper used by pointer/bridge accessors. */
+/* - ducktinycc_span_fits: Bounds-check helper used by pointer/bridge accessors. */
+/* - ducktinycc_struct_field_is_valid: STRUCT descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_struct_field_ptr: STRUCT descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_valid_is_set: Validity bitmap helper for generated wrappers and bridge descriptors. */
+/* - ducktinycc_valid_set: Validity bitmap helper for generated wrappers and bridge descriptors. */
+/* - ducktinycc_write_bytes: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_f32: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_f64: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_i16: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_i32: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_i64: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_i8: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_ptr: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_u16: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_u32: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_u64: Typed write helper into raw memory or bridge descriptors. */
+/* - ducktinycc_write_u8: Typed write helper into raw memory or bridge descriptors. */
+/* - register_tcc_library_probe_function: Registers extension helper functions/tables into DuckDB. */
+/* - register_tcc_pointer_helper_functions: Registers extension helper functions/tables into DuckDB. */
+/* - register_tcc_system_paths_function: Registers extension helper functions/tables into DuckDB. */
+/* - tcc_add_host_symbols: Registers host-exported symbols into each TinyCC state for generated wrappers. */
+/* - tcc_add_platform_library_paths: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_alloc_scalar: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_append_env_path_list: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_append_error: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_apply_bind_overrides_to_state: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_apply_session_to_state: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_artifact_destroy: Releases compiled TinyCC module artifact resources. */
+/* - tcc_basename_ptr: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_bind_read_named_arg_types: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_bind_read_named_varchar: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_build_c_composite_bindings: Builder helper for bridge objects, helper source/bindings, module artifacts, or search candidates. */
+/* - tcc_build_c_enum_bindings: Builder helper for bridge objects, helper source/bindings, module artifacts, or search candidates. */
+/* - tcc_build_library_candidates: Builder helper for bridge objects, helper source/bindings, module artifacts, or search candidates. */
+/* - tcc_build_module_artifact: Builder helper for bridge objects, helper source/bindings, module artifacts, or search candidates. */
+/* - tcc_build_struct_bridge_from_vector: Builder helper for bridge objects, helper source/bindings, module artifacts, or search candidates. */
+/* - tcc_build_value_bridge: Builder helper for bridge objects, helper source/bindings, module artifacts, or search candidates. */
+/* - tcc_c_field_list_append: Dynamic field metadata list utility for c_struct/c_union/c_bitfield helper codegen. */
+/* - tcc_c_field_list_destroy: Dynamic field metadata list utility for c_struct/c_union/c_bitfield helper codegen. */
+/* - tcc_c_field_list_reserve: Dynamic field metadata list utility for c_struct/c_union/c_bitfield helper codegen. */
+/* - tcc_codegen_build_compilation_unit: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_classify_error_message: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_compile_and_load_module: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_generate_wrapper_source: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_prepare_sources: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_signature_ctx_destroy: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_signature_ctx_init: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_signature_parse_types: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_signature_parse_wrapper_mode: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_source_ctx_destroy: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_codegen_source_ctx_init: Code generation helper for wrapper source assembly, classification, and compile/load flow. */
+/* - tcc_collect_include_paths: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_collect_library_search_paths: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_compile_generated_binding: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_configure_runtime_paths: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_copy_duckdb_string_as_cstr: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_dataptr_scalar: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_default_runtime_path: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_diag_rows_add: Diagnostic row buffer utility used by probe/system-path table functions. */
+/* - tcc_diag_rows_destroy: Diagnostic row buffer utility used by probe/system-path table functions. */
+/* - tcc_diag_rows_reserve: Diagnostic row buffer utility used by probe/system-path table functions. */
+/* - tcc_diag_set_result_schema: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_diag_table_function: DuckDB bind/init/execute callback for module or diagnostics/probe table functions. */
+/* - tcc_diag_table_init: DuckDB bind/init/execute callback for module or diagnostics/probe table functions. */
+/* - tcc_duckdb_string_to_blob: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_effective_sql_name: Resolves effective symbol/SQL name from bind args and session defaults. */
+/* - tcc_effective_symbol: Resolves effective symbol/SQL name from bind args and session defaults. */
+/* - tcc_equals_ci: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_execute_compiled_scalar_udf: Main runtime bridge for executing compiled row/batch wrappers and marshaling values. */
+/* - tcc_ffi_array_child_type: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_ffi_array_type_from_child: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_ffi_list_child_type: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_ffi_list_type_from_child: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_ffi_type_create_logical_type: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_is_array: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_is_fixed_width_scalar: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_is_list: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_is_map: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_is_struct: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_is_union: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_size: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_to_c_type_name: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_to_duckdb_type: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_ffi_type_to_token: FFI type conversion helper across tokens, C types, DuckDB logical types, and byte widths. */
+/* - tcc_find_top_level_char: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_format_cstr: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_free_ptr_scalar: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_generate_c_composite_helpers_source: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_generate_c_enum_helpers_source: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_get_ptr_registry: Fetches pointer registry from scalar function context, reporting errors to DuckDB on failure. */
+/* - tcc_has_library_suffix: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_helper_binding_list_add: Dynamic helper-binding list utility for generated helper UDF registration. */
+/* - tcc_helper_binding_list_add_prefixed: Dynamic helper-binding list utility for generated helper UDF registration. */
+/* - tcc_helper_binding_list_destroy: Dynamic helper-binding list utility for generated helper UDF registration. */
+/* - tcc_helper_binding_list_reserve: Dynamic helper-binding list utility for generated helper UDF registration. */
+/* - tcc_host_sig_ctx_destroy: Releases UDF signature context, including parsed type metadata and descriptors. */
+/* - tcc_is_identifier_token: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_is_path_like: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_library_link_name_from_path: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_library_probe_bind: DuckDB bind/init/execute callback for module or diagnostics/probe table functions. */
+/* - tcc_map_meta_array_destroy: MAP metadata lifecycle helper for parsed signatures. */
+/* - tcc_map_meta_destroy: MAP metadata lifecycle helper for parsed signatures. */
+/* - tcc_mode_requires_write_lock: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_module_bind: DuckDB bind/init/execute callback for module or diagnostics/probe table functions. */
+/* - tcc_module_function: DuckDB bind/init/execute callback for module or diagnostics/probe table functions. */
+/* - tcc_module_init: DuckDB bind/init/execute callback for module or diagnostics/probe table functions. */
+/* - tcc_nested_struct_bridge_destroy: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_next_top_level_part: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_parse_c_enum_constants: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_parse_c_field_spec_token: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_parse_c_field_specs: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_parse_map_meta_token: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_parse_signature: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_parse_struct_meta_token: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_parse_type_token: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_parse_union_meta_token: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_parse_wrapper_mode: Parser helper for signatures, wrapper mode, C helper field specs, or nested type tokens. */
+/* - tcc_path_exists: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_path_join: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_ptr_add_scalar: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_ptr_helper_ctx_destroy: Destructor for scalar helper extra-info context holding pointer registry references. */
+/* - tcc_ptr_registry_alloc: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_create: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_destroy: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_find_handle_unlocked: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_free: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_get_ptr_size: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_lock: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_read: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_ref: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_reserve_unlocked: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_unlock: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_unref: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_registry_write: Pointer registry allocator/lookup/IO primitive for `tcc_alloc` and pointer helper UDFs. */
+/* - tcc_ptr_size_scalar: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_ptr_span_fits: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_read_bytes_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_f32_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_f64_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_i16_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_i32_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_i64_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_i8_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_u16_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_u32_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_u64_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_read_u8_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_register_pointer_scalar: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_registry_entry_destroy_metadata: Compiled-artifact metadata registry helper for SQL name to artifact lookup/storage. */
+/* - tcc_registry_find_sql_name: Compiled-artifact metadata registry helper for SQL name to artifact lookup/storage. */
+/* - tcc_registry_reserve: Compiled-artifact metadata registry helper for SQL name to artifact lookup/storage. */
+/* - tcc_registry_store_metadata: Compiled-artifact metadata registry helper for SQL name to artifact lookup/storage. */
+/* - tcc_rwlock_init: Spin-based read/write lock primitive for extension state coordination. */
+/* - tcc_rwlock_read_lock: Spin-based read/write lock primitive for extension state coordination. */
+/* - tcc_rwlock_read_unlock: Spin-based read/write lock primitive for extension state coordination. */
+/* - tcc_rwlock_write_lock: Spin-based read/write lock primitive for extension state coordination. */
+/* - tcc_rwlock_write_unlock: Spin-based read/write lock primitive for extension state coordination. */
+/* - tcc_session_clear_bind: Session state helper for runtime path, staged sources, and symbol bindings. */
+/* - tcc_session_clear_build_state: Session state helper for runtime path, staged sources, and symbol bindings. */
+/* - tcc_session_runtime_path: Session state helper for runtime path, staged sources, and symbol bindings. */
+/* - tcc_session_set_runtime_path: Session state helper for runtime path, staged sources, and symbol bindings. */
+/* - tcc_set_error: Value/error/validity setter helper for vectors and diagnostics output. */
+/* - tcc_set_output_row_null: Value/error/validity setter helper for vectors and diagnostics output. */
+/* - tcc_set_varchar_col: Value/error/validity setter helper for vectors and diagnostics output. */
+/* - tcc_set_vector_row_validity: Value/error/validity setter helper for vectors and diagnostics output. */
+/* - tcc_skip_space: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_split_csv_tokens: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_strdup: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_string_ends_with: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_string_equals_path: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_string_list_append: Dynamic string list container utility (reserve/append/destroy/rollback/uniqueness). */
+/* - tcc_string_list_append_unique: Dynamic string list container utility (reserve/append/destroy/rollback/uniqueness). */
+/* - tcc_string_list_contains: Dynamic string list container utility (reserve/append/destroy/rollback/uniqueness). */
+/* - tcc_string_list_destroy: Dynamic string list container utility (reserve/append/destroy/rollback/uniqueness). */
+/* - tcc_string_list_pop_last: Dynamic string list container utility (reserve/append/destroy/rollback/uniqueness). */
+/* - tcc_string_list_reserve: Dynamic string list container utility (reserve/append/destroy/rollback/uniqueness). */
+/* - tcc_struct_meta_array_destroy: STRUCT metadata lifecycle helper for parsed signatures. */
+/* - tcc_struct_meta_destroy: STRUCT metadata lifecycle helper for parsed signatures. */
+/* - tcc_system_paths_bind: DuckDB bind/init/execute callback for module or diagnostics/probe table functions. */
+/* - tcc_text_buf_appendf: Growable text buffer utility used by code generation paths. */
+/* - tcc_text_buf_destroy: Growable text buffer utility used by code generation paths. */
+/* - tcc_text_buf_reserve: Growable text buffer utility used by code generation paths. */
+/* - tcc_trim_inplace: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_try_resolve_candidate: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_typedesc_create_logical_type: Recursive typedesc parser/converter used for nested SQL/C type bridging. */
+/* - tcc_typedesc_destroy: Recursive typedesc parser/converter used for nested SQL/C type bridging. */
+/* - tcc_typedesc_is_composite: Recursive typedesc parser/converter used for nested SQL/C type bridging. */
+/* - tcc_typedesc_parse_token: Recursive typedesc parser/converter used for nested SQL/C type bridging. */
+/* - tcc_union_meta_array_destroy: UNION metadata lifecycle helper for parsed signatures. */
+/* - tcc_union_meta_destroy: UNION metadata lifecycle helper for parsed signatures. */
+/* - tcc_valid_input_row: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_validity_set_all: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_value_bridge_destroy: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_wrapper_mode_token: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
+/* - tcc_write_bytes_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_f32_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_f64_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_i16_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_i32_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_i64_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_i8_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_row: Internal helper in the TinyCC module/runtime pipeline. */
+/* - tcc_write_u16_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_u32_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_u64_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_u8_scalar: Scalar UDF implementation for pointer/memory helper SQL functions. */
+/* - tcc_write_value_to_vector: Internal helper in the TinyCC module/runtime pipeline. */
+/* END: TCC_FUNCTION_CATALOG */
+
+/* Generic growable list of owned strings. */
 typedef struct {
 	char **items;
 	idx_t count;
 	idx_t capacity;
 } tcc_string_list_t;
 
+/* Minimal spin-based RW lock for connection-local module state. */
 typedef struct {
 	atomic_bool writer;
 	atomic_uint readers;
@@ -46,6 +331,11 @@ typedef struct {
 	bool owned;
 } tcc_ptr_entry_t;
 
+/* Process-global pointer registry used by SQL helpers (`tcc_alloc`/`tcc_free_ptr`).
+ * Ownership contract:
+ * - `owned=true`: registry owns allocation and frees with libc `free`.
+ * - `owned=false`: borrowed pointer; registry only tracks metadata.
+ */
 typedef struct {
 	atomic_uint ref_count;
 	atomic_flag lock;
@@ -55,6 +345,7 @@ typedef struct {
 	uint64_t next_handle;
 } tcc_ptr_registry_t;
 
+/* Mutable per-connection TinyCC build session (staged inputs + bind defaults). */
 typedef struct {
 	char *runtime_path;
 	char *bound_symbol;
@@ -72,6 +363,7 @@ typedef struct {
 	uint64_t state_id;
 } tcc_session_t;
 
+/* Internal FFI type universe used across parser, codegen, and runtime bridge. */
 typedef enum {
 	TCC_FFI_VOID = 0,
 	TCC_FFI_BOOL = 1,
@@ -135,6 +427,7 @@ typedef enum {
 	TCC_FFI_ARRAY_DECIMAL = 112
 } tcc_ffi_type_t;
 
+/* Scalar bridge value types (layout-compatible with DuckDB C API primitives). */
 typedef struct {
 	uint64_t lower;
 	int64_t upper;
@@ -169,6 +462,10 @@ typedef struct {
 	ducktinycc_hugeint_t value;
 } ducktinycc_decimal_t;
 
+/* Composite bridge descriptors are borrowed views over DuckDB vectors.
+ * The generated wrapper must not free or persist these pointers after the call.
+ * `offset` is a global row offset for validity/indexing into child vectors.
+ */
 typedef struct {
 	const void *ptr;
 	const uint64_t *validity;
@@ -207,17 +504,20 @@ typedef struct {
 	uint64_t offset;
 } ducktinycc_union_t;
 
+/* Wrapper ABI mode for generated C entrypoints. */
 typedef enum {
 	TCC_WRAPPER_MODE_ROW = 0,
 	TCC_WRAPPER_MODE_BATCH = 1
 } tcc_wrapper_mode_t;
 
+/* Function pointer shapes exported by generated modules. */
 typedef bool (*tcc_dynamic_init_fn_t)(duckdb_connection connection);
 typedef bool (*tcc_host_row_wrapper_fn_t)(void **args, void *out_value, bool *out_is_null);
 typedef bool (*tcc_host_batch_wrapper_fn_t)(void **arg_data, uint64_t **arg_validity, uint64_t count, void *out_data,
                                             uint64_t *out_validity);
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
+/* Owns one relocated TinyCC module artifact and its init symbol. */
 typedef struct {
 	TCCState *tcc;
 	bool is_module;
@@ -228,6 +528,7 @@ typedef struct {
 } tcc_registered_artifact_t;
 #endif
 
+/* Registry entry mapping SQL name to compiled module metadata. */
 typedef struct {
 	char *sql_name;
 	char *symbol;
@@ -237,6 +538,7 @@ typedef struct {
 #endif
 } tcc_registered_entry_t;
 
+/* Root extension state stored as table-function extra info. */
 typedef struct {
 	duckdb_connection connection;
 	duckdb_database database;
@@ -248,6 +550,7 @@ typedef struct {
 	idx_t entry_capacity;
 } tcc_module_state_t;
 
+/* Parsed named arguments for one `tcc_module(...)` invocation. */
 typedef struct {
 	char *mode;
 	char *runtime_path;
@@ -267,16 +570,20 @@ typedef struct {
 	char *define_value;
 } tcc_module_bind_data_t;
 
+/* Per-scan init state: ensures table-function emits once. */
 typedef struct {
 	atomic_bool emitted;
 } tcc_module_init_data_t;
 
+/* Shared error buffer for parser/codegen/compile diagnostics. */
 typedef struct {
 	char message[4096];
 } tcc_error_buffer_t;
 
+/* Forward declaration for recursive type descriptor tree. */
 typedef struct tcc_typedesc tcc_typedesc_t;
 
+/* Parsed STRUCT signature metadata (flat representation). */
 typedef struct {
 	int field_count;
 	char **field_names;
@@ -285,6 +592,7 @@ typedef struct {
 	size_t *field_sizes;
 } tcc_ffi_struct_meta_t;
 
+/* Parsed MAP signature metadata. */
 typedef struct {
 	char *key_token;
 	char *value_token;
@@ -294,6 +602,7 @@ typedef struct {
 	size_t value_size;
 } tcc_ffi_map_meta_t;
 
+/* Parsed UNION signature metadata (flat representation). */
 typedef struct {
 	int member_count;
 	char **member_names;
@@ -302,6 +611,7 @@ typedef struct {
 	size_t *member_sizes;
 } tcc_ffi_union_meta_t;
 
+/* Runtime UDF signature context attached to DuckDB scalar function extra info. */
 typedef struct {
 	tcc_wrapper_mode_t wrapper_mode;
 	tcc_host_row_wrapper_fn_t row_wrapper;
@@ -322,6 +632,7 @@ typedef struct {
 	tcc_typedesc_t **arg_descs;
 } tcc_host_sig_ctx_t;
 
+/* Nested bridge container variants for recursive composite marshalling. */
 typedef enum {
 	TCC_NESTED_BRIDGE_STRUCT = 1,
 	TCC_NESTED_BRIDGE_LIST = 2,
@@ -329,6 +640,7 @@ typedef enum {
 	TCC_NESTED_BRIDGE_MAP = 4
 } tcc_nested_bridge_kind_t;
 
+/* Cached nested STRUCT/collection bridge built from DuckDB vectors. */
 typedef struct tcc_nested_struct_bridge {
 	tcc_nested_bridge_kind_t kind;
 	ducktinycc_struct_t *rows;
@@ -339,6 +651,7 @@ typedef struct tcc_nested_struct_bridge {
 	uint64_t *row_validity_mask;
 } tcc_nested_struct_bridge_t;
 
+/* Generic recursive value bridge used for inputs and outputs. */
 typedef struct tcc_value_bridge tcc_value_bridge_t;
 struct tcc_value_bridge {
 	const tcc_typedesc_t *desc;
@@ -354,6 +667,7 @@ struct tcc_value_bridge {
 	idx_t child_count;
 };
 
+/* One diagnostics table row. */
 typedef struct {
 	char *kind;
 	char *key;
@@ -362,24 +676,29 @@ typedef struct {
 	char *detail;
 } tcc_diag_row_t;
 
+/* Growable diagnostics row collection. */
 typedef struct {
 	tcc_diag_row_t *rows;
 	idx_t count;
 	idx_t capacity;
 } tcc_diag_rows_t;
 
+/* Bind payload for diagnostics table functions. */
 typedef struct {
 	tcc_diag_rows_t rows;
 } tcc_diag_bind_data_t;
 
+/* Init payload for diagnostics table functions (streaming row cursor). */
 typedef struct {
 	atomic_uint_fast64_t offset;
 } tcc_diag_init_data_t;
 
+/* Extra-info payload for pointer helper scalar UDFs. */
 typedef struct {
 	tcc_ptr_registry_t *registry;
 } tcc_ptr_helper_ctx_t;
 
+/* Parsed c_struct/c_union/c_bitfield field specification. */
 typedef struct {
 	char *name;
 	tcc_ffi_type_t type;
@@ -387,12 +706,14 @@ typedef struct {
 	bool is_bitfield;
 } tcc_c_field_spec_t;
 
+/* Growable field-spec list for helper codegen. */
 typedef struct {
 	tcc_c_field_spec_t *items;
 	idx_t count;
 	idx_t capacity;
 } tcc_c_field_list_t;
 
+/* One generated helper binding description (symbol + SQL signature). */
 typedef struct {
 	char *symbol;
 	char *sql_name;
@@ -400,12 +721,14 @@ typedef struct {
 	char *arg_types_csv;
 } tcc_helper_binding_t;
 
+/* Growable generated helper binding list. */
 typedef struct {
 	tcc_helper_binding_t *items;
 	idx_t count;
 	idx_t capacity;
 } tcc_helper_binding_list_t;
 
+/* Recursive typedesc node kinds. */
 typedef enum {
 	TCC_TYPEDESC_PRIMITIVE = 1,
 	TCC_TYPEDESC_LIST = 2,
@@ -415,11 +738,13 @@ typedef enum {
 	TCC_TYPEDESC_UNION = 6
 } tcc_typedesc_kind_t;
 
+/* Named child node in STRUCT/UNION typedesc nodes. */
 typedef struct {
 	char *name;
 	tcc_typedesc_t *type;
 } tcc_typedesc_field_t;
 
+/* Recursive parsed type descriptor tree for nested signature grammar. */
 struct tcc_typedesc {
 	tcc_typedesc_kind_t kind;
 	tcc_ffi_type_t ffi_type;
@@ -444,6 +769,7 @@ struct tcc_typedesc {
 	} as;
 };
 
+/* Codegen signature context derived from bind arguments. */
 typedef struct {
 	tcc_ffi_type_t return_type;
 	size_t return_array_size;
@@ -460,6 +786,7 @@ typedef struct {
 	int arg_count;
 } tcc_codegen_signature_ctx_t;
 
+/* Codegen source context (wrapper source + compilation unit + module symbol). */
 typedef struct {
 	tcc_codegen_signature_ctx_t signature;
 	char module_symbol[128];
@@ -467,6 +794,7 @@ typedef struct {
 	char *compilation_unit_source;
 } tcc_codegen_source_ctx_t;
 
+/* Forward declarations grouped by subsystem (parser/types/bridge/codegen). */
 static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
 		                                size_t *out_return_array_size, tcc_ffi_type_t **out_arg_types,
 		                                size_t **out_arg_array_sizes, tcc_ffi_struct_meta_t *out_return_struct_meta,
@@ -546,6 +874,7 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
                                                  const tcc_ffi_type_t *arg_types, int arg_count);
 static char *tcc_codegen_build_compilation_unit(const char *user_source, const char *wrapper_loader_source);
 
+/* RW-lock primitives used to guard shared module/session state during mode execution. */
 static void tcc_rwlock_init(tcc_rwlock_t *lock) {
 	if (!lock) {
 		return;
@@ -555,6 +884,7 @@ static void tcc_rwlock_init(tcc_rwlock_t *lock) {
 	atomic_store_explicit(&lock->pending_writers, 0, memory_order_relaxed);
 }
 
+/* tcc_rwlock_read_lock: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_rwlock_read_lock(tcc_rwlock_t *lock) {
 	if (!lock) {
 		return;
@@ -572,6 +902,7 @@ static void tcc_rwlock_read_lock(tcc_rwlock_t *lock) {
 	}
 }
 
+/* tcc_rwlock_read_unlock: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_rwlock_read_unlock(tcc_rwlock_t *lock) {
 	if (!lock) {
 		return;
@@ -579,6 +910,7 @@ static void tcc_rwlock_read_unlock(tcc_rwlock_t *lock) {
 	atomic_fetch_sub_explicit(&lock->readers, 1, memory_order_release);
 }
 
+/* tcc_rwlock_write_lock: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_rwlock_write_lock(tcc_rwlock_t *lock) {
 	bool expected = false;
 	if (!lock) {
@@ -597,6 +929,7 @@ static void tcc_rwlock_write_lock(tcc_rwlock_t *lock) {
 	atomic_fetch_sub_explicit(&lock->pending_writers, 1, memory_order_release);
 }
 
+/* tcc_rwlock_write_unlock: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_rwlock_write_unlock(tcc_rwlock_t *lock) {
 	if (!lock) {
 		return;
@@ -604,6 +937,7 @@ static void tcc_rwlock_write_unlock(tcc_rwlock_t *lock) {
 	atomic_store_explicit(&lock->writer, false, memory_order_release);
 }
 
+/* Pointer-registry primitives backing `tcc_alloc` and pointer helper scalar UDFs. */
 static void tcc_ptr_registry_lock(tcc_ptr_registry_t *registry) {
 	if (!registry) {
 		return;
@@ -612,6 +946,7 @@ static void tcc_ptr_registry_lock(tcc_ptr_registry_t *registry) {
 	}
 }
 
+/* tcc_ptr_registry_unlock: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_ptr_registry_unlock(tcc_ptr_registry_t *registry) {
 	if (!registry) {
 		return;
@@ -631,6 +966,7 @@ static tcc_ptr_registry_t *tcc_ptr_registry_create(void) {
 	return registry;
 }
 
+/* tcc_ptr_registry_destroy: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_ptr_registry_destroy(tcc_ptr_registry_t *registry) {
 	idx_t i;
 	if (!registry) {
@@ -647,6 +983,7 @@ static void tcc_ptr_registry_destroy(tcc_ptr_registry_t *registry) {
 	duckdb_free(registry);
 }
 
+/* tcc_ptr_registry_ref: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_ptr_registry_ref(tcc_ptr_registry_t *registry) {
 	if (!registry) {
 		return;
@@ -654,6 +991,7 @@ static void tcc_ptr_registry_ref(tcc_ptr_registry_t *registry) {
 	atomic_fetch_add_explicit(&registry->ref_count, 1, memory_order_relaxed);
 }
 
+/* tcc_ptr_registry_unref: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_ptr_registry_unref(tcc_ptr_registry_t *registry) {
 	if (!registry) {
 		return;
@@ -663,6 +1001,7 @@ static void tcc_ptr_registry_unref(tcc_ptr_registry_t *registry) {
 	}
 }
 
+/* tcc_ptr_registry_find_handle_unlocked: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static idx_t tcc_ptr_registry_find_handle_unlocked(tcc_ptr_registry_t *registry, uint64_t handle) {
 	idx_t i;
 	if (!registry || handle == 0) {
@@ -676,6 +1015,7 @@ static idx_t tcc_ptr_registry_find_handle_unlocked(tcc_ptr_registry_t *registry,
 	return (idx_t)-1;
 }
 
+/* tcc_ptr_registry_reserve_unlocked: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ptr_registry_reserve_unlocked(tcc_ptr_registry_t *registry, idx_t wanted) {
 	tcc_ptr_entry_t *new_entries;
 	idx_t new_capacity;
@@ -706,6 +1046,7 @@ static bool tcc_ptr_registry_reserve_unlocked(tcc_ptr_registry_t *registry, idx_
 	return true;
 }
 
+/* tcc_ptr_span_fits: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ptr_span_fits(uint64_t len, uint64_t offset, uint64_t width) {
 	if (offset > len) {
 		return false;
@@ -713,6 +1054,7 @@ static bool tcc_ptr_span_fits(uint64_t len, uint64_t offset, uint64_t width) {
 	return width <= (len - offset);
 }
 
+/* tcc_ptr_registry_alloc: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_ptr_registry_alloc(tcc_ptr_registry_t *registry, uint64_t size, uint64_t *out_handle) {
 	void *ptr;
 	tcc_ptr_entry_t *entry;
@@ -746,6 +1088,7 @@ static bool tcc_ptr_registry_alloc(tcc_ptr_registry_t *registry, uint64_t size, 
 	return true;
 }
 
+/* tcc_ptr_registry_free: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static bool tcc_ptr_registry_free(tcc_ptr_registry_t *registry, uint64_t handle) {
 	void *ptr = NULL;
 	bool owned = false;
@@ -775,6 +1118,7 @@ static bool tcc_ptr_registry_free(tcc_ptr_registry_t *registry, uint64_t handle)
 	return true;
 }
 
+/* tcc_ptr_registry_get_ptr_size: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ptr_registry_get_ptr_size(tcc_ptr_registry_t *registry, uint64_t handle, uintptr_t *out_ptr,
                                           uint64_t *out_size) {
 	idx_t idx;
@@ -797,6 +1141,7 @@ static bool tcc_ptr_registry_get_ptr_size(tcc_ptr_registry_t *registry, uint64_t
 	return true;
 }
 
+/* tcc_ptr_registry_read: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ptr_registry_read(tcc_ptr_registry_t *registry, uint64_t handle, uint64_t offset, void *out,
                                   uint64_t width) {
 	idx_t idx;
@@ -817,6 +1162,7 @@ static bool tcc_ptr_registry_read(tcc_ptr_registry_t *registry, uint64_t handle,
 	return true;
 }
 
+/* tcc_ptr_registry_write: State/registry primitive used by runtime and helper UDFs. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ptr_registry_write(tcc_ptr_registry_t *registry, uint64_t handle, uint64_t offset, const void *in,
                                    uint64_t width) {
 	idx_t idx;
@@ -837,6 +1183,7 @@ static bool tcc_ptr_registry_write(tcc_ptr_registry_t *registry, uint64_t handle
 	return true;
 }
 
+/* tcc_ptr_helper_ctx_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_ptr_helper_ctx_destroy(void *ptr) {
 	tcc_ptr_helper_ctx_t *ctx = (tcc_ptr_helper_ctx_t *)ptr;
 	if (!ctx) {
@@ -846,10 +1193,12 @@ static void tcc_ptr_helper_ctx_destroy(void *ptr) {
 	duckdb_free(ctx);
 }
 
+/* Vector validity helpers for scalar UDF implementations. */
 static bool tcc_valid_input_row(uint64_t *validity, idx_t row) {
 	return !validity || duckdb_validity_row_is_valid(validity, row);
 }
 
+/* tcc_set_output_row_null: Vector validity/error/output helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_set_output_row_null(uint64_t *validity, idx_t row) {
 	if (!validity) {
 		return;
@@ -866,6 +1215,7 @@ static tcc_ptr_registry_t *tcc_get_ptr_registry(duckdb_function_info info) {
 	return ctx->registry;
 }
 
+/* Pointer helper SQL functions (`tcc_alloc`, `tcc_free_ptr`, `tcc_dataptr`, reads/writes). */
 static void tcc_alloc_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
 	idx_t row_count;
@@ -896,6 +1246,7 @@ static void tcc_alloc_scalar(duckdb_function_info info, duckdb_data_chunk input,
 	}
 }
 
+/* tcc_free_ptr_scalar: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static void tcc_free_ptr_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
 	idx_t row_count;
@@ -925,6 +1276,7 @@ static void tcc_free_ptr_scalar(duckdb_function_info info, duckdb_data_chunk inp
 	}
 }
 
+/* tcc_dataptr_scalar: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static void tcc_dataptr_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
 	idx_t row_count;
@@ -956,6 +1308,7 @@ static void tcc_dataptr_scalar(duckdb_function_info info, duckdb_data_chunk inpu
 	}
 }
 
+/* tcc_ptr_size_scalar: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static void tcc_ptr_size_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
 	idx_t row_count;
@@ -987,6 +1340,7 @@ static void tcc_ptr_size_scalar(duckdb_function_info info, duckdb_data_chunk inp
 	}
 }
 
+/* tcc_ptr_add_scalar: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static void tcc_ptr_add_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	idx_t row_count = duckdb_data_chunk_get_size(input);
 	idx_t row;
@@ -1121,6 +1475,7 @@ TCC_DEFINE_PTR_WRITE_SCALAR(f64, double)
 #undef TCC_DEFINE_PTR_READ_SCALAR
 #undef TCC_DEFINE_PTR_WRITE_SCALAR
 
+/* tcc_read_bytes_scalar: Pointer helper scalar UDF implementation. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static void tcc_read_bytes_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
 	idx_t row_count;
@@ -1182,6 +1537,7 @@ static void tcc_read_bytes_scalar(duckdb_function_info info, duckdb_data_chunk i
 	}
 }
 
+/* tcc_write_bytes_scalar: Pointer helper scalar UDF implementation. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static void tcc_write_bytes_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	tcc_ptr_registry_t *registry = tcc_get_ptr_registry(info);
 	idx_t row_count;
@@ -1232,6 +1588,7 @@ static void tcc_write_bytes_scalar(duckdb_function_info info, duckdb_data_chunk 
 	}
 }
 
+/* tcc_register_pointer_scalar: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static bool tcc_register_pointer_scalar(duckdb_connection connection, const char *name, duckdb_scalar_function_t fn_ptr,
                                         duckdb_type return_type, const duckdb_type *arg_types, idx_t arg_count,
                                         tcc_ptr_registry_t *registry) {
@@ -1307,6 +1664,7 @@ static bool tcc_register_pointer_scalar(duckdb_connection connection, const char
 	return true;
 }
 
+/* register_tcc_pointer_helper_functions: Registers extension SQL helper/table functions. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool register_tcc_pointer_helper_functions(duckdb_connection connection, tcc_ptr_registry_t *registry) {
 	static const duckdb_type sig_u64[] = {DUCKDB_TYPE_UBIGINT};
 	static const duckdb_type sig_u64_u64[] = {DUCKDB_TYPE_UBIGINT, DUCKDB_TYPE_UBIGINT};
@@ -1398,6 +1756,7 @@ typedef struct {
 	size_t capacity;
 } tcc_text_buf_t;
 
+/* tcc_text_buf_destroy: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_text_buf_destroy(tcc_text_buf_t *buf) {
 	if (!buf) {
 		return;
@@ -1410,6 +1769,7 @@ static void tcc_text_buf_destroy(tcc_text_buf_t *buf) {
 	buf->capacity = 0;
 }
 
+/* tcc_text_buf_reserve: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_text_buf_reserve(tcc_text_buf_t *buf, size_t wanted) {
 	char *new_data;
 	size_t new_cap;
@@ -1444,6 +1804,7 @@ static bool tcc_text_buf_reserve(tcc_text_buf_t *buf, size_t wanted) {
 	return true;
 }
 
+/* tcc_text_buf_appendf: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_text_buf_appendf(tcc_text_buf_t *buf, const char *fmt, ...) {
 	va_list args;
 	va_list args_copy;
@@ -1485,6 +1846,7 @@ static char *tcc_trim_inplace(char *value) {
 	return value;
 }
 
+/* tcc_c_field_list_destroy: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_c_field_list_destroy(tcc_c_field_list_t *fields) {
 	idx_t i;
 	if (!fields) {
@@ -1503,6 +1865,7 @@ static void tcc_c_field_list_destroy(tcc_c_field_list_t *fields) {
 	fields->capacity = 0;
 }
 
+/* tcc_c_field_list_reserve: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_c_field_list_reserve(tcc_c_field_list_t *fields, idx_t wanted) {
 	tcc_c_field_spec_t *new_items;
 	idx_t new_capacity;
@@ -1533,6 +1896,7 @@ static bool tcc_c_field_list_reserve(tcc_c_field_list_t *fields, idx_t wanted) {
 	return true;
 }
 
+/* tcc_c_field_list_append: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_c_field_list_append(tcc_c_field_list_t *fields, const tcc_c_field_spec_t *field) {
 	if (!fields || !field) {
 		return false;
@@ -1545,6 +1909,7 @@ static bool tcc_c_field_list_append(tcc_c_field_list_t *fields, const tcc_c_fiel
 	return true;
 }
 
+/* tcc_helper_binding_list_destroy: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_helper_binding_list_destroy(tcc_helper_binding_list_t *bindings) {
 	idx_t i;
 	if (!bindings) {
@@ -1572,6 +1937,7 @@ static void tcc_helper_binding_list_destroy(tcc_helper_binding_list_t *bindings)
 	bindings->capacity = 0;
 }
 
+/* tcc_helper_binding_list_reserve: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_helper_binding_list_reserve(tcc_helper_binding_list_t *bindings, idx_t wanted) {
 	tcc_helper_binding_t *new_items;
 	idx_t new_capacity;
@@ -1602,6 +1968,7 @@ static bool tcc_helper_binding_list_reserve(tcc_helper_binding_list_t *bindings,
 	return true;
 }
 
+/* tcc_helper_binding_list_add: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_helper_binding_list_add(tcc_helper_binding_list_t *bindings, const char *symbol, const char *sql_name,
                                         const char *return_type, const char *arg_types_csv) {
 	tcc_helper_binding_t entry;
@@ -1636,6 +2003,7 @@ static bool tcc_helper_binding_list_add(tcc_helper_binding_list_t *bindings, con
 	return true;
 }
 
+/* tcc_append_error: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_append_error(void *opaque, const char *msg) {
 	tcc_error_buffer_t *buffer = (tcc_error_buffer_t *)opaque;
 	size_t cur;
@@ -1651,6 +2019,7 @@ static void tcc_append_error(void *opaque, const char *msg) {
 	snprintf(buffer->message + cur, left, "%s%s", cur > 0 ? " | " : "", msg);
 }
 
+/* tcc_set_error: Vector validity/error/output helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_set_error(tcc_error_buffer_t *error_buf, const char *message) {
 	if (!error_buf || !message) {
 		return;
@@ -1666,10 +2035,12 @@ static const char *tcc_default_runtime_path(void) {
 #endif
 }
 
+/* tcc_path_exists: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_path_exists(const char *path) {
 	return path && path[0] != '\0' && TCC_ACCESS(path, TCC_ACCESS_FOK) == 0;
 }
 
+/* tcc_string_ends_with: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_string_ends_with(const char *value, const char *suffix) {
 	size_t value_len;
 	size_t suffix_len;
@@ -1684,6 +2055,7 @@ static bool tcc_string_ends_with(const char *value, const char *suffix) {
 	return strcmp(value + value_len - suffix_len, suffix) == 0;
 }
 
+/* tcc_diag_rows_reserve: Diagnostics/probe table-function helper. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_diag_rows_reserve(tcc_diag_rows_t *rows, idx_t wanted) {
 	tcc_diag_row_t *new_rows;
 	idx_t new_capacity;
@@ -1711,6 +2083,7 @@ static bool tcc_diag_rows_reserve(tcc_diag_rows_t *rows, idx_t wanted) {
 	return true;
 }
 
+/* tcc_diag_rows_add: Diagnostics/probe table-function helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_diag_rows_add(tcc_diag_rows_t *rows, const char *kind, const char *key, const char *value, bool exists,
                               const char *detail) {
 	tcc_diag_row_t *row;
@@ -1747,6 +2120,7 @@ static bool tcc_diag_rows_add(tcc_diag_rows_t *rows, const char *kind, const cha
 	return true;
 }
 
+/* tcc_diag_rows_destroy: Diagnostics/probe table-function helper. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_diag_rows_destroy(tcc_diag_rows_t *rows) {
 	idx_t i;
 	if (!rows) {
@@ -1799,6 +2173,7 @@ static char *tcc_path_join(const char *base, const char *leaf) {
 	return joined;
 }
 
+/* tcc_string_equals_path: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_string_equals_path(const char *a, const char *b) {
 #ifdef _WIN32
 	while (*a && *b) {
@@ -1816,6 +2191,7 @@ static bool tcc_string_equals_path(const char *a, const char *b) {
 #endif
 }
 
+/* tcc_string_list_contains: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_string_list_contains(const tcc_string_list_t *list, const char *value) {
 	idx_t i;
 	if (!list || !value || value[0] == '\0') {
@@ -1831,6 +2207,7 @@ static bool tcc_string_list_contains(const tcc_string_list_t *list, const char *
 
 static bool tcc_append_env_path_list(tcc_string_list_t *list, const char *path_list);
 
+/* tcc_string_list_destroy: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_string_list_destroy(tcc_string_list_t *list) {
 	idx_t i;
 	if (!list) {
@@ -1847,6 +2224,7 @@ static void tcc_string_list_destroy(tcc_string_list_t *list) {
 	memset(list, 0, sizeof(tcc_string_list_t));
 }
 
+/* tcc_string_list_reserve: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_string_list_reserve(tcc_string_list_t *list, idx_t wanted) {
 	char **new_items;
 	idx_t new_capacity;
@@ -1874,6 +2252,7 @@ static bool tcc_string_list_reserve(tcc_string_list_t *list, idx_t wanted) {
 	return true;
 }
 
+/* tcc_string_list_append: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_string_list_append(tcc_string_list_t *list, const char *value) {
 	char *copy;
 	if (!list || !value || value[0] == '\0') {
@@ -1890,6 +2269,20 @@ static bool tcc_string_list_append(tcc_string_list_t *list, const char *value) {
 	return true;
 }
 
+/* tcc_string_list_pop_last: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
+static bool tcc_string_list_pop_last(tcc_string_list_t *list) {
+	if (!list || list->count == 0) {
+		return false;
+	}
+	list->count--;
+	if (list->items[list->count]) {
+		duckdb_free(list->items[list->count]);
+		list->items[list->count] = NULL;
+	}
+	return true;
+}
+
+/* tcc_string_list_append_unique: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_string_list_append_unique(tcc_string_list_t *list, const char *value) {
 	if (!list || !value || value[0] == '\0') {
 		return false;
@@ -1900,6 +2293,7 @@ static bool tcc_string_list_append_unique(tcc_string_list_t *list, const char *v
 	return tcc_string_list_append(list, value);
 }
 
+/* tcc_is_path_like: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_is_path_like(const char *value) {
 	if (!value || value[0] == '\0') {
 		return false;
@@ -1918,6 +2312,7 @@ static bool tcc_is_path_like(const char *value) {
 	return false;
 }
 
+/* tcc_has_library_suffix: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_has_library_suffix(const char *value) {
 	if (!value || value[0] == '\0') {
 		return false;
@@ -1937,6 +2332,7 @@ static bool tcc_has_library_suffix(const char *value) {
 	return false;
 }
 
+/* tcc_append_env_path_list: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_append_env_path_list(tcc_string_list_t *list, const char *path_list) {
 	const char *start;
 	const char *p;
@@ -1981,6 +2377,7 @@ static bool tcc_append_env_path_list(tcc_string_list_t *list, const char *path_l
 	return true;
 }
 
+/* tcc_add_platform_library_paths: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_add_platform_library_paths(tcc_string_list_t *paths) {
 	idx_t i;
 #ifdef _WIN32
@@ -2030,6 +2427,7 @@ static bool tcc_add_platform_library_paths(tcc_string_list_t *paths) {
 	return true;
 }
 
+/* tcc_collect_library_search_paths: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_collect_library_search_paths(const char *runtime_path, const char *extra_paths,
                                              tcc_string_list_t *out_paths) {
 	char *p = NULL;
@@ -2103,6 +2501,7 @@ static bool tcc_collect_library_search_paths(const char *runtime_path, const cha
 	return true;
 }
 
+/* tcc_collect_include_paths: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_collect_include_paths(const char *runtime_path, tcc_string_list_t *out_paths) {
 	char *p = NULL;
 	if (!out_paths) {
@@ -2139,6 +2538,7 @@ static bool tcc_collect_include_paths(const char *runtime_path, tcc_string_list_
 	return true;
 }
 
+/* tcc_build_library_candidates: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_build_library_candidates(const char *library, tcc_string_list_t *out_candidates) {
 	char candidate[512];
 	if (!library || library[0] == '\0' || !out_candidates) {
@@ -2251,6 +2651,7 @@ static char *tcc_library_link_name_from_path(const char *path) {
 	return name;
 }
 
+/* tcc_session_clear_bind: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_session_clear_bind(tcc_session_t *session) {
 	if (!session) {
 		return;
@@ -2265,6 +2666,7 @@ static void tcc_session_clear_bind(tcc_session_t *session) {
 	}
 }
 
+/* tcc_session_clear_build_state: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_session_clear_build_state(tcc_session_t *session) {
 	if (!session) {
 		return;
@@ -2283,6 +2685,7 @@ static void tcc_session_clear_build_state(tcc_session_t *session) {
 	session->config_version++;
 }
 
+/* tcc_session_set_runtime_path: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_session_set_runtime_path(tcc_session_t *session, const char *runtime_path) {
 	if (!session) {
 		return;
@@ -2308,6 +2711,7 @@ static const char *tcc_session_runtime_path(tcc_module_state_t *state, const cha
 }
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
+/* tcc_configure_runtime_paths: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_configure_runtime_paths(TCCState *s, const char *runtime_path) {
 	char include_path[1024];
 	char include_path2[1024];
@@ -2331,6 +2735,10 @@ static void tcc_configure_runtime_paths(TCCState *s, const char *runtime_path) {
 }
 #endif
 
+/* Destructor for per-UDF host signature context.
+ * All members are treated as owned by `ctx` once attached via
+ * `duckdb_scalar_function_set_extra_info`.
+ */
 static void tcc_host_sig_ctx_destroy(void *ptr) {
 	tcc_host_sig_ctx_t *ctx = (tcc_host_sig_ctx_t *)ptr;
 	if (!ctx) {
@@ -2372,6 +2780,7 @@ static void tcc_host_sig_ctx_destroy(void *ptr) {
 	duckdb_free(ctx);
 }
 
+/* tcc_ffi_type_is_list: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_type_is_list(tcc_ffi_type_t type) {
 	switch (type) {
 	case TCC_FFI_LIST:
@@ -2398,6 +2807,7 @@ static bool tcc_ffi_type_is_list(tcc_ffi_type_t type) {
 	}
 }
 
+/* tcc_ffi_type_is_fixed_width_scalar: Type-system conversion/parsing helper. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type) {
 	switch (type) {
 	case TCC_FFI_BOOL:
@@ -2424,6 +2834,7 @@ static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type) {
 	}
 }
 
+/* tcc_struct_meta_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_struct_meta_destroy(tcc_ffi_struct_meta_t *meta) {
 	int i;
 	if (!meta) {
@@ -2454,6 +2865,7 @@ static void tcc_struct_meta_destroy(tcc_ffi_struct_meta_t *meta) {
 	memset(meta, 0, sizeof(*meta));
 }
 
+/* tcc_struct_meta_array_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_struct_meta_array_destroy(tcc_ffi_struct_meta_t *metas, int count) {
 	int i;
 	if (!metas || count <= 0) {
@@ -2468,6 +2880,7 @@ static void tcc_struct_meta_array_destroy(tcc_ffi_struct_meta_t *metas, int coun
 	duckdb_free(metas);
 }
 
+/* tcc_map_meta_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_map_meta_destroy(tcc_ffi_map_meta_t *meta) {
 	if (!meta) {
 		return;
@@ -2481,6 +2894,7 @@ static void tcc_map_meta_destroy(tcc_ffi_map_meta_t *meta) {
 	memset(meta, 0, sizeof(*meta));
 }
 
+/* tcc_map_meta_array_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_map_meta_array_destroy(tcc_ffi_map_meta_t *metas, int count) {
 	int i;
 	if (!metas || count <= 0) {
@@ -2495,6 +2909,7 @@ static void tcc_map_meta_array_destroy(tcc_ffi_map_meta_t *metas, int count) {
 	duckdb_free(metas);
 }
 
+/* tcc_union_meta_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_union_meta_destroy(tcc_ffi_union_meta_t *meta) {
 	int i;
 	if (!meta) {
@@ -2525,6 +2940,7 @@ static void tcc_union_meta_destroy(tcc_ffi_union_meta_t *meta) {
 	memset(meta, 0, sizeof(*meta));
 }
 
+/* tcc_union_meta_array_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_union_meta_array_destroy(tcc_ffi_union_meta_t *metas, int count) {
 	int i;
 	if (!metas) {
@@ -2536,6 +2952,7 @@ static void tcc_union_meta_array_destroy(tcc_ffi_union_meta_t *metas, int count)
 	duckdb_free(metas);
 }
 
+/* tcc_ffi_list_child_type: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_list_child_type(tcc_ffi_type_t list_type, tcc_ffi_type_t *out_child) {
 	if (!out_child) {
 		return false;
@@ -2597,6 +3014,7 @@ static bool tcc_ffi_list_child_type(tcc_ffi_type_t list_type, tcc_ffi_type_t *ou
 	}
 }
 
+/* tcc_ffi_list_type_from_child: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_list_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type_t *out_list_type) {
 	if (!out_list_type) {
 		return false;
@@ -2658,6 +3076,7 @@ static bool tcc_ffi_list_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type
 	}
 }
 
+/* tcc_ffi_type_is_array: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_type_is_array(tcc_ffi_type_t type) {
 	switch (type) {
 	case TCC_FFI_ARRAY:
@@ -2684,18 +3103,22 @@ static bool tcc_ffi_type_is_array(tcc_ffi_type_t type) {
 	}
 }
 
+/* tcc_ffi_type_is_struct: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_type_is_struct(tcc_ffi_type_t type) {
 	return type == TCC_FFI_STRUCT;
 }
 
+/* tcc_ffi_type_is_map: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_type_is_map(tcc_ffi_type_t type) {
 	return type == TCC_FFI_MAP;
 }
 
+/* tcc_ffi_type_is_union: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_type_is_union(tcc_ffi_type_t type) {
 	return type == TCC_FFI_UNION;
 }
 
+/* tcc_ffi_array_child_type: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_array_child_type(tcc_ffi_type_t array_type, tcc_ffi_type_t *out_child) {
 	if (!out_child) {
 		return false;
@@ -2757,6 +3180,7 @@ static bool tcc_ffi_array_child_type(tcc_ffi_type_t array_type, tcc_ffi_type_t *
 	}
 }
 
+/* tcc_ffi_array_type_from_child: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_array_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type_t *out_array_type) {
 	if (!out_array_type) {
 		return false;
@@ -2818,6 +3242,7 @@ static bool tcc_ffi_array_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_typ
 	}
 }
 
+/* tcc_ffi_type_size: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
 	switch (type) {
 	case TCC_FFI_BOOL:
@@ -2902,6 +3327,7 @@ static size_t tcc_ffi_type_size(tcc_ffi_type_t type) {
 	}
 }
 
+/* tcc_ffi_type_to_duckdb_type: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 	switch (type) {
 	case TCC_FFI_VOID:
@@ -2996,6 +3422,7 @@ static duckdb_type tcc_ffi_type_to_duckdb_type(tcc_ffi_type_t type) {
 	}
 }
 
+/* tcc_ffi_type_create_logical_type: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type, size_t array_size,
                                                              const tcc_ffi_struct_meta_t *struct_meta,
                                                              const tcc_ffi_map_meta_t *map_meta,
@@ -3281,6 +3708,7 @@ static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type,
 	return duckdb_create_logical_type(base_type);
 }
 
+/* tcc_typedesc_create_logical_type: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static duckdb_logical_type tcc_typedesc_create_logical_type(const tcc_typedesc_t *desc) {
 	duckdb_type base_type;
 	if (!desc) {
@@ -3423,6 +3851,7 @@ static duckdb_logical_type tcc_typedesc_create_logical_type(const tcc_typedesc_t
 	}
 }
 
+/* tcc_validity_set_all: Vector validity/error/output helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_validity_set_all(uint64_t *validity, idx_t count, bool valid) {
 	idx_t word_count;
 	idx_t rem_bits;
@@ -3439,6 +3868,9 @@ static void tcc_validity_set_all(uint64_t *validity, idx_t count, bool valid) {
 	}
 }
 
+/* Copies DuckDB varchar payload into `duckdb_malloc` memory.
+ * Caller owns and must `duckdb_free` the returned buffer.
+ */
 static char *tcc_copy_duckdb_string_as_cstr(duckdb_string_t *value) {
 	const char *src;
 	uint32_t len;
@@ -3459,6 +3891,9 @@ static char *tcc_copy_duckdb_string_as_cstr(duckdb_string_t *value) {
 	return copy;
 }
 
+/* Returns a borrowed view over a DuckDB varchar payload as blob bytes.
+ * Lifetime is limited to the current vector/chunk scope.
+ */
 static ducktinycc_blob_t tcc_duckdb_string_to_blob(duckdb_string_t *value) {
 	ducktinycc_blob_t out;
 	out.ptr = NULL;
@@ -3471,6 +3906,7 @@ static ducktinycc_blob_t tcc_duckdb_string_to_blob(duckdb_string_t *value) {
 	return out;
 }
 
+/* tcc_nested_struct_bridge_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_nested_struct_bridge_destroy(tcc_nested_struct_bridge_t *bridge) {
 	idx_t i;
 	if (!bridge) {
@@ -3904,6 +4340,7 @@ fail:
 	return NULL;
 }
 
+/* tcc_typedesc_is_composite: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_typedesc_is_composite(const tcc_typedesc_t *desc) {
 	if (!desc) {
 		return false;
@@ -3913,6 +4350,7 @@ static bool tcc_typedesc_is_composite(const tcc_typedesc_t *desc) {
 	       tcc_ffi_type_is_union(desc->ffi_type);
 }
 
+/* tcc_value_bridge_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_value_bridge_destroy(tcc_value_bridge_t *bridge) {
 	idx_t i;
 	if (!bridge) {
@@ -4318,6 +4756,7 @@ fail:
 	return NULL;
 }
 
+/* tcc_set_vector_row_validity: Vector validity/error/output helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_set_vector_row_validity(duckdb_vector vector, idx_t row, bool valid) {
 	uint64_t *validity;
 	if (!vector) {
@@ -4332,6 +4771,7 @@ static bool tcc_set_vector_row_validity(duckdb_vector vector, idx_t row, bool va
 	return true;
 }
 
+/* tcc_write_value_to_vector: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t *desc, idx_t row,
                                       const void *src_base, uint64_t src_offset, const uint64_t *src_validity,
                                       const char **out_error) {
@@ -4608,6 +5048,7 @@ static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t
 	return true;
 }
 
+/* tcc_execute_compiled_scalar_udf: Runtime bridge executing compiled row/batch wrappers. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_execute_compiled_scalar_udf(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	tcc_host_sig_ctx_t *ctx = (tcc_host_sig_ctx_t *)duckdb_scalar_function_get_extra_info(info);
 	idx_t n = duckdb_data_chunk_get_size(input);
@@ -6409,6 +6850,11 @@ cleanup:
 	}
 }
 
+/* Registers a generated wrapper against DuckDB.
+ * Ownership transfer:
+ * - Parsed signature metadata is owned locally until assigned into `ctx`.
+ * - After assignment, `ctx` owns it and `tcc_host_sig_ctx_destroy` releases it.
+ */
 static bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr,
                                           const char *return_type, const char *arg_types_csv,
                                           const char *wrapper_mode) {
@@ -6741,6 +7187,7 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	return true;
 }
 
+/* ducktinycc_valid_is_set: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_valid_is_set(const uint64_t *validity, uint64_t idx) {
 	if (!validity) {
 		return 1;
@@ -6748,6 +7195,7 @@ static int ducktinycc_valid_is_set(const uint64_t *validity, uint64_t idx) {
 	return (validity[idx >> 6] & (1ULL << (idx & 63))) != 0;
 }
 
+/* ducktinycc_valid_set: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static void ducktinycc_valid_set(uint64_t *validity, uint64_t idx, int valid) {
 	uint64_t bit;
 	if (!validity) {
@@ -6761,6 +7209,7 @@ static void ducktinycc_valid_set(uint64_t *validity, uint64_t idx, int valid) {
 	}
 }
 
+/* ducktinycc_span_contains: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_span_contains(uint64_t len, uint64_t idx) {
 	return idx < len;
 }
@@ -6781,6 +7230,7 @@ static void *ducktinycc_ptr_add_mut(void *base, uint64_t byte_offset) {
 	return (void *)(p + byte_offset);
 }
 
+/* ducktinycc_span_fits: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_span_fits(uint64_t len, uint64_t offset, uint64_t width) {
 	if (offset > len) {
 		return 0;
@@ -6802,6 +7252,7 @@ static void *ducktinycc_buf_ptr_at_mut(void *base, uint64_t len, uint64_t offset
 	return ducktinycc_ptr_add_mut(base, offset);
 }
 
+/* ducktinycc_read_bytes: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_read_bytes(const void *base, uint64_t len, uint64_t offset, void *out, uint64_t width) {
 	const void *src;
 	if (!out && width > 0) {
@@ -6818,6 +7269,7 @@ static int ducktinycc_read_bytes(const void *base, uint64_t len, uint64_t offset
 	return 1;
 }
 
+/* ducktinycc_write_bytes: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_write_bytes(void *base, uint64_t len, uint64_t offset, const void *in, uint64_t width) {
 	void *dst;
 	if (!in && width > 0) {
@@ -6855,6 +7307,7 @@ DUCKTINYCC_DEFINE_BUF_RW(f64, double)
 
 #undef DUCKTINYCC_DEFINE_BUF_RW
 
+/* ducktinycc_read_ptr: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_read_ptr(const void *base, uint64_t len, uint64_t offset, const void **out) {
 	uintptr_t tmp = 0;
 	if (!out) {
@@ -6867,11 +7320,13 @@ static int ducktinycc_read_ptr(const void *base, uint64_t len, uint64_t offset, 
 	return 1;
 }
 
+/* ducktinycc_write_ptr: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_write_ptr(void *base, uint64_t len, uint64_t offset, const void *value) {
 	uintptr_t tmp = (uintptr_t)value;
 	return ducktinycc_write_bytes(base, len, offset, &tmp, (uint64_t)sizeof(uintptr_t));
 }
 
+/* ducktinycc_list_is_valid: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx) {
 	uint64_t global_idx;
 	if (!list || idx >= list->len) {
@@ -6893,6 +7348,7 @@ static const void *ducktinycc_list_elem_ptr(const ducktinycc_list_t *list, uint6
 	return ducktinycc_ptr_add(list->ptr, global_idx * elem_size);
 }
 
+/* ducktinycc_array_is_valid: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_array_is_valid(const ducktinycc_array_t *arr, uint64_t idx) {
 	uint64_t global_idx;
 	if (!arr || idx >= arr->len) {
@@ -6921,6 +7377,7 @@ static const void *ducktinycc_struct_field_ptr(const ducktinycc_struct_t *st, ui
 	return st->field_ptrs[idx];
 }
 
+/* ducktinycc_struct_field_is_valid: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_struct_field_is_valid(const ducktinycc_struct_t *st, uint64_t field_idx) {
 	if (!st || !st->field_ptrs || field_idx >= st->field_count) {
 		return 0;
@@ -6949,6 +7406,7 @@ static const void *ducktinycc_map_value_ptr(const ducktinycc_map_t *m, uint64_t 
 	return ducktinycc_ptr_add(m->value_ptr, global_idx * value_size);
 }
 
+/* ducktinycc_map_key_is_valid: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_map_key_is_valid(const ducktinycc_map_t *m, uint64_t idx) {
 	uint64_t global_idx;
 	if (!m || idx >= m->len) {
@@ -6961,6 +7419,7 @@ static int ducktinycc_map_key_is_valid(const ducktinycc_map_t *m, uint64_t idx) 
 	return ducktinycc_valid_is_set(m->key_validity, global_idx);
 }
 
+/* ducktinycc_map_value_is_valid: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx) {
 	uint64_t global_idx;
 	if (!m || idx >= m->len) {
@@ -6973,57 +7432,65 @@ static int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx
 	return ducktinycc_valid_is_set(m->value_validity, global_idx);
 }
 
+#define TCC_HOST_SYMBOL_TABLE(X)                                                                                          \
+	X("duckdb_ext_api", &duckdb_ext_api)                                                                                 \
+	X("ducktinycc_register_signature", ducktinycc_register_signature)                                                    \
+	X("ducktinycc_valid_is_set", ducktinycc_valid_is_set)                                                                \
+	X("ducktinycc_valid_set", ducktinycc_valid_set)                                                                      \
+	X("ducktinycc_span_contains", ducktinycc_span_contains)                                                              \
+	X("ducktinycc_ptr_add", ducktinycc_ptr_add)                                                                          \
+	X("ducktinycc_ptr_add_mut", ducktinycc_ptr_add_mut)                                                                  \
+	X("ducktinycc_span_fits", ducktinycc_span_fits)                                                                      \
+	X("ducktinycc_buf_ptr_at", ducktinycc_buf_ptr_at)                                                                    \
+	X("ducktinycc_buf_ptr_at_mut", ducktinycc_buf_ptr_at_mut)                                                            \
+	X("ducktinycc_read_bytes", ducktinycc_read_bytes)                                                                    \
+	X("ducktinycc_write_bytes", ducktinycc_write_bytes)                                                                  \
+	X("ducktinycc_read_i8", ducktinycc_read_i8)                                                                          \
+	X("ducktinycc_write_i8", ducktinycc_write_i8)                                                                        \
+	X("ducktinycc_read_u8", ducktinycc_read_u8)                                                                          \
+	X("ducktinycc_write_u8", ducktinycc_write_u8)                                                                        \
+	X("ducktinycc_read_i16", ducktinycc_read_i16)                                                                        \
+	X("ducktinycc_write_i16", ducktinycc_write_i16)                                                                      \
+	X("ducktinycc_read_u16", ducktinycc_read_u16)                                                                        \
+	X("ducktinycc_write_u16", ducktinycc_write_u16)                                                                      \
+	X("ducktinycc_read_i32", ducktinycc_read_i32)                                                                        \
+	X("ducktinycc_write_i32", ducktinycc_write_i32)                                                                      \
+	X("ducktinycc_read_u32", ducktinycc_read_u32)                                                                        \
+	X("ducktinycc_write_u32", ducktinycc_write_u32)                                                                      \
+	X("ducktinycc_read_i64", ducktinycc_read_i64)                                                                        \
+	X("ducktinycc_write_i64", ducktinycc_write_i64)                                                                      \
+	X("ducktinycc_read_u64", ducktinycc_read_u64)                                                                        \
+	X("ducktinycc_write_u64", ducktinycc_write_u64)                                                                      \
+	X("ducktinycc_read_f32", ducktinycc_read_f32)                                                                        \
+	X("ducktinycc_write_f32", ducktinycc_write_f32)                                                                      \
+	X("ducktinycc_read_f64", ducktinycc_read_f64)                                                                        \
+	X("ducktinycc_write_f64", ducktinycc_write_f64)                                                                      \
+	X("ducktinycc_read_ptr", ducktinycc_read_ptr)                                                                        \
+	X("ducktinycc_write_ptr", ducktinycc_write_ptr)                                                                      \
+	X("ducktinycc_list_is_valid", ducktinycc_list_is_valid)                                                              \
+	X("ducktinycc_list_elem_ptr", ducktinycc_list_elem_ptr)                                                              \
+	X("ducktinycc_array_is_valid", ducktinycc_array_is_valid)                                                            \
+	X("ducktinycc_array_elem_ptr", ducktinycc_array_elem_ptr)                                                            \
+	X("ducktinycc_struct_field_ptr", ducktinycc_struct_field_ptr)                                                        \
+	X("ducktinycc_struct_field_is_valid", ducktinycc_struct_field_is_valid)                                              \
+	X("ducktinycc_map_key_ptr", ducktinycc_map_key_ptr)                                                                  \
+	X("ducktinycc_map_value_ptr", ducktinycc_map_value_ptr)                                                              \
+	X("ducktinycc_map_key_is_valid", ducktinycc_map_key_is_valid)                                                        \
+	X("ducktinycc_map_value_is_valid", ducktinycc_map_value_is_valid)
+
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
+/* tcc_add_host_symbols: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_add_host_symbols(TCCState *s) {
 	if (!s) {
 		return;
 	}
-	(void)tcc_add_symbol(s, "duckdb_ext_api", &duckdb_ext_api);
-	(void)tcc_add_symbol(s, "ducktinycc_register_signature", ducktinycc_register_signature);
-	(void)tcc_add_symbol(s, "ducktinycc_valid_is_set", ducktinycc_valid_is_set);
-	(void)tcc_add_symbol(s, "ducktinycc_valid_set", ducktinycc_valid_set);
-	(void)tcc_add_symbol(s, "ducktinycc_span_contains", ducktinycc_span_contains);
-	(void)tcc_add_symbol(s, "ducktinycc_ptr_add", ducktinycc_ptr_add);
-	(void)tcc_add_symbol(s, "ducktinycc_ptr_add_mut", ducktinycc_ptr_add_mut);
-	(void)tcc_add_symbol(s, "ducktinycc_span_fits", ducktinycc_span_fits);
-	(void)tcc_add_symbol(s, "ducktinycc_buf_ptr_at", ducktinycc_buf_ptr_at);
-	(void)tcc_add_symbol(s, "ducktinycc_buf_ptr_at_mut", ducktinycc_buf_ptr_at_mut);
-	(void)tcc_add_symbol(s, "ducktinycc_read_bytes", ducktinycc_read_bytes);
-	(void)tcc_add_symbol(s, "ducktinycc_write_bytes", ducktinycc_write_bytes);
-	(void)tcc_add_symbol(s, "ducktinycc_read_i8", ducktinycc_read_i8);
-	(void)tcc_add_symbol(s, "ducktinycc_write_i8", ducktinycc_write_i8);
-	(void)tcc_add_symbol(s, "ducktinycc_read_u8", ducktinycc_read_u8);
-	(void)tcc_add_symbol(s, "ducktinycc_write_u8", ducktinycc_write_u8);
-	(void)tcc_add_symbol(s, "ducktinycc_read_i16", ducktinycc_read_i16);
-	(void)tcc_add_symbol(s, "ducktinycc_write_i16", ducktinycc_write_i16);
-	(void)tcc_add_symbol(s, "ducktinycc_read_u16", ducktinycc_read_u16);
-	(void)tcc_add_symbol(s, "ducktinycc_write_u16", ducktinycc_write_u16);
-	(void)tcc_add_symbol(s, "ducktinycc_read_i32", ducktinycc_read_i32);
-	(void)tcc_add_symbol(s, "ducktinycc_write_i32", ducktinycc_write_i32);
-	(void)tcc_add_symbol(s, "ducktinycc_read_u32", ducktinycc_read_u32);
-	(void)tcc_add_symbol(s, "ducktinycc_write_u32", ducktinycc_write_u32);
-	(void)tcc_add_symbol(s, "ducktinycc_read_i64", ducktinycc_read_i64);
-	(void)tcc_add_symbol(s, "ducktinycc_write_i64", ducktinycc_write_i64);
-	(void)tcc_add_symbol(s, "ducktinycc_read_u64", ducktinycc_read_u64);
-	(void)tcc_add_symbol(s, "ducktinycc_write_u64", ducktinycc_write_u64);
-	(void)tcc_add_symbol(s, "ducktinycc_read_f32", ducktinycc_read_f32);
-	(void)tcc_add_symbol(s, "ducktinycc_write_f32", ducktinycc_write_f32);
-	(void)tcc_add_symbol(s, "ducktinycc_read_f64", ducktinycc_read_f64);
-	(void)tcc_add_symbol(s, "ducktinycc_write_f64", ducktinycc_write_f64);
-	(void)tcc_add_symbol(s, "ducktinycc_read_ptr", ducktinycc_read_ptr);
-	(void)tcc_add_symbol(s, "ducktinycc_write_ptr", ducktinycc_write_ptr);
-	(void)tcc_add_symbol(s, "ducktinycc_list_is_valid", ducktinycc_list_is_valid);
-	(void)tcc_add_symbol(s, "ducktinycc_list_elem_ptr", ducktinycc_list_elem_ptr);
-	(void)tcc_add_symbol(s, "ducktinycc_array_is_valid", ducktinycc_array_is_valid);
-	(void)tcc_add_symbol(s, "ducktinycc_array_elem_ptr", ducktinycc_array_elem_ptr);
-	(void)tcc_add_symbol(s, "ducktinycc_struct_field_ptr", ducktinycc_struct_field_ptr);
-	(void)tcc_add_symbol(s, "ducktinycc_struct_field_is_valid", ducktinycc_struct_field_is_valid);
-	(void)tcc_add_symbol(s, "ducktinycc_map_key_ptr", ducktinycc_map_key_ptr);
-	(void)tcc_add_symbol(s, "ducktinycc_map_value_ptr", ducktinycc_map_value_ptr);
-	(void)tcc_add_symbol(s, "ducktinycc_map_key_is_valid", ducktinycc_map_key_is_valid);
-	(void)tcc_add_symbol(s, "ducktinycc_map_value_is_valid", ducktinycc_map_value_is_valid);
+#define TCC_ADD_HOST_SYMBOL(name, ptr) (void)tcc_add_symbol(s, name, ptr);
+	TCC_HOST_SYMBOL_TABLE(TCC_ADD_HOST_SYMBOL)
+#undef TCC_ADD_HOST_SYMBOL
 }
+#undef TCC_HOST_SYMBOL_TABLE
 
+/* tcc_artifact_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_artifact_destroy(void *ptr) {
 	tcc_registered_artifact_t *artifact = (tcc_registered_artifact_t *)ptr;
 	if (!artifact) {
@@ -7041,6 +7508,7 @@ static void tcc_artifact_destroy(void *ptr) {
 	duckdb_free(artifact);
 }
 
+/* tcc_apply_session_to_state: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static int tcc_apply_session_to_state(TCCState *s, const tcc_session_t *session, tcc_error_buffer_t *error_buf) {
 	idx_t i;
 	for (i = 0; i < session->include_paths.count; i++) {
@@ -7092,6 +7560,7 @@ static int tcc_apply_session_to_state(TCCState *s, const tcc_session_t *session,
 	return 0;
 }
 
+/* tcc_apply_bind_overrides_to_state: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static int tcc_apply_bind_overrides_to_state(TCCState *s, const tcc_module_bind_data_t *bind,
                                              tcc_error_buffer_t *error_buf) {
 	const char *define_value;
@@ -7140,6 +7609,7 @@ static int tcc_apply_bind_overrides_to_state(TCCState *s, const tcc_module_bind_
 	return 0;
 }
 
+/* Builds and relocates one TinyCC module artifact, returning its init symbol wrapper. */
 static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_t *state,
                                      const tcc_module_bind_data_t *bind, const char *module_symbol,
                                      const char *module_name, tcc_registered_artifact_t **out_artifact,
@@ -7227,6 +7697,7 @@ static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_
 }
 #endif
 
+/* Finds compiled-artifact registry index by SQL function name. */
 static idx_t tcc_registry_find_sql_name(tcc_module_state_t *state, const char *sql_name) {
 	idx_t i;
 	if (!state || !sql_name) {
@@ -7240,6 +7711,7 @@ static idx_t tcc_registry_find_sql_name(tcc_module_state_t *state, const char *s
 	return (idx_t)-1;
 }
 
+/* Ensures registry storage capacity for compiled artifact metadata. */
 static bool tcc_registry_reserve(tcc_module_state_t *state, idx_t wanted) {
 	tcc_registered_entry_t *new_entries;
 	idx_t new_capacity;
@@ -7264,6 +7736,7 @@ static bool tcc_registry_reserve(tcc_module_state_t *state, idx_t wanted) {
 	return true;
 }
 
+/* Releases metadata (and underlying artifacts) for one registry entry. */
 static void tcc_registry_entry_destroy_metadata(tcc_registered_entry_t *entry) {
 	if (!entry) {
 		return;
@@ -7285,6 +7758,7 @@ static void tcc_registry_entry_destroy_metadata(tcc_registered_entry_t *entry) {
 #endif
 }
 
+/* Inserts/replaces compiled artifact metadata for one SQL function name. */
 static bool tcc_registry_store_metadata(tcc_module_state_t *state, const char *sql_name, const char *symbol,
                                         uint64_t state_id
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
@@ -7314,6 +7788,7 @@ static bool tcc_registry_store_metadata(tcc_module_state_t *state, const char *s
 	return true;
 }
 
+/* Destructor for table-function extra info (`tcc_module_state_t`). */
 static void destroy_tcc_module_state(void *ptr) {
 	tcc_module_state_t *state = (tcc_module_state_t *)ptr;
 	idx_t i;
@@ -7337,6 +7812,7 @@ static void destroy_tcc_module_state(void *ptr) {
 	duckdb_free(state);
 }
 
+/* Destructor for per-invocation bind payload of `tcc_module(...)`. */
 static void destroy_tcc_module_bind_data(void *ptr) {
 	tcc_module_bind_data_t *bind = (tcc_module_bind_data_t *)ptr;
 	if (!bind) {
@@ -7393,6 +7869,7 @@ static void destroy_tcc_module_bind_data(void *ptr) {
 	duckdb_free(bind);
 }
 
+/* Destructor for per-scan init payload of `tcc_module(...)`. */
 static void destroy_tcc_module_init_data(void *ptr) {
 	tcc_module_init_data_t *init = (tcc_module_init_data_t *)ptr;
 	if (!init) {
@@ -7401,6 +7878,7 @@ static void destroy_tcc_module_init_data(void *ptr) {
 	duckdb_free(init);
 }
 
+/* Reads optional named VARCHAR bind parameter as owned C string. */
 static void tcc_bind_read_named_varchar(duckdb_bind_info info, const char *name, char **out_value) {
 	duckdb_value value = duckdb_bind_get_named_parameter(info, name);
 	if (value && !duckdb_is_null_value(value)) {
@@ -7411,6 +7889,7 @@ static void tcc_bind_read_named_varchar(duckdb_bind_info info, const char *name,
 	}
 }
 
+/* Reads `arg_types` named parameter, normalizing LIST/ARRAY inputs into CSV token string. */
 static void tcc_bind_read_named_arg_types(duckdb_bind_info info, char **out_csv) {
 	duckdb_value value = duckdb_bind_get_named_parameter(info, "arg_types");
 	if (!value || duckdb_is_null_value(value)) {
@@ -7463,6 +7942,7 @@ static void tcc_bind_read_named_arg_types(duckdb_bind_info info, char **out_csv)
 	duckdb_destroy_value(&value);
 }
 
+/* Bind callback: parses named parameters into immutable bind data for one call. */
 static void tcc_module_bind(duckdb_bind_info info) {
 	tcc_module_bind_data_t *bind;
 	duckdb_logical_type varchar_type;
@@ -7522,6 +8002,7 @@ static void tcc_module_bind(duckdb_bind_info info) {
 	duckdb_bind_set_bind_data(info, bind, destroy_tcc_module_bind_data);
 }
 
+/* Init callback: stores one-shot emission state for table-function execution. */
 static void tcc_module_init(duckdb_init_info info) {
 	tcc_module_init_data_t *init = (tcc_module_init_data_t *)duckdb_malloc(sizeof(tcc_module_init_data_t));
 	if (!init) {
@@ -7532,6 +8013,7 @@ static void tcc_module_init(duckdb_init_info info) {
 	duckdb_init_set_init_data(info, init, destroy_tcc_module_init_data);
 }
 
+/* Writes nullable VARCHAR value into an output vector cell. */
 static void tcc_set_varchar_col(duckdb_vector vector, idx_t row, const char *value) {
 	uint64_t *validity;
 	if (!value) {
@@ -7543,6 +8025,7 @@ static void tcc_set_varchar_col(duckdb_vector vector, idx_t row, const char *val
 	duckdb_vector_assign_string_element(vector, row, value);
 }
 
+/* Emits one diagnostics/status row in the `tcc_module(...)` table output schema. */
 static void tcc_write_row(duckdb_data_chunk output, bool ok, const char *mode, const char *phase, const char *code,
                           const char *message, const char *detail, const char *sql_name, const char *symbol,
                           const char *artifact_id, const char *connection_scope) {
@@ -7569,6 +8052,7 @@ static const char *tcc_skip_space(const char *p) {
 	return p;
 }
 
+/* tcc_equals_ci: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_equals_ci(const char *a, const char *b) {
 	unsigned char ca;
 	unsigned char cb;
@@ -7596,6 +8080,7 @@ static const char *tcc_wrapper_mode_token(tcc_wrapper_mode_t mode) {
 	}
 }
 
+/* tcc_parse_wrapper_mode: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_wrapper_mode(const char *wrapper_mode, tcc_wrapper_mode_t *out_mode,
                                    tcc_error_buffer_t *error_buf) {
 	const char *mode = wrapper_mode;
@@ -7695,6 +8180,7 @@ static char *tcc_find_top_level_char(char *input, char target) {
 	return NULL;
 }
 
+/* tcc_parse_type_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_type_t *out_type, size_t *out_array_size) {
 	size_t token_len;
 	if (!token || token[0] == '\0' || !out_type) {
@@ -7902,6 +8388,7 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 	return false;
 }
 
+/* tcc_is_identifier_token: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_is_identifier_token(const char *value) {
 	size_t i;
 	if (!value || value[0] == '\0') {
@@ -7918,6 +8405,7 @@ static bool tcc_is_identifier_token(const char *value) {
 	return true;
 }
 
+/* tcc_split_csv_tokens: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_split_csv_tokens(const char *csv, tcc_string_list_t *out_tokens, tcc_error_buffer_t *error_buf) {
 	char *copy;
 	char *cursor;
@@ -7956,6 +8444,7 @@ static bool tcc_split_csv_tokens(const char *csv, tcc_string_list_t *out_tokens,
 	return true;
 }
 
+/* tcc_parse_c_field_spec_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_c_field_spec_token(const char *token, bool force_bitfield, tcc_c_field_spec_t *out_field,
                                          tcc_error_buffer_t *error_buf) {
 	char *copy;
@@ -8048,6 +8537,7 @@ static bool tcc_parse_c_field_spec_token(const char *token, bool force_bitfield,
 	return true;
 }
 
+/* tcc_parse_c_field_specs: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_c_field_specs(const char *arg_types_csv, bool force_bitfield, tcc_c_field_list_t *out_fields,
                                     tcc_error_buffer_t *error_buf) {
 	tcc_string_list_t tokens;
@@ -8085,6 +8575,7 @@ static bool tcc_parse_c_field_specs(const char *arg_types_csv, bool force_bitfie
 	return true;
 }
 
+/* tcc_parse_c_enum_constants: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_c_enum_constants(const char *arg_types_csv, tcc_string_list_t *out_constants,
                                        tcc_error_buffer_t *error_buf) {
 	idx_t i;
@@ -8106,6 +8597,7 @@ static bool tcc_parse_c_enum_constants(const char *arg_types_csv, tcc_string_lis
 	return true;
 }
 
+/* tcc_parse_struct_meta_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t *out_meta,
                                         tcc_error_buffer_t *error_buf) {
 	size_t token_len;
@@ -8305,6 +8797,7 @@ fail:
 	return false;
 }
 
+/* tcc_parse_map_meta_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_map_meta_token(const char *token, tcc_ffi_map_meta_t *out_meta, tcc_error_buffer_t *error_buf) {
 	size_t token_len;
 	char *inner = NULL;
@@ -8410,6 +8903,7 @@ static bool tcc_parse_map_meta_token(const char *token, tcc_ffi_map_meta_t *out_
 	return true;
 }
 
+/* tcc_parse_union_meta_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_union_meta_token(const char *token, tcc_ffi_union_meta_t *out_meta,
                                        tcc_error_buffer_t *error_buf) {
 	size_t token_len;
@@ -8593,6 +9087,7 @@ fail:
 	return false;
 }
 
+/* tcc_typedesc_destroy: Type-system conversion/parsing helper. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_typedesc_destroy(tcc_typedesc_t *desc) {
 	idx_t i;
 	if (!desc) {
@@ -8630,6 +9125,7 @@ static void tcc_typedesc_destroy(tcc_typedesc_t *desc) {
 	duckdb_free(desc);
 }
 
+/* tcc_typedesc_parse_token: Type-system conversion/parsing helper. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typedesc_t **out_desc,
                                      tcc_error_buffer_t *error_buf) {
 	tcc_typedesc_t *desc = NULL;
@@ -8823,6 +9319,7 @@ static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typ
 	return true;
 }
 
+/* tcc_parse_signature: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,
 		                                size_t *out_return_array_size, tcc_ffi_type_t **out_arg_types,
 		                                size_t **out_arg_array_sizes, tcc_ffi_struct_meta_t *out_return_struct_meta,
@@ -8953,6 +9450,7 @@ fail:
 	return false;
 }
 
+/* tcc_codegen_signature_ctx_init: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_codegen_signature_ctx_init(tcc_codegen_signature_ctx_t *ctx) {
 	if (!ctx) {
 		return;
@@ -8962,6 +9460,7 @@ static void tcc_codegen_signature_ctx_init(tcc_codegen_signature_ctx_t *ctx) {
 	ctx->wrapper_mode = TCC_WRAPPER_MODE_ROW;
 }
 
+/* tcc_codegen_signature_ctx_destroy: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_codegen_signature_ctx_destroy(tcc_codegen_signature_ctx_t *ctx) {
 	if (!ctx) {
 		return;
@@ -8996,6 +9495,7 @@ static void tcc_codegen_signature_ctx_destroy(tcc_codegen_signature_ctx_t *ctx) 
 	ctx->wrapper_mode_token = NULL;
 }
 
+/* tcc_codegen_signature_parse_types: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_codegen_signature_parse_types(const tcc_module_bind_data_t *bind, tcc_codegen_signature_ctx_t *ctx,
                                               tcc_error_buffer_t *error_buf) {
 	if (!bind || !ctx) {
@@ -9008,6 +9508,7 @@ static bool tcc_codegen_signature_parse_types(const tcc_module_bind_data_t *bind
 	                           &ctx->arg_map_metas, &ctx->arg_union_metas, &ctx->arg_count, error_buf);
 }
 
+/* tcc_codegen_signature_parse_wrapper_mode: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_codegen_signature_parse_wrapper_mode(const tcc_module_bind_data_t *bind,
                                                      tcc_codegen_signature_ctx_t *ctx,
                                                      tcc_error_buffer_t *error_buf) {
@@ -9026,6 +9527,7 @@ static bool tcc_codegen_signature_parse_wrapper_mode(const tcc_module_bind_data_
 	return true;
 }
 
+/* tcc_codegen_source_ctx_init: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_codegen_source_ctx_init(tcc_codegen_source_ctx_t *ctx) {
 	if (!ctx) {
 		return;
@@ -9034,6 +9536,7 @@ static void tcc_codegen_source_ctx_init(tcc_codegen_source_ctx_t *ctx) {
 	tcc_codegen_signature_ctx_init(&ctx->signature);
 }
 
+/* tcc_codegen_source_ctx_destroy: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_codegen_source_ctx_destroy(tcc_codegen_source_ctx_t *ctx) {
 	if (!ctx) {
 		return;
@@ -9050,6 +9553,7 @@ static void tcc_codegen_source_ctx_destroy(tcc_codegen_source_ctx_t *ctx) {
 	memset(ctx->module_symbol, 0, sizeof(ctx->module_symbol));
 }
 
+/* tcc_codegen_prepare_sources: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
                                         const char *sql_name, const char *target_symbol,
                                         tcc_codegen_source_ctx_t *ctx, tcc_error_buffer_t *error_buf) {
@@ -9084,6 +9588,7 @@ static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_mod
 	return true;
 }
 
+/* tcc_codegen_classify_error_message: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_codegen_classify_error_message(const char *error_message, const char **phase, const char **code,
                                                const char **message) {
 	if (!error_message || !phase || !code || !message) {
@@ -9114,6 +9619,7 @@ static void tcc_codegen_classify_error_message(const char *error_message, const 
 	}
 }
 
+/* Resolves target symbol from explicit args or session-level bound symbol. */
 static const char *tcc_effective_symbol(tcc_module_state_t *state, tcc_module_bind_data_t *bind) {
 	if (bind->symbol && bind->symbol[0] != '\0') {
 		return bind->symbol;
@@ -9124,6 +9630,7 @@ static const char *tcc_effective_symbol(tcc_module_state_t *state, tcc_module_bi
 	return NULL;
 }
 
+/* Resolves SQL function name from explicit args or session-level fallback. */
 static const char *tcc_effective_sql_name(tcc_module_state_t *state, tcc_module_bind_data_t *bind,
                                           const char *effective_symbol) {
 	if (bind->sql_name && bind->sql_name[0] != '\0') {
@@ -9609,6 +10116,8 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 static char *tcc_codegen_build_compilation_unit(const char *user_source, const char *wrapper_loader_source) {
 	char *compilation_unit_source;
 	const char *prelude = "#include <stdint.h>\n"
+	                      "/* Composite descriptors below are borrowed views from DuckDB vectors. */\n"
+	                      "/* Wrappers must not free them and must not retain them after invocation. */\n"
 	                      "typedef struct {\n"
 	                      "  uint64_t lower;\n"
 	                      "  int64_t upper;\n"
@@ -9669,6 +10178,7 @@ static char *tcc_codegen_build_compilation_unit(const char *user_source, const c
 	                      "  uint64_t member_count;\n"
 	                      "  uint64_t offset;\n"
 	                      "} ducktinycc_union_t;\n"
+	                      "/* Accessor helpers below operate on caller-owned memory spans. */\n"
 		                      "extern int ducktinycc_valid_is_set(const uint64_t *validity, uint64_t idx);\n"
 		                      "extern void ducktinycc_valid_set(uint64_t *validity, uint64_t idx, int valid);\n"
 		                      "extern int ducktinycc_span_contains(uint64_t len, uint64_t idx);\n"
@@ -9744,6 +10254,7 @@ static char *tcc_codegen_build_compilation_unit(const char *user_source, const c
 	return compilation_unit_source;
 }
 
+/* tcc_helper_binding_list_add_prefixed: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_helper_binding_list_add_prefixed(tcc_helper_binding_list_t *bindings, const char *prefix,
                                                  const char *suffix, const char *return_type,
                                                  const char *arg_types_csv) {
@@ -9762,6 +10273,19 @@ static bool tcc_helper_binding_list_add_prefixed(tcc_helper_binding_list_t *bind
 	return tcc_helper_binding_list_add(bindings, symbol, sql_name, return_type, arg_types_csv);
 }
 
+/* tcc_format_cstr: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
+static bool tcc_format_cstr(char *buf, size_t buf_size, const char *fmt, ...) {
+	va_list args;
+	int n;
+	if (!buf || buf_size == 0 || !fmt) {
+		return false;
+	}
+	va_start(args, fmt);
+	n = vsnprintf(buf, buf_size, fmt, args);
+	va_end(args);
+	return n >= 0 && (size_t)n < buf_size;
+}
+
 static char *tcc_generate_c_composite_helpers_source(const char *kind_keyword, const char *type_name,
                                                      const char *prefix, const tcc_c_field_list_t *fields,
                                                      tcc_error_buffer_t *error_buf) {
@@ -9776,6 +10300,7 @@ static char *tcc_generate_c_composite_helpers_source(const char *kind_keyword, c
 	    &src,
 	    "extern void *malloc(unsigned long long);\n"
 	    "extern void free(void *);\n"
+	    "/* Generated helpers allocate with libc malloc/free. Pair %s_new with %s_free. */\n"
 	    "#ifndef DUCKTINYCC_OFFSETOF\n"
 	    "#define DUCKTINYCC_OFFSETOF(type, member) ((unsigned long long)((const char *)&(((type *)0)->member) - (const char *)0))\n"
 	    "#endif\n"
@@ -9784,8 +10309,8 @@ static char *tcc_generate_c_composite_helpers_source(const char *kind_keyword, c
 	    " return (unsigned long long)(sizeof(struct __ducktinycc_align_%s) - sizeof(%s %s)); }\n"
 	    "void *%s_new(void){ return malloc(sizeof(%s %s)); }\n"
 	    "void %s_free(void *p){ if (p) free(p); }\n",
-	    prefix, kind_keyword, type_name, prefix, prefix, kind_keyword, type_name, prefix, kind_keyword, type_name,
-	    prefix, kind_keyword, type_name, prefix);
+	    prefix, prefix, prefix, kind_keyword, type_name, prefix, prefix, kind_keyword, type_name, prefix,
+	    kind_keyword, type_name, prefix, kind_keyword, type_name, prefix);
 	if (!ok) {
 		tcc_set_error(error_buf, "out of memory");
 		tcc_text_buf_destroy(&src);
@@ -9885,6 +10410,7 @@ static char *tcc_generate_c_enum_helpers_source(const char *enum_name, const cha
 	}
 }
 
+/* tcc_build_c_composite_bindings: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_build_c_composite_bindings(const char *prefix, const tcc_c_field_list_t *fields,
                                            tcc_helper_binding_list_t *out_bindings, tcc_error_buffer_t *error_buf) {
 	idx_t i;
@@ -9892,6 +10418,15 @@ static bool tcc_build_c_composite_bindings(const char *prefix, const tcc_c_field
 		tcc_set_error(error_buf, "invalid helper binding arguments");
 		return false;
 	}
+#define TCC_ADD_BINDING_FORMAT(RET_TOKEN, ARG_CSV, SUFFIX_FMT, ...)                                                      \
+	do {                                                                                                                  \
+		if (!tcc_format_cstr(suffix, sizeof(suffix), SUFFIX_FMT, __VA_ARGS__) ||                                         \
+		    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, RET_TOKEN, ARG_CSV)) {                  \
+			tcc_set_error(error_buf, "out of memory");                                                                    \
+			return false;                                                                                                 \
+		}                                                                                                                 \
+	} while (0)
+	char suffix[512];
 	if (!tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "sizeof", "u64", "") ||
 	    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "alignof", "u64", "") ||
 	    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "new", "ptr", "") ||
@@ -9902,79 +10437,46 @@ static bool tcc_build_c_composite_bindings(const char *prefix, const tcc_c_field
 	for (i = 0; i < fields->count; i++) {
 		const tcc_c_field_spec_t *field = &fields->items[i];
 		const char *token = tcc_ffi_type_to_token(field->type);
-		char suffix[512];
 		char arg_csv[128];
-		int n_suffix;
-		int n_args;
 		if (!token) {
 			tcc_set_error(error_buf, "field type token is unsupported for helper bindings");
 			return false;
 		}
 		if (field->array_size > 0) {
-			n_suffix = snprintf(suffix, sizeof(suffix), "get_%s_elt", field->name);
-			n_args = snprintf(arg_csv, sizeof(arg_csv), "ptr,u64");
-			if (n_suffix < 0 || n_args < 0 || (size_t)n_suffix >= sizeof(suffix) || (size_t)n_args >= sizeof(arg_csv) ||
-			    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, token, arg_csv)) {
+			if (!tcc_format_cstr(arg_csv, sizeof(arg_csv), "ptr,u64")) {
 				tcc_set_error(error_buf, "out of memory");
 				return false;
 			}
-			n_suffix = snprintf(suffix, sizeof(suffix), "set_%s_elt", field->name);
-			n_args = snprintf(arg_csv, sizeof(arg_csv), "ptr,u64,%s", token);
-			if (n_suffix < 0 || n_args < 0 || (size_t)n_suffix >= sizeof(suffix) || (size_t)n_args >= sizeof(arg_csv) ||
-			    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "ptr", arg_csv)) {
+			TCC_ADD_BINDING_FORMAT(token, arg_csv, "get_%s_elt", field->name);
+			if (!tcc_format_cstr(arg_csv, sizeof(arg_csv), "ptr,u64,%s", token)) {
 				tcc_set_error(error_buf, "out of memory");
 				return false;
 			}
-			n_suffix = snprintf(suffix, sizeof(suffix), "off_%s", field->name);
-			if (n_suffix < 0 || (size_t)n_suffix >= sizeof(suffix) ||
-			    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "u64", "")) {
-				tcc_set_error(error_buf, "out of memory");
-				return false;
-			}
-			n_suffix = snprintf(suffix, sizeof(suffix), "%s_addr", field->name);
-			if (n_suffix < 0 || (size_t)n_suffix >= sizeof(suffix) ||
-			    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "ptr", "ptr")) {
-				tcc_set_error(error_buf, "out of memory");
-				return false;
-			}
+			TCC_ADD_BINDING_FORMAT("ptr", arg_csv, "set_%s_elt", field->name);
+			TCC_ADD_BINDING_FORMAT("u64", "", "off_%s", field->name);
+			TCC_ADD_BINDING_FORMAT("ptr", "ptr", "%s_addr", field->name);
 		} else {
-			n_suffix = snprintf(suffix, sizeof(suffix), "get_%s", field->name);
-			if (n_suffix < 0 || (size_t)n_suffix >= sizeof(suffix) ||
-			    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, token, "ptr")) {
+			TCC_ADD_BINDING_FORMAT(token, "ptr", "get_%s", field->name);
+			if (!tcc_format_cstr(arg_csv, sizeof(arg_csv), "ptr,%s", token)) {
 				tcc_set_error(error_buf, "out of memory");
 				return false;
 			}
-			n_suffix = snprintf(suffix, sizeof(suffix), "set_%s", field->name);
-			n_args = snprintf(arg_csv, sizeof(arg_csv), "ptr,%s", token);
-			if (n_suffix < 0 || n_args < 0 || (size_t)n_suffix >= sizeof(suffix) || (size_t)n_args >= sizeof(arg_csv) ||
-			    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "ptr", arg_csv)) {
-				tcc_set_error(error_buf, "out of memory");
-				return false;
-			}
+			TCC_ADD_BINDING_FORMAT("ptr", arg_csv, "set_%s", field->name);
 			if (!field->is_bitfield) {
-				n_suffix = snprintf(suffix, sizeof(suffix), "off_%s", field->name);
-				if (n_suffix < 0 || (size_t)n_suffix >= sizeof(suffix) ||
-				    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "u64", "")) {
-					tcc_set_error(error_buf, "out of memory");
-					return false;
-				}
-				n_suffix = snprintf(suffix, sizeof(suffix), "%s_addr", field->name);
-				if (n_suffix < 0 || (size_t)n_suffix >= sizeof(suffix) ||
-				    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "ptr", "ptr")) {
-					tcc_set_error(error_buf, "out of memory");
-					return false;
-				}
+				TCC_ADD_BINDING_FORMAT("u64", "", "off_%s", field->name);
+				TCC_ADD_BINDING_FORMAT("ptr", "ptr", "%s_addr", field->name);
 			}
 		}
 	}
+#undef TCC_ADD_BINDING_FORMAT
 	return true;
 }
 
+/* tcc_build_c_enum_bindings: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_build_c_enum_bindings(const char *prefix, const tcc_string_list_t *constants,
                                       tcc_helper_binding_list_t *out_bindings, tcc_error_buffer_t *error_buf) {
 	idx_t i;
 	char suffix[512];
-	int n_suffix;
 	if (!prefix || !constants || !out_bindings) {
 		tcc_set_error(error_buf, "invalid enum binding arguments");
 		return false;
@@ -9984,8 +10486,7 @@ static bool tcc_build_c_enum_bindings(const char *prefix, const tcc_string_list_
 		return false;
 	}
 	for (i = 0; i < constants->count; i++) {
-		n_suffix = snprintf(suffix, sizeof(suffix), "%s", constants->items[i]);
-		if (n_suffix < 0 || (size_t)n_suffix >= sizeof(suffix) ||
+		if (!tcc_format_cstr(suffix, sizeof(suffix), "%s", constants->items[i]) ||
 		    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "i64", "")) {
 			tcc_set_error(error_buf, "out of memory");
 			return false;
@@ -9995,6 +10496,7 @@ static bool tcc_build_c_enum_bindings(const char *prefix, const tcc_string_list_
 }
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
+/* tcc_codegen_compile_and_load_module: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static int tcc_codegen_compile_and_load_module(const char *runtime_path, tcc_module_state_t *state,
                                                const tcc_module_bind_data_t *bind, const char *sql_name,
                                                const char *target_symbol, tcc_registered_artifact_t **out_artifact,
@@ -10040,6 +10542,7 @@ static int tcc_codegen_compile_and_load_module(const char *runtime_path, tcc_mod
 #endif
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
+/* tcc_compile_generated_binding: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_compile_generated_binding(const char *runtime_path, tcc_module_state_t *state, const char *source,
                                           const tcc_helper_binding_t *binding, tcc_error_buffer_t *error_buf) {
 	tcc_module_bind_data_t generated_bind;
@@ -10070,6 +10573,7 @@ static bool tcc_compile_generated_binding(const char *runtime_path, tcc_module_s
 }
 #endif
 
+/* Returns whether a mode mutates shared session/registry state. */
 static bool tcc_mode_requires_write_lock(const char *mode) {
 	if (!mode) {
 		return false;
@@ -10085,6 +10589,7 @@ static bool tcc_mode_requires_write_lock(const char *mode) {
 	       strcmp(mode, "c_enum") == 0;
 }
 
+/* Main dispatcher for all `tcc_module(...)` modes. */
 static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk output) {
 	tcc_module_state_t *state = (tcc_module_state_t *)duckdb_function_get_extra_info(info);
 	tcc_module_bind_data_t *bind = (tcc_module_bind_data_t *)duckdb_function_get_bind_data(info);
@@ -10200,8 +10705,13 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 	} else if (strcmp(bind->mode, "add_define") == 0) {
 		if (bind->define_name && bind->define_name[0] != '\0') {
 			const char *define_value = bind->define_value ? bind->define_value : "1";
-			if (tcc_string_list_append(&state->session.define_names, bind->define_name) &&
-			    tcc_string_list_append(&state->session.define_values, define_value)) {
+			if (tcc_string_list_append(&state->session.define_names, bind->define_name)) {
+				if (!tcc_string_list_append(&state->session.define_values, define_value)) {
+					(void)tcc_string_list_pop_last(&state->session.define_names);
+					tcc_write_row(output, false, bind->mode, "state", "E_STORE_FAILED", "failed to store define", NULL,
+					              NULL, NULL, NULL, "database");
+					goto tcc_module_done;
+				}
 				state->session.config_version++;
 				tcc_write_row(output, true, bind->mode, "state", "OK", "define added", bind->define_name, NULL, NULL,
 				              NULL, "database");
@@ -10218,9 +10728,24 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required", NULL,
 			              bind->sql_name, bind->symbol, NULL, "database");
 		} else {
+			char *bound_symbol = NULL;
+			char *bound_sql_name = NULL;
+			bound_symbol = tcc_strdup(bind->symbol);
+			bound_sql_name = tcc_strdup(bind->sql_name && bind->sql_name[0] != '\0' ? bind->sql_name : bind->symbol);
+			if (!bound_symbol || !bound_sql_name) {
+				if (bound_symbol) {
+					duckdb_free(bound_symbol);
+				}
+				if (bound_sql_name) {
+					duckdb_free(bound_sql_name);
+				}
+				tcc_write_row(output, false, bind->mode, "state", "E_STORE_FAILED", "failed to store symbol binding",
+				              NULL, bind->sql_name, bind->symbol, NULL, "database");
+				goto tcc_module_done;
+			}
 			tcc_session_clear_bind(&state->session);
-			state->session.bound_symbol = tcc_strdup(bind->symbol);
-			state->session.bound_sql_name = tcc_strdup(bind->sql_name && bind->sql_name[0] != '\0' ? bind->sql_name : bind->symbol);
+			state->session.bound_symbol = bound_symbol;
+			state->session.bound_sql_name = bound_sql_name;
 			state->session.config_version++;
 			tcc_write_row(output, true, bind->mode, "bind", "OK", "symbol binding updated",
 			              state->session.bound_sql_name, state->session.bound_sql_name, state->session.bound_symbol, NULL,
@@ -10495,6 +11020,7 @@ tcc_module_done:
 	}
 }
 
+/* destroy_tcc_diag_bind_data: Destructor callback for DuckDB bind/init/extra-info payloads. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void destroy_tcc_diag_bind_data(void *ptr) {
 	tcc_diag_bind_data_t *bind = (tcc_diag_bind_data_t *)ptr;
 	if (!bind) {
@@ -10504,6 +11030,7 @@ static void destroy_tcc_diag_bind_data(void *ptr) {
 	duckdb_free(bind);
 }
 
+/* destroy_tcc_diag_init_data: Destructor callback for DuckDB bind/init/extra-info payloads. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void destroy_tcc_diag_init_data(void *ptr) {
 	tcc_diag_init_data_t *init = (tcc_diag_init_data_t *)ptr;
 	if (!init) {
@@ -10512,6 +11039,7 @@ static void destroy_tcc_diag_init_data(void *ptr) {
 	duckdb_free(init);
 }
 
+/* tcc_diag_set_result_schema: Diagnostics/probe table-function helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_diag_set_result_schema(duckdb_bind_info info) {
 	duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
 	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
@@ -10524,6 +11052,7 @@ static void tcc_diag_set_result_schema(duckdb_bind_info info) {
 	duckdb_destroy_logical_type(&varchar_type);
 }
 
+/* tcc_diag_table_init: Diagnostics/probe table-function helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_diag_table_init(duckdb_init_info info) {
 	tcc_diag_init_data_t *init = (tcc_diag_init_data_t *)duckdb_malloc(sizeof(tcc_diag_init_data_t));
 	if (!init) {
@@ -10534,6 +11063,7 @@ static void tcc_diag_table_init(duckdb_init_info info) {
 	duckdb_init_set_init_data(info, init, destroy_tcc_diag_init_data);
 }
 
+/* tcc_diag_table_function: Diagnostics/probe table-function helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_diag_table_function(duckdb_function_info info, duckdb_data_chunk output) {
 	tcc_diag_bind_data_t *bind = (tcc_diag_bind_data_t *)duckdb_function_get_bind_data(info);
 	tcc_diag_init_data_t *init = (tcc_diag_init_data_t *)duckdb_function_get_init_data(info);
@@ -10561,6 +11091,7 @@ static void tcc_diag_table_function(duckdb_function_info info, duckdb_data_chunk
 	duckdb_data_chunk_set_size(output, 1);
 }
 
+/* tcc_system_paths_bind: Diagnostics/probe table-function helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_system_paths_bind(duckdb_bind_info info) {
 	tcc_diag_bind_data_t *bind = (tcc_diag_bind_data_t *)duckdb_malloc(sizeof(tcc_diag_bind_data_t));
 	tcc_string_list_t include_paths;
@@ -10621,6 +11152,7 @@ static void tcc_system_paths_bind(duckdb_bind_info info) {
 	duckdb_bind_set_bind_data(info, bind, destroy_tcc_diag_bind_data);
 }
 
+/* tcc_try_resolve_candidate: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_try_resolve_candidate(const char *candidate, const tcc_string_list_t *search_paths, char **out_path) {
 	idx_t i;
 	if (!candidate || candidate[0] == '\0' || !search_paths || !out_path) {
@@ -10647,6 +11179,7 @@ static bool tcc_try_resolve_candidate(const char *candidate, const tcc_string_li
 	return false;
 }
 
+/* tcc_library_probe_bind: Diagnostics/probe table-function helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_library_probe_bind(duckdb_bind_info info) {
 	tcc_diag_bind_data_t *bind = (tcc_diag_bind_data_t *)duckdb_malloc(sizeof(tcc_diag_bind_data_t));
 	tcc_string_list_t library_paths;
@@ -10745,6 +11278,7 @@ static void tcc_library_probe_bind(duckdb_bind_info info) {
 	duckdb_bind_set_bind_data(info, bind, destroy_tcc_diag_bind_data);
 }
 
+/* Registers `tcc_system_paths(...)` diagnostics table function. */
 static bool register_tcc_system_paths_function(duckdb_connection connection) {
 	duckdb_table_function tf = duckdb_create_table_function();
 	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
@@ -10762,6 +11296,7 @@ static bool register_tcc_system_paths_function(duckdb_connection connection) {
 	return rc == DuckDBSuccess;
 }
 
+/* Registers `tcc_library_probe(...)` diagnostics table function. */
 static bool register_tcc_library_probe_function(duckdb_connection connection) {
 	duckdb_table_function tf = duckdb_create_table_function();
 	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
@@ -10780,6 +11315,7 @@ static bool register_tcc_library_probe_function(duckdb_connection connection) {
 	return rc == DuckDBSuccess;
 }
 
+/* Public extension registration entrypoint for module and helper SQL surfaces. */
 bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database database) {
 	duckdb_table_function tf = duckdb_create_table_function();
 	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
