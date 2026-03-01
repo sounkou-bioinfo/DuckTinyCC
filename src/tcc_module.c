@@ -7,10 +7,17 @@
  *   paths, options, defines) and dispatches modes through DuckDB table-function lifecycle callbacks.
  * - Compile/codegen paths build wrappers as C source, compile + relocate them in memory via libtcc, and resolve a
  *   module init symbol (no per-UDF shared-library artifact on disk).
+ * - TinyCC state creation is compile-triggered (`tcc_new` in artifact builder); `tcc_new_state` only resets staged
+ *   session inputs and increments `state_id`.
  * - Each generated module self-registers scalar UDFs by calling `ducktinycc_register_signature(...)` against a
  *   persistent host DuckDB connection, using host-exported symbols injected into the TCC state.
+ *   This shape is intentional: TinyCC-relocated code has no direct SQL DDL context, so registration must cross back
+ *   through host C-API callbacks with a stable connection handle.
+ * - Resulting UDF entries are extension/C-API registered catalog entries, which explains current lifecycle behavior
+ *   (e.g., SQL `DROP FUNCTION` does not remove these internal entries).
  * - Runtime execution (`tcc_execute_compiled_scalar_udf`) bridges DuckDB vectors to C descriptors for row/batch
  *   wrappers, including recursive LIST/ARRAY/STRUCT/MAP/UNION marshalling and write-back.
+ * - Link configuration supports both search-path + bare names and explicit full library paths.
  * - This file intentionally centralizes SQL surface, compile/load, and runtime bridge logic to keep behavior
  *   diagnosable while the pre-1.0 API remains fast-moving.
  *

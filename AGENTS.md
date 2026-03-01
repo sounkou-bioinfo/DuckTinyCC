@@ -45,6 +45,24 @@ This repository uses local precedent references under `.sync/` to guide implemen
     - Scalars: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64`, `ptr`, `varchar/cstring`, `blob`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`.
     - Nested/composite: `LIST` (`list_*`, `type[]`, `list<...>`), fixed-size `ARRAY` (`type[N]`), `STRUCT` (`struct<...>`), `MAP` (`map<k;v>`), `UNION` (`union<name:type;...>`), with recursive nesting.
 
+## TinyCC State and Relocation Model
+- TinyCC states (`TCCState`) are created only in compile/codegen paths (`tcc_build_module_artifact` via `tcc_new`), not by `tcc_new_state`.
+- `tcc_new_state` resets staged session build inputs and increments `session.state_id`; it does not allocate a new `TCCState`.
+- `compile`/`quick_compile` usually produce one relocated in-memory module artifact (one `TCCState`) per invocation.
+- `c_struct`/`c_union`/`c_bitfield`/`c_enum` may produce multiple artifacts because helper bindings are compiled/registered per generated helper function.
+- Relocation flow is: `tcc_new` -> configure paths/options/includes/defines/source -> `tcc_relocate` -> `tcc_get_symbol(module_init)` -> call `module_init(connection)`.
+- Artifact finalization is explicit:
+  - error path: `tcc_delete` immediately,
+  - replacement or shutdown path: `tcc_artifact_destroy` via registry entry cleanup and module-state destructor.
+
+## Library Linking Rules
+- `add_library_path` appends explicit search directories for `tcc_add_library_path`.
+- `add_library` accepts:
+  - bare names (for example `m`, `z`, `sqlite3`),
+  - names with platform suffixes (`libfoo.so`, `foo.dll`, `libfoo.dylib`, `.a`, `.lib`),
+  - full library paths (absolute or relative path-like values).
+- `tcc_library_probe(...)` should be used to confirm effective search paths/candidates before demos or release examples.
+
 ## Progress Snapshot (2026-02-27)
 - Parser/type metadata refactor completed for recursive signatures:
   - top-level token splitting for nested delimiters (`<...>`, `[...]`).

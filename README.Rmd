@@ -139,14 +139,15 @@ SQL
 - `wrapper_mode := 'row'` generates a row ABI wrapper (`void **args`, `out_value`, `out_is_null`).
 - `wrapper_mode := 'batch'` generates a chunk ABI wrapper (`arg_data`, validity masks, `count`, output buffer/mask) and runs once per DuckDB chunk.
 - Signature tokens are parsed into recursive type descriptors and registered as recursive DuckDB logical types.
-- A generated module init function calls `ducktinycc_register_signature(...)` to register the SQL scalar UDF in the active DuckDB connection.
+- A generated module init function calls `ducktinycc_register_signature(...)` to register the SQL scalar UDF in the extension-managed persistent DuckDB host connection.
 - TinyCC compile + relocate is fully in-memory (no shared library file is emitted).
 - Host symbols injected into each TinyCC state include `duckdb_ext_api`, `ducktinycc_register_signature`, and the exported `ducktinycc_*` helper ABI used by generated code.
+- TinyCC states are created by compile/codegen paths; `tcc_new_state` resets staged build inputs and increments session `state_id`, but does not itself allocate a new `TCCState`.
 - DuckDB still owns all vectors/buffers; wrappers operate on borrowed chunk memory and should not retain pointers past the call.
 - Scalar and composite inputs are marshalled from DuckDB vectors to C bridge values (`ducktinycc_blob_t`, `ducktinycc_list_t`, `ducktinycc_array_t`, `ducktinycc_struct_t`, `ducktinycc_map_t`, `ducktinycc_union_t`).
 - Composite returns (`LIST`/`ARRAY`/`STRUCT`/`MAP`/`UNION`) are written back through a recursive vector writer.
 - Compile modes use a TinyCC runtime tree (`runtime_path`) for headers and libraries; `libtcc1.a` is conditionally required when TinyCC-generated code needs helper runtime symbols.
-- Use `tcc_system_paths(...)` and `tcc_library_probe(library := 'libtcc1.a')` to inspect runtime asset availability.
+- Use `tcc_system_paths(...)` and `tcc_library_probe(...)` to inspect runtime/search-path asset availability (including `libtcc1.a` when relevant).
 
 ## Memory Ownership and Lifecycle
 
@@ -157,28 +158,15 @@ SQL
 - Host-side marshalling scratch buffers (`arg_ptrs`, decoded column arrays, list descriptors) are allocated with `duckdb_malloc` and freed before callback return.
 - Compiled code and symbols live inside each TinyCC relocated state (`TCCState`) and are released when that artifact is destroyed.
 - `config_reset` and `tcc_new_state` clear staged build/session inputs, but do not remove already registered SQL UDF catalog entries.
-- Current DuckDB C API behavior treats these API-registered scalar functions as internal catalog entries, so SQL `DROP FUNCTION` is not available for them.
+- DuckDB does support SQL `DROP FUNCTION` for SQL-defined catalog entries, but DuckTinyCC UDFs are installed through extension-side C API registration (`ducktinycc_register_signature(...)`) in the extension-managed host connection. DuckDB treats these as internal catalog entries, so `DROP FUNCTION` rejects them (`Cannot drop internal catalog entry ...`).
 
-## API WIP (Design Direction)
+## API and Expanding Scope
 
-- Host symbol registration mode: feasible and aligned with Rtinycc-style embedding; prefer an allow-listed registry (name -> host address) over raw SQL-provided addresses.
-- Arrow to reduce marshalling: not used directly; batch wrappers already consume DuckDB vectors column-wise and avoid per-row host-wrapper crossings.
-- DuckDB nested types: `LIST`, `ARRAY`, `STRUCT`, `MAP`, and `UNION` are first-class SQL argument/return tokens with recursive C descriptors and recursive bridge marshalling.
-- Union bridge note: DuckDB C API exposes union logical/value APIs, but no dedicated `union_vector_*` helpers; bridge code uses tag-buffer + member child vectors.
-- Host helper ABI: wrappers now expose typed/bounds-checked buffer helpers (`ducktinycc_read_*`, `ducktinycc_write_*`, `ducktinycc_read_bytes`, `ducktinycc_write_bytes`, `ducktinycc_span_fits`) in addition to list/array/struct/map descriptor helpers.
-- SQL pointer helpers: `tcc_alloc`, `tcc_free_ptr`, `tcc_dataptr`, `tcc_ptr_size`, `tcc_ptr_add`, typed `tcc_read_*`/`tcc_write_*`, and `tcc_read_bytes`/`tcc_write_bytes` are registered at extension load.
-- Pointer representation: SQL uses `UBIGINT` handles backed by a per-database in-memory pointer registry.
-- Real C structs/unions/enums/bitfields: `c_struct`, `c_union`, `c_enum`, and `c_bitfield` now auto-generate helper UDFs directly from C declarations + field specs.
-- For `c_struct`/`c_union`, helpers include `*_new`, `*_free`, `*_get_*`, `*_set_*`, `*_off_*`, `*_addr`, `*_sizeof`, `*_alignof`.
-- For `c_bitfield`, field helpers are `*_get_*`/`*_set_*` (compiler-resolved bitfield layout); per-field `*_off_*`/`*_addr` are intentionally omitted.
-- Callback signatures (planned): support explicit callback tokens in bindings, e.g. `callback:<ret(args...)>` and `callback_async:<ret(args...)>`, so wrapper code can model function-pointer arguments intentionally.
-- Callback registry (planned): map DuckDB-side callable handles to registry entries (signature + callable + lifecycle token); compiled C receives only a generated trampoline pointer plus opaque callback context (`ptr`), not raw SQL/runtime addresses.
-- Typed trampoline codegen (planned): generate one trampoline per callback argument from the declared signature, then marshal C args -> DuckDB call values -> C return with explicit conversion rules.
-- Rtinycc precedent: mirror the `callback_token` + `invoke_callback_id` + trampoline user-data pattern used in `.sync/Rtinycc/src/RC_libtcc.c` and `.sync/Rtinycc/R/callbacks.R`, adapted to DuckDB callable dispatch.
-- Callback failure/default policy (planned): follow Rtinycc-style defaults (`0`/`false`/`NULL`/`void`) when callback dispatch fails; async mode enqueues work and returns the type-default immediately.
-- Host symbol wiring for callbacks (planned): expose callback runtime entrypoints as host symbols via `tcc_add_symbol(...)` before relocation (same ordering discipline used by Rtinycc for callback invoke/schedule hooks).
-- Callback feature status: planned only (not yet part of the executable SQL API surface).
-- Safety posture: prefer handle-based helpers (`tcc_alloc` + `tcc_read/write_*`) over raw address arithmetic; `tcc_dataptr` is exposed for interop escape hatches.
+DuckTinyCC is centered on `tcc_module(...)` as a single SQL control surface for staging code and toolchain inputs, generating wrappers, compiling/relocating with TinyCC, and registering callable UDFs. The current API already treats nested types as first-class (`LIST`, `ARRAY`, `STRUCT`, `MAP`, `UNION`), and it exposes both bridge-level pointer utilities and generated C helper families (`c_struct`, `c_union`, `c_enum`, `c_bitfield`) with explicit diagnostics. Link configuration is intentionally pragmatic: users can provide short library names, explicit filenames, or full path-like library values, and validate resolution with `tcc_library_probe(...)` before compilation.
+
+Expansion work is aimed at callback-capable bindings rather than widening the core surface indiscriminately. The intended direction is typed callback signatures and generated trampolines, backed by an allow-listed runtime callback registry and explicit C-to-DuckDB marshalling rules. Host symbol wiring for this path is planned to follow the same discipline used in Rtinycc (https://github.com/sounkou-bioinfo/Rtinycc), but this callback feature is not part of the executable SQL API yet.
+
+Current limitations remain important for users and contributors. The function lifecycle asymmetry is structural today: SQL DDL can drop SQL-created entries, while extension-registered entries from this path are treated as internal catalog state. In practice that means rebuild/reload or connection lifecycle control is the current way to clear generated functions. Helper-generation modes can also produce many TinyCC artifacts and increase compile/load overhead, and memory ownership still spans two allocation domains (`duckdb_malloc` and libc `malloc`) that must be paired carefully. `tcc_dataptr` is intentionally retained as an interop escape hatch, but handle-based helpers are safer for most usage. Runtime compatibility also remains tied to DuckDB ABI/version policy choices.
 
 ## Builds
 
