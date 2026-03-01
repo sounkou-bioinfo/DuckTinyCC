@@ -1,5 +1,5 @@
 name: ducktinycc
-version: 0.0.2
+version: 0.0.2.1
 description: DuckDB TinyCC extension with tcc_* SQL surface
 license: MIT
 excluded_platforms: wasm_mvp;wasm_eh;wasm_threads;windows_amd64;windows_arm64
