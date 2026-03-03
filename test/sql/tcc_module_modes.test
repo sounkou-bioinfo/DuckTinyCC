@@ -659,6 +659,29 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'ducktinycc_blob_t make_empty_blob(void){
+  ducktinycc_blob_t out;
+  out.ptr = (const void *)0;
+  out.len = 0;
+  return out;
+}',
+  symbol := 'make_empty_blob',
+  sql_name := 'make_empty_blob',
+  return_type := 'blob',
+  arg_types := []
+);
+----
+true	quick_compile	OK
+
+query TI
+SELECT make_empty_blob() IS NULL, octet_length(make_empty_blob())::BIGINT;
+----
+false	0
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'ducktinycc_blob_t batch_blob_echo(ducktinycc_blob_t b){ return b; }',
   symbol := 'batch_blob_echo',
   sql_name := 'batch_blob_echo',
@@ -1121,6 +1144,31 @@ query T
 SELECT make_pair_list(NULL);
 ----
 NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_list_t make_empty_i64_list(void){
+  ducktinycc_list_t out;
+  out.ptr = (const void *)0;
+  out.validity = (const uint64_t *)0;
+  out.offset = 0;
+  out.len = 0;
+  return out;
+}',
+  symbol := 'make_empty_i64_list',
+  sql_name := 'make_empty_i64_list',
+  return_type := 'i64[]',
+  arg_types := []
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT CAST(make_empty_i64_list() AS VARCHAR), make_empty_i64_list() IS NULL;
+----
+[]	false
 
 query TTT
 SELECT ok, mode, code
