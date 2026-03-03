@@ -54,6 +54,8 @@ Outside `tcc_module(...)`, we expose `tcc_system_paths(...)`, `tcc_library_probe
 
 For `compile`, `quick_compile`, and `codegen_preview`, we provide `return_type` and `arg_types` (`[]` for zero args). The parser accepts scalar tokens (`void`, `bool`, `i8..u64`, `f32/f64`, `ptr`, `varchar`, `blob`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`) plus nested forms (`list<type>`, `type[]`, `type[N]`, `struct<name:type;...>`, `map<key_type;value_type>`, `union<name:type;...>`). Nested signatures are recursive. `wrapper_mode` can be `row` (default) or `batch`.
 
+`decimal` maps to `ducktinycc_decimal_t`, a 128-bit scaled integer carrying `width` and `scale` metadata. SQL `DECIMAL(18,3)` values are passed through the bridge and round-tripped faithfully.
+
 ## How It Works
 
 At compile time, we parse signature tokens into recursive type descriptors, generate wrapper C source around the target symbol, and build one in-memory TinyCC artifact (`tcc_new -> compile -> relocate -> module_init`). No shared library file is emitted.
@@ -61,6 +63,18 @@ At compile time, we parse signature tokens into recursive type descriptors, gene
 The generated module init calls `ducktinycc_register_signature(...)`, which registers the SQL scalar UDF through the extension-managed DuckDB connection. During execution, the runtime bridge marshals DuckDB vectors into C bridge descriptors (including nested `LIST/ARRAY/STRUCT/MAP/UNION`) and writes return values back into DuckDB vectors.
 
 `tcc_new_state` resets staged build inputs and increments `state_id`; it does not allocate a new `TCCState`. `config_reset` clears staged state and runtime path, but it does not remove already registered internal UDF entries.
+
+## Build and Test during development
+
+```sh
+make configure
+make debug
+make release
+
+make test_debug
+make test_release
+```
+
 
 ## Examples
 
@@ -215,6 +229,28 @@ SELECT array_sum3_demo([1, NULL, 3]::BIGINT[3]) AS array_sum;
 SQL
 ```
 
+### DECIMAL Round-Trip
+
+This example echoes a `DECIMAL(18,3)` value through a C function. The bridge represents decimals as a `ducktinycc_decimal_t` struct (a 128-bit scaled integer with width and scale metadata).
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_decimal_t decimal_echo(ducktinycc_decimal_t d){ return d; }',
+  symbol := 'decimal_echo',
+  sql_name := 'decimal_echo',
+  return_type := 'decimal',
+  arg_types := ['decimal']
+);
+
+SELECT decimal_echo(12.345::DECIMAL(18,3)) AS value;
+SQL
+```
+
 ### Inspect Runtime Paths and Library Resolution
 
 This example shows where TinyCC looks for assets and how a library probe resolves candidates.
@@ -338,18 +374,9 @@ SELECT r_hello_from_embedded() AS msg;
 SQL
 ```
 
-## Build and Test
 
-```sh
-make configure
-make debug
-make release
 
-make test_debug
-make test_release
-```
-
-## What Remains Before 1.0
+## What Remains Before 1.0.0
 
 We have broad nested-type coverage today, including `UNION`, but we still have focused cleanup work before API freeze. The remaining work is to harden `UNION` behavior in deeper nested and mixed row/batch edge cases, continue simplifying and deduplicating internal nested-type marshalling paths (`LIST/ARRAY/STRUCT/MAP/UNION`), and expose a safer explicit set of DuckDB functions as C-callable symbols for generated modules.
 
