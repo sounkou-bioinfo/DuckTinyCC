@@ -34,7 +34,7 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Public SQL entrypoint: `tcc_module(...)`
 - Implemented modes:
   - Session/config: `config_get`, `config_set`, `config_reset`, `list`, `tcc_new_state`
-  - Build staging: `add_include`, `add_sysinclude`, `add_library_path`, `add_library`, `add_option`, `add_define`, `add_header`, `add_source`, `tinycc_bind`
+  - Build staging: `add_include`, `add_sysinclude`, `add_library_path`, `add_library`, `add_option`, `add_define`, `add_header`, `add_source`, `add_symbol`, `tinycc_bind`
   - Compile/codegen: `compile`, `quick_compile`, `codegen_preview`
   - Discovery helpers (separate table functions): `tcc_system_paths(...)`, `tcc_library_probe(...)`
 - Wrapper/runtime model (Rtinycc-style API-mode codegen):
@@ -54,6 +54,13 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Artifact finalization is explicit:
   - error path: `tcc_delete` immediately,
   - replacement or shutdown path: `tcc_artifact_destroy` via registry entry cleanup and module-state destructor.
+
+## Symbol Injection Rules
+- `add_symbol` stages a name+pointer pair into the session; replayed via `tcc_add_symbol(s, name, (void*)(uintptr_t)ptr)` before compilation.
+- `symbol_name` must be a valid C identifier (VARCHAR); `symbol_ptr` is a UBIGINT raw address.
+- Named parameters to table functions must be constants; use `tcc_dataptr(handle)` in a preceding query and pass the literal value, or use the address-as-value pattern (`extern char SYM[]; (uintptr_t)SYM`).
+- User symbols are injected after host symbols (`TCC_HOST_SYMBOL_TABLE`) and before `tcc_compile_string`, during `tcc_apply_session_to_state`.
+- Cleared by `tcc_new_state` along with all other staged build inputs.
 
 ## Library Linking Rules
 - `add_library_path` appends explicit search directories for `tcc_add_library_path`.
