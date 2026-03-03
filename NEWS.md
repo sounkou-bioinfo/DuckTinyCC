@@ -20,6 +20,10 @@
 - replace sequential `tcc_equals_ci` if/else chain in `tcc_parse_type_token` with table-driven lookup over `simple_tokens[]` array, eliminating ~60 lines
 - consolidate `tcc_struct_meta_destroy` and `tcc_union_meta_destroy` via shared `tcc_composite_meta_free_inner` helper
 - document `decimal` type bridge (`ducktinycc_decimal_t`) and add DECIMAL round-trip example in README.Rmd
+- **bugfix**: fix UNION vector input bridge and output write-back to use correct DuckDB internal layout — tags are now read from child\[0\] (tag vector) via `duckdb_struct_vector_get_child(vector, 0)` instead of `duckdb_vector_get_data(vector)` which returns NULL for STRUCT/UNION physical type; member vectors are now accessed at child\[i+1\] instead of child\[i\] to skip the tag child
+- add `ducktinycc_union_tag`, `ducktinycc_union_member_ptr`, `ducktinycc_union_member_is_valid` host-exported helper functions for UNION descriptor access, consistent with existing LIST/STRUCT/MAP helpers
+- export `duckdb_validity_row_is_valid` as a host symbol available to TCC-compiled code for direct validity bitmap queries
+- add UNION input round-trip and output return end-to-end tests
 
 ## ducktinycc 0.0.3 (2026-03-02)
 
