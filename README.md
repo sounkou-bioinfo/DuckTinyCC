@@ -214,6 +214,136 @@ SQL
     │    42 │
     └───────┘
 
+### Simple STRUCT Argument
+
+This example takes one `STRUCT(a BIGINT, b BIGINT)` argument and sums
+valid fields.
+
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long struct_sum_demo(ducktinycc_struct_t s){
+  const long long *a;
+  const long long *b;
+  long long out = 0;
+  if (!s.field_ptrs || s.field_count < 2) return 0;
+  a = (const long long *)ducktinycc_struct_field_ptr(&s, 0);
+  b = (const long long *)ducktinycc_struct_field_ptr(&s, 1);
+  if (a && ducktinycc_struct_field_is_valid(&s, 0)) out += a[s.offset];
+  if (b && ducktinycc_struct_field_is_valid(&s, 1)) out += b[s.offset];
+  return out;
+}',
+  symbol := 'struct_sum_demo',
+  sql_name := 'struct_sum_demo',
+  return_type := 'i64',
+  arg_types := ['struct<a:i64;b:i64>']
+);
+
+SELECT struct_sum_demo({'a': 2::BIGINT, 'b': 5::BIGINT}::STRUCT(a BIGINT, b BIGINT)) AS both_set;
+SELECT struct_sum_demo({'a': 2::BIGINT, 'b': NULL::BIGINT}::STRUCT(a BIGINT, b BIGINT)) AS one_null;
+SQL
+```
+
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    ┌──────────┐
+    │ both_set │
+    │  int64   │
+    ├──────────┤
+    │        7 │
+    └──────────┘
+    ┌──────────┐
+    │ one_null │
+    │  int64   │
+    ├──────────┤
+    │        2 │
+    └──────────┘
+
+### Simple LIST and ARRAY Arguments
+
+This example compiles one function for `BIGINT[]` (`i64[]`) and one for
+fixed-size `BIGINT[3]` (`i64[3]`).
+
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long list_sum_demo(ducktinycc_list_t a){
+  const long long *p = (const long long *)a.ptr;
+  unsigned long long i;
+  long long s = 0;
+  if (!a.ptr) return 0;
+  for (i = 0; i < a.len; i++) {
+    if (ducktinycc_list_is_valid(&a, i)) s += p[i];
+  }
+  return s;
+}',
+  symbol := 'list_sum_demo',
+  sql_name := 'list_sum_demo',
+  return_type := 'i64',
+  arg_types := ['i64[]']
+);
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long array_sum3_demo(ducktinycc_array_t a){
+  const long long *p = (const long long *)a.ptr;
+  unsigned long long i;
+  long long s = 0;
+  if (!a.ptr) return 0;
+  for (i = 0; i < a.len; i++) {
+    if (ducktinycc_array_is_valid(&a, i)) s += p[i];
+  }
+  return s;
+}',
+  symbol := 'array_sum3_demo',
+  sql_name := 'array_sum3_demo',
+  return_type := 'i64',
+  arg_types := ['i64[3]']
+);
+
+SELECT list_sum_demo([1, NULL, 3]::BIGINT[]) AS list_sum;
+SELECT array_sum3_demo([1, NULL, 3]::BIGINT[3]) AS array_sum;
+SQL
+```
+
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    ┌──────────┐
+    │ list_sum │
+    │  int64   │
+    ├──────────┤
+    │        4 │
+    └──────────┘
+    ┌───────────┐
+    │ array_sum │
+    │   int64   │
+    ├───────────┤
+    │         4 │
+    └───────────┘
+
 ### Inspect Runtime Paths and Library Resolution
 
 This example shows where TinyCC looks for assets and how a library probe
