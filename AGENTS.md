@@ -42,8 +42,8 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - Wrapper modules are compiled+relocated in-memory via libtcc; no separate shared library artifact is produced.
   - Host symbols injected into each TCC state include `duckdb_ext_api`, `ducktinycc_register_signature`, and `ducktinycc_*` helper/runtime symbols used by generated wrappers.
   - Supported SQL-visible signature tokens include:
-    - Scalars: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64`, `ptr`, `varchar/cstring`, `blob`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`.
-    - Nested/composite: `LIST` (`list_*`, `type[]`, `list<...>`), fixed-size `ARRAY` (`type[N]`), `STRUCT` (`struct<...>`), `MAP` (`map<k;v>`), `UNION` (`union<name:type;...>`), with recursive nesting.
+    - Scalars: `void`, `bool`, `i8/u8`, `i16/u16`, `i32/u32`, `i64/u64`, `f32/f64`, `ptr`, `varchar`, `blob`, `uuid`, `date`, `time`, `timestamp`, `interval`, `decimal`.
+    - Nested/composite: `LIST` (`type[]`, `list<...>`), fixed-size `ARRAY` (`type[N]`), `STRUCT` (`struct<...>`), `MAP` (`map<k;v>`), `UNION` (`union<name:type;...>`), with recursive nesting.
 
 ## TinyCC State and Relocation Model
 - TinyCC states (`TCCState`) are created only in compile/codegen paths (`tcc_build_module_artifact` via `tcc_new`), not by `tcc_new_state`.
@@ -74,7 +74,6 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - added recursive descriptor-to-vector writer (`tcc_write_value_to_vector`) for composite returns.
   - `UNION` signatures are enabled (no longer blocked at parse time).
 - Compatibility notes:
-  - legacy list/array tokens (`list_i64`, `i64[]`, `i64[3]`) are still accepted.
   - descriptor semantics for list/map/array keep `ptr` as row-sliced base with `offset` retained for validity/global indexing (matching existing helper behavior).
 - Validation:
   - `make debug` and `make release` pass.
