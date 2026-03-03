@@ -24,6 +24,11 @@
 - add `ducktinycc_union_tag`, `ducktinycc_union_member_ptr`, `ducktinycc_union_member_is_valid` host-exported helper functions for UNION descriptor access, consistent with existing LIST/STRUCT/MAP helpers
 - export `duckdb_validity_row_is_valid` as a host symbol available to TCC-compiled code for direct validity bitmap queries
 - add UNION input round-trip and output return end-to-end tests
+- deduplicate ROW and BATCH wrapper codegen null-check type-dispatch: new `tcc_codegen_ret_null_check(ret_type)` helper replaces two 8-branch `else-if` ladders (~120 lines removed)
+- confirm `c_struct`/`c_union`/`c_bitfield` codegen already well-factored (shared `tcc_generate_c_composite_helpers_source`, single dispatcher, shared compile loop); no further dedup needed
+- add `docs/LIFETIME_OWNERSHIP.md`: comprehensive reference for descriptor struct ownership, validity bitmap semantics, heap domains, pointer registry contracts, generated helper ownership rules, and DuckDB extension state lifecycle
+- add deeper nested UNION tests: `union<a:i32[];b:i64>` (list member) and `union<a:i32;b:struct<x:i64;y:f64>>` (struct member) input round-trip tests
+- **new mode**: `add_symbol` — stages user-supplied symbol name + pointer pairs into the session; replayed via `tcc_add_symbol` at compile time. Enables injection of arbitrary function pointers, shared buffers, or host callbacks into TCC-compiled code. Parameters: `symbol_name` (VARCHAR) + `symbol_ptr` (UBIGINT). Cleared on `tcc_new_state`.
 
 ## ducktinycc 0.0.3 (2026-03-02)
 

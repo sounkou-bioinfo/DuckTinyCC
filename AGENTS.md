@@ -34,7 +34,7 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Public SQL entrypoint: `tcc_module(...)`
 - Implemented modes:
   - Session/config: `config_get`, `config_set`, `config_reset`, `list`, `tcc_new_state`
-  - Build staging: `add_include`, `add_sysinclude`, `add_library_path`, `add_library`, `add_option`, `add_define`, `add_header`, `add_source`, `tinycc_bind`
+  - Build staging: `add_include`, `add_sysinclude`, `add_library_path`, `add_library`, `add_option`, `add_define`, `add_header`, `add_source`, `add_symbol`, `tinycc_bind`
   - Compile/codegen: `compile`, `quick_compile`, `codegen_preview`
   - Discovery helpers (separate table functions): `tcc_system_paths(...)`, `tcc_library_probe(...)`
 - Wrapper/runtime model (Rtinycc-style API-mode codegen):
@@ -54,6 +54,13 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Artifact finalization is explicit:
   - error path: `tcc_delete` immediately,
   - replacement or shutdown path: `tcc_artifact_destroy` via registry entry cleanup and module-state destructor.
+
+## Symbol Injection Rules
+- `add_symbol` stages a name+pointer pair into the session; replayed via `tcc_add_symbol(s, name, (void*)(uintptr_t)ptr)` before compilation.
+- `symbol_name` must be a valid C identifier (VARCHAR); `symbol_ptr` is a UBIGINT raw address.
+- Named parameters to table functions must be constants; use `tcc_dataptr(handle)` in a preceding query and pass the literal value, or use the address-as-value pattern (`extern char SYM[]; (uintptr_t)SYM`).
+- User symbols are injected after host symbols (`TCC_HOST_SYMBOL_TABLE`) and before `tcc_compile_string`, during `tcc_apply_session_to_state`.
+- Cleared by `tcc_new_state` along with all other staged build inputs.
 
 ## Library Linking Rules
 - `add_library_path` appends explicit search directories for `tcc_add_library_path`.
@@ -90,6 +97,24 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - helper generators: `c_struct`, `c_union`, `c_bitfield`, `c_enum`.
   - codegen/compile modes: `codegen_preview`, `compile`, `quick_compile`.
 
+## Progress Snapshot (2026-03-02)
+- Two critical UNION vector layout bugs fixed:
+  - `duckdb_vector_get_data(union_vector)` returns NULL (STRUCT physical type has size 0); now accesses tag via `duckdb_struct_vector_get_child(vector, 0)`.
+  - Member `i` is at child `[i+1]` (child[0] is tag); fixed input bridge and output write-back.
+- UNION accessor helpers added and host-exported:
+  - `ducktinycc_union_tag(&u)`, `ducktinycc_union_member_ptr(&u, idx)`, `ducktinycc_union_member_is_valid(&u, idx)`.
+  - `duckdb_validity_row_is_valid` exported as host symbol for wrappers.
+- Codegen dedup completed:
+  - `tcc_codegen_ret_null_check(ret_type)` helper replaces 8-branch type-dispatch ladders in both ROW and BATCH wrapper codegen (~120 lines removed).
+  - c_struct/c_union/c_bitfield confirmed already well-factored (shared `tcc_generate_c_composite_helpers_source`, single dispatcher, shared compile loop).
+- Internal code quality improvements:
+  - X-macro `TCC_FFI_TYPE_TABLE` for FFI type definitions.
+  - Table-driven signature parser replaces manual if/else chains.
+  - Composite meta consolidation (shared field-list/binding-list infrastructure).
+- Lifetime/ownership documentation added: `docs/LIFETIME_OWNERSHIP.md` covers all descriptor structs, validity bitmap semantics, heap domains, pointer registry contracts, and generated helper ownership rules.
+- Nested UNION tests added: `union<a:i32[];b:i64>` (list member), `union<a:i32;b:struct<x:i64;y:f64>>` (struct member). All pass debug+release.
+- Validation: `make debug`, `make release`, `make test_debug`, `make test_release` all pass.
+
 ## Versioning and NEWS Policy
 - Use R-style development versions: `x.y.z.9000` means in-development; `x.y.z` means release.
 - Pre-`1.0.0` compatibility stance: prioritize correctness, simplification, and API clarity over backward compatibility.
@@ -105,15 +130,17 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - Bullets: what changed, why it matters, and any compatibility/runtime note.
 
 ## Tasks Ahead (Near Term)
-- Deduplicate code paths in runtime bridge/marshalling:
-  - row vs batch decode/encode for nested `LIST/ARRAY/STRUCT/MAP/UNION`.
-  - repeated allocation/cleanup branches in `tcc_execute_compiled_scalar_udf`.
-- Deduplicate codegen helper assembly for `c_struct`/`c_union`/`c_bitfield` where patterns are shared.
-- Add explicit lifetime/allocation documentation for C-facing helper/runtime functions:
-  - borrowed vs owned memory for descriptor structs (`ducktinycc_list_t`, `ducktinycc_array_t`, `ducktinycc_struct_t`, `ducktinycc_map_t`, `ducktinycc_union_t`).
-  - validity bitmap lifetime and indexing semantics (`offset` handling).
-  - pointer helper ownership rules (`tcc_alloc`, `tcc_free_ptr`, read/write helpers).
-  - contracts for generated helper functions (`*_new`, `*_free`, getters/setters, enum helpers).
+- Test coverage expansion:
+  - deeper nested composites inside UNION members (e.g., `union<a:list<struct<...>>;b:map<k;v>>`).
+  - UNION output with nested composite members (return union containing list/struct from C).
+  - edge cases: NULL union values, empty lists in unions, deeply recursive nesting.
+- Runtime bridge dedup opportunities:
+  - row vs batch allocation/cleanup branches in `tcc_execute_compiled_scalar_udf` still have some repeated patterns.
+  - list/array bridge paths are layout-identical and could share more code.
+- Release preparation:
+  - version bump policy enforcement (`0.0.4.9000` → `0.0.4` release cut).
+  - community extension submission review against latest `community-extensions/` templates.
+  - README.Rmd → README.md render and final review.
 
 ## Working Rules for This Repo
 - API is intentionally evolving; pre-`1.0.0`, do not spend effort on backward-compatibility shims unless explicitly required for a release.
