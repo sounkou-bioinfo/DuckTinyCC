@@ -2,11 +2,14 @@
 
 ## ducktinycc 0.0.2.9000 (2026-03-01)
 
-- document the actual SQL signature grammar used by `tcc_module(...)`, including scalar aliases and recursive composite tokens (`list<...>`, `type[]`, `type[N]`, `struct<...>`, `map<...>`, `union<...>`)
+- document the actual SQL signature grammar used by `tcc_module(...)`, including canonical scalar tokens and recursive composite tokens (`list<...>`, `type[]`, `type[N]`, `struct<...>`, `map<...>`, `union<...>`)
 - document SQL to C bridge correspondences for scalar and composite signatures, including union support
 - clarify runtime asset expectations for compile/codegen flows, including the role of `libtcc1.a`
 - correct README "How It Works" details for host symbol injection and recursive bridge marshalling
 - update community extension description text and add the public project reference URL
+- remove legacy scalar/list alias tokens from signature parsing; only canonical tokens are accepted
+- reduce duplicate runtime marshalling branches by routing composite arguments through typedesc bridges
+- fix recursive composite writeback to avoid reading invalid nested values
 
 ## ducktinycc 0.0.2 (2026-02-27)
 

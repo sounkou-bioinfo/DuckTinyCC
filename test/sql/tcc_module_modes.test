@@ -429,7 +429,7 @@ FROM tcc_module(
   symbol := 'struct_list_sum',
   sql_name := 'struct_list_sum',
   return_type := 'i64',
-  arg_types := ['struct<s:list_i64>']
+  arg_types := ['struct<s:list<i64>>']
 );
 ----
 true	quick_compile	OK
@@ -538,7 +538,7 @@ FROM tcc_module(
   symbol := 'echo_cstr',
   sql_name := 'echo_cstr',
   return_type := 'varchar',
-  arg_types := ['cstring']
+  arg_types := ['varchar']
 );
 ----
 true	quick_compile	OK
@@ -557,11 +557,24 @@ query TTT
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
+  source := 'const char *bad_alias(const char *s){ return s; }',
+  symbol := 'bad_alias',
+  sql_name := 'bad_alias',
+  return_type := 'text',
+  arg_types := ['varchar']
+);
+----
+false	quick_compile	E_BAD_SIGNATURE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
   source := 'const char *empty_to_null(const char *s){ if (!s || s[0] == 0) return 0; return s; }',
   symbol := 'empty_to_null',
   sql_name := 'empty_to_null',
-  return_type := 'text',
-  arg_types := ['string']
+  return_type := 'varchar',
+  arg_types := ['varchar']
 );
 ----
 true	quick_compile	OK
@@ -626,8 +639,8 @@ FROM tcc_module(
   source := 'ducktinycc_blob_t blob_echo(ducktinycc_blob_t b){ return b; }',
   symbol := 'blob_echo',
   sql_name := 'blob_echo',
-  return_type := 'bytea',
-  arg_types := ['varbinary']
+  return_type := 'blob',
+  arg_types := ['blob']
 );
 ----
 true	quick_compile	OK
@@ -649,8 +662,8 @@ FROM tcc_module(
   source := 'ducktinycc_blob_t batch_blob_echo(ducktinycc_blob_t b){ return b; }',
   symbol := 'batch_blob_echo',
   sql_name := 'batch_blob_echo',
-  return_type := 'buffer',
-  arg_types := ['bytes'],
+  return_type := 'blob',
+  arg_types := ['blob'],
   wrapper_mode := 'batch'
 );
 ----
@@ -1060,7 +1073,7 @@ FROM tcc_module(
   symbol := 'sum_i64_batch',
   sql_name := 'sum_i64_batch',
   return_type := 'i64',
-  arg_types := ['list_i64'],
+  arg_types := ['list<i64>'],
   wrapper_mode := 'batch'
 );
 ----
@@ -1504,7 +1517,7 @@ FROM tcc_module(
   symbol := 'bad_union',
   sql_name := 'bad_union',
   return_type := 'i64',
-  arg_types := ['union<a:list_i64;b:i64>']
+  arg_types := ['union<a:list<i64>;b:i64>']
 );
 ----
 true	quick_compile	OK

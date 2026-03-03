@@ -614,10 +614,10 @@ make test_release
 We have broad nested-type coverage today, including `UNION`, but we
 still have focused cleanup work before API freeze. The remaining work is
 to harden `UNION` behavior in deeper nested and mixed row/batch edge
-cases, simplify and deduplicate internal nested-type marshalling paths
-(`LIST/ARRAY/STRUCT/MAP/UNION`), remove legacy type-token aliases in
-favor of a smaller canonical vocabulary, and expose a safer explicit set
-of DuckDB functions as C-callable symbols for generated modules.
+cases, continue simplifying and deduplicating internal nested-type
+marshalling paths (`LIST/ARRAY/STRUCT/MAP/UNION`), and expose a safer
+explicit set of DuckDB functions as C-callable symbols for generated
+modules.
 
 ## Notes
 

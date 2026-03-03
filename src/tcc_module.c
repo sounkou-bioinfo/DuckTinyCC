@@ -4871,6 +4871,15 @@ static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t
 			if (list->validity) {
 				child_valid = (list->validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
 			}
+			if (!child_valid) {
+				if (!tcc_set_vector_row_validity(child_vector, child_offset + i, false)) {
+					if (out_error) {
+						*out_error = "ducktinycc failed to set list child validity";
+					}
+					return false;
+				}
+				continue;
+			}
 			if (!tcc_write_value_to_vector(child_vector, desc->as.list_like.child, child_offset + i, list->ptr,
 			                               (uint64_t)i, NULL, out_error)) {
 				return false;
@@ -4905,6 +4914,15 @@ static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t
 			bool child_valid = true;
 			if (arr->validity) {
 				child_valid = (arr->validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
+			}
+			if (!child_valid) {
+				if (!tcc_set_vector_row_validity(child_vector, (idx_t)((size_t)row * array_len) + i, false)) {
+					if (out_error) {
+						*out_error = "ducktinycc failed to set array child validity";
+					}
+					return false;
+				}
+				continue;
 			}
 			if (!tcc_write_value_to_vector(child_vector, desc->as.list_like.child, (idx_t)((size_t)row * array_len) + i,
 			                               arr->ptr, (uint64_t)i, NULL, out_error)) {
@@ -4985,10 +5003,26 @@ static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t
 			if (m->value_validity) {
 				value_valid = (m->value_validity[src_idx >> 6] & (1ULL << (src_idx & 63))) != 0;
 			}
-			if (!tcc_write_value_to_vector(key_vector, desc->as.map_like.key, child_offset + i, m->key_ptr, (uint64_t)i, NULL,
-			                               out_error) ||
-			    !tcc_write_value_to_vector(value_vector, desc->as.map_like.value, child_offset + i, m->value_ptr,
-			                               (uint64_t)i, NULL, out_error)) {
+			if (key_valid) {
+				if (!tcc_write_value_to_vector(key_vector, desc->as.map_like.key, child_offset + i, m->key_ptr,
+				                               (uint64_t)i, NULL, out_error)) {
+					return false;
+				}
+			} else if (!tcc_set_vector_row_validity(key_vector, child_offset + i, false)) {
+				if (out_error) {
+					*out_error = "ducktinycc failed to set map key validity";
+				}
+				return false;
+			}
+			if (value_valid) {
+				if (!tcc_write_value_to_vector(value_vector, desc->as.map_like.value, child_offset + i, m->value_ptr,
+				                               (uint64_t)i, NULL, out_error)) {
+					return false;
+				}
+			} else if (!tcc_set_vector_row_validity(value_vector, child_offset + i, false)) {
+				if (out_error) {
+					*out_error = "ducktinycc failed to set map value validity";
+				}
 				return false;
 			}
 			if (!tcc_set_vector_row_validity(key_vector, child_offset + i, key_valid) ||
@@ -5693,156 +5727,12 @@ static void tcc_execute_compiled_scalar_udf(duckdb_function_info info, duckdb_da
 					batch_arg_data[col] = (void *)decoded;
 				} else if (arg_value_bridges && arg_value_bridges[col]) {
 					batch_arg_data[col] = (void *)in_data[col];
-				} else if (tcc_ffi_type_is_list(ctx->arg_types[col])) {
-					ducktinycc_list_t *decoded = NULL;
-					if (n > 0) {
-						decoded = (ducktinycc_list_t *)duckdb_malloc(sizeof(ducktinycc_list_t) * (size_t)n);
-						if (!decoded) {
-							error = "ducktinycc out of memory";
-							goto cleanup;
-						}
-						for (row = 0; row < n; row++) {
-							if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
-								decoded[row].ptr = NULL;
-								decoded[row].validity = NULL;
-								decoded[row].offset = 0;
-								decoded[row].len = 0;
-							} else {
-								duckdb_list_entry entry = list_entries_columns[col][row];
-								decoded[row].ptr =
-								    list_child_data_columns[col]
-								        ? (const void *)(list_child_data_columns[col] +
-								                         ((size_t)entry.offset * list_child_sizes[col]))
-								        : NULL;
-								decoded[row].validity = list_child_validity_columns[col];
-								decoded[row].offset = (uint64_t)entry.offset;
-								decoded[row].len = (uint64_t)entry.length;
-							}
-						}
-					}
-					batch_list_columns[col] = decoded;
-					batch_arg_data[col] = (void *)decoded;
-				} else if (tcc_ffi_type_is_array(ctx->arg_types[col])) {
-					ducktinycc_array_t *decoded = NULL;
-					size_t array_len = ctx->arg_array_sizes ? ctx->arg_array_sizes[col] : 0;
-					if (n > 0) {
-						decoded = (ducktinycc_array_t *)duckdb_malloc(sizeof(ducktinycc_array_t) * (size_t)n);
-						if (!decoded) {
-							error = "ducktinycc out of memory";
-							goto cleanup;
-						}
-						for (row = 0; row < n; row++) {
-							if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
-								decoded[row].ptr = NULL;
-								decoded[row].validity = NULL;
-								decoded[row].offset = 0;
-								decoded[row].len = 0;
-							} else {
-								uint64_t off = (uint64_t)row * (uint64_t)array_len;
-								decoded[row].ptr =
-								    array_child_data_columns[col]
-								        ? (const void *)(array_child_data_columns[col] +
-								                         ((size_t)off * array_child_sizes[col]))
-								        : NULL;
-								decoded[row].validity = array_child_validity_columns[col];
-								decoded[row].offset = off;
-								decoded[row].len = (uint64_t)array_len;
-							}
-						}
-					}
-					batch_array_columns[col] = decoded;
-					batch_arg_data[col] = (void *)decoded;
-				} else if (tcc_ffi_type_is_struct(ctx->arg_types[col])) {
-					ducktinycc_struct_t *decoded = NULL;
-					idx_t field_count = struct_field_counts[col];
-					if (n > 0) {
-						decoded = (ducktinycc_struct_t *)duckdb_malloc(sizeof(ducktinycc_struct_t) * (size_t)n);
-						if (!decoded) {
-							error = "ducktinycc out of memory";
-							goto cleanup;
-						}
-						for (row = 0; row < n; row++) {
-							if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
-								decoded[row].field_ptrs = NULL;
-								decoded[row].field_validity = NULL;
-								decoded[row].field_count = 0;
-								decoded[row].offset = 0;
-							} else {
-								decoded[row].field_ptrs = (const void *const *)struct_child_data_columns[col];
-								decoded[row].field_validity =
-								    (const uint64_t *const *)struct_child_validity_columns[col];
-								decoded[row].field_count = (uint64_t)field_count;
-								decoded[row].offset = (uint64_t)row;
-							}
-						}
-					}
-					batch_struct_columns[col] = decoded;
-					batch_arg_data[col] = (void *)decoded;
-				} else if (tcc_ffi_type_is_map(ctx->arg_types[col])) {
-					ducktinycc_map_t *decoded = NULL;
-					if (n > 0) {
-						decoded = (ducktinycc_map_t *)duckdb_malloc(sizeof(ducktinycc_map_t) * (size_t)n);
-						if (!decoded) {
-							error = "ducktinycc out of memory";
-							goto cleanup;
-						}
-						for (row = 0; row < n; row++) {
-							if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
-								decoded[row].key_ptr = NULL;
-								decoded[row].key_validity = NULL;
-								decoded[row].value_ptr = NULL;
-								decoded[row].value_validity = NULL;
-								decoded[row].offset = 0;
-								decoded[row].len = 0;
-							} else {
-								duckdb_list_entry entry = map_entries_columns[col][row];
-								decoded[row].key_ptr =
-								    map_key_data_columns[col]
-								        ? (const void *)(map_key_data_columns[col] +
-								                         ((size_t)entry.offset * map_key_sizes[col]))
-								        : NULL;
-								decoded[row].key_validity = map_key_validity_columns[col];
-								decoded[row].value_ptr =
-								    map_value_data_columns[col]
-								        ? (const void *)(map_value_data_columns[col] +
-								                         ((size_t)entry.offset * map_value_sizes[col]))
-								        : NULL;
-								decoded[row].value_validity = map_value_validity_columns[col];
-								decoded[row].offset = (uint64_t)entry.offset;
-								decoded[row].len = (uint64_t)entry.length;
-							}
-						}
-					}
-					batch_map_columns[col] = decoded;
-					batch_arg_data[col] = (void *)decoded;
-				} else if (tcc_ffi_type_is_union(ctx->arg_types[col])) {
-					ducktinycc_union_t *decoded = NULL;
-					idx_t member_count = union_member_counts[col];
-					if (n > 0) {
-						decoded = (ducktinycc_union_t *)duckdb_malloc(sizeof(ducktinycc_union_t) * (size_t)n);
-						if (!decoded) {
-							error = "ducktinycc out of memory";
-							goto cleanup;
-						}
-						for (row = 0; row < n; row++) {
-							if (in_validity[col] && !duckdb_validity_row_is_valid(in_validity[col], row)) {
-								decoded[row].tag_ptr = NULL;
-								decoded[row].member_ptrs = NULL;
-								decoded[row].member_validity = NULL;
-								decoded[row].member_count = 0;
-								decoded[row].offset = 0;
-							} else {
-								decoded[row].tag_ptr = union_tag_columns[col];
-								decoded[row].member_ptrs = (const void *const *)union_member_data_columns[col];
-								decoded[row].member_validity =
-								    (const uint64_t *const *)union_member_validity_columns[col];
-								decoded[row].member_count = (uint64_t)member_count;
-								decoded[row].offset = (uint64_t)row;
-							}
-						}
-					}
-					batch_union_columns[col] = decoded;
-					batch_arg_data[col] = (void *)decoded;
+				} else if ((ctx->arg_types[col] == TCC_FFI_LIST || ctx->arg_types[col] == TCC_FFI_ARRAY ||
+				            ctx->arg_types[col] == TCC_FFI_STRUCT || ctx->arg_types[col] == TCC_FFI_MAP ||
+				            ctx->arg_types[col] == TCC_FFI_UNION) &&
+				           (!ctx->arg_descs || !ctx->arg_descs[col])) {
+					error = "ducktinycc composite arg descriptor is missing";
+					goto cleanup;
 				} else {
 					batch_arg_data[col] = (void *)in_data[col];
 				}
@@ -6217,55 +6107,12 @@ static void tcc_execute_compiled_scalar_udf(duckdb_function_info info, duckdb_da
 					arg_ptrs[col] = (void *)&row_blob_values[col];
 				} else if (arg_value_bridges && arg_value_bridges[col]) {
 					arg_ptrs[col] = (void *)(in_data[col] + ((size_t)row * ctx->arg_sizes[col]));
-				} else if (tcc_ffi_type_is_list(ctx->arg_types[col])) {
-					duckdb_list_entry entry = list_entries_columns[col][row];
-					row_list_values[col].ptr =
-					    list_child_data_columns[col]
-					        ? (const void *)(list_child_data_columns[col] + ((size_t)entry.offset * list_child_sizes[col]))
-					        : NULL;
-					row_list_values[col].validity = list_child_validity_columns[col];
-					row_list_values[col].offset = (uint64_t)entry.offset;
-					row_list_values[col].len = (uint64_t)entry.length;
-					arg_ptrs[col] = (void *)&row_list_values[col];
-				} else if (tcc_ffi_type_is_array(ctx->arg_types[col])) {
-					size_t array_len = ctx->arg_array_sizes ? ctx->arg_array_sizes[col] : 0;
-					uint64_t off = (uint64_t)row * (uint64_t)array_len;
-					row_array_values[col].ptr =
-					    array_child_data_columns[col]
-					        ? (const void *)(array_child_data_columns[col] + ((size_t)off * array_child_sizes[col]))
-					        : NULL;
-					row_array_values[col].validity = array_child_validity_columns[col];
-					row_array_values[col].offset = off;
-					row_array_values[col].len = (uint64_t)array_len;
-					arg_ptrs[col] = (void *)&row_array_values[col];
-				} else if (tcc_ffi_type_is_struct(ctx->arg_types[col])) {
-					row_struct_values[col].field_ptrs = (const void *const *)struct_child_data_columns[col];
-					row_struct_values[col].field_validity = (const uint64_t *const *)struct_child_validity_columns[col];
-					row_struct_values[col].field_count = (uint64_t)struct_field_counts[col];
-					row_struct_values[col].offset = (uint64_t)row;
-					arg_ptrs[col] = (void *)&row_struct_values[col];
-				} else if (tcc_ffi_type_is_map(ctx->arg_types[col])) {
-					duckdb_list_entry entry = map_entries_columns[col][row];
-					row_map_values[col].key_ptr =
-					    map_key_data_columns[col]
-					        ? (const void *)(map_key_data_columns[col] + ((size_t)entry.offset * map_key_sizes[col]))
-					        : NULL;
-					row_map_values[col].key_validity = map_key_validity_columns[col];
-					row_map_values[col].value_ptr =
-					    map_value_data_columns[col]
-					        ? (const void *)(map_value_data_columns[col] + ((size_t)entry.offset * map_value_sizes[col]))
-					        : NULL;
-					row_map_values[col].value_validity = map_value_validity_columns[col];
-					row_map_values[col].offset = (uint64_t)entry.offset;
-					row_map_values[col].len = (uint64_t)entry.length;
-					arg_ptrs[col] = (void *)&row_map_values[col];
-				} else if (tcc_ffi_type_is_union(ctx->arg_types[col])) {
-					row_union_values[col].tag_ptr = union_tag_columns[col];
-					row_union_values[col].member_ptrs = (const void *const *)union_member_data_columns[col];
-					row_union_values[col].member_validity = (const uint64_t *const *)union_member_validity_columns[col];
-					row_union_values[col].member_count = (uint64_t)union_member_counts[col];
-					row_union_values[col].offset = (uint64_t)row;
-					arg_ptrs[col] = (void *)&row_union_values[col];
+				} else if ((ctx->arg_types[col] == TCC_FFI_LIST || ctx->arg_types[col] == TCC_FFI_ARRAY ||
+				            ctx->arg_types[col] == TCC_FFI_STRUCT || ctx->arg_types[col] == TCC_FFI_MAP ||
+				            ctx->arg_types[col] == TCC_FFI_UNION) &&
+				           (!ctx->arg_descs || !ctx->arg_descs[col])) {
+					error = "ducktinycc composite arg descriptor is missing";
+					goto cleanup;
 				} else {
 					arg_ptrs[col] = (void *)(in_data[col] + ((size_t)row * ctx->arg_sizes[col]));
 				}
@@ -8201,63 +8048,59 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 		*out_type = TCC_FFI_VOID;
 		return true;
 	}
-	if (tcc_equals_ci(token, "bool") || tcc_equals_ci(token, "boolean")) {
+	if (tcc_equals_ci(token, "bool")) {
 		*out_type = TCC_FFI_BOOL;
 		return true;
 	}
-	if (tcc_equals_ci(token, "i8") || tcc_equals_ci(token, "int8") || tcc_equals_ci(token, "tinyint")) {
+	if (tcc_equals_ci(token, "i8")) {
 		*out_type = TCC_FFI_I8;
 		return true;
 	}
-	if (tcc_equals_ci(token, "u8") || tcc_equals_ci(token, "uint8") || tcc_equals_ci(token, "utinyint")) {
+	if (tcc_equals_ci(token, "u8")) {
 		*out_type = TCC_FFI_U8;
 		return true;
 	}
-	if (tcc_equals_ci(token, "i16") || tcc_equals_ci(token, "int16") || tcc_equals_ci(token, "smallint")) {
+	if (tcc_equals_ci(token, "i16")) {
 		*out_type = TCC_FFI_I16;
 		return true;
 	}
-	if (tcc_equals_ci(token, "u16") || tcc_equals_ci(token, "uint16") || tcc_equals_ci(token, "usmallint")) {
+	if (tcc_equals_ci(token, "u16")) {
 		*out_type = TCC_FFI_U16;
 		return true;
 	}
-	if (tcc_equals_ci(token, "i32") || tcc_equals_ci(token, "int32") || tcc_equals_ci(token, "integer")) {
+	if (tcc_equals_ci(token, "i32")) {
 		*out_type = TCC_FFI_I32;
 		return true;
 	}
-	if (tcc_equals_ci(token, "u32") || tcc_equals_ci(token, "uint32") || tcc_equals_ci(token, "uinteger")) {
+	if (tcc_equals_ci(token, "u32")) {
 		*out_type = TCC_FFI_U32;
 		return true;
 	}
-	if (tcc_equals_ci(token, "i64") || tcc_equals_ci(token, "int64") || tcc_equals_ci(token, "bigint") ||
-	    tcc_equals_ci(token, "longlong")) {
+	if (tcc_equals_ci(token, "i64")) {
 		*out_type = TCC_FFI_I64;
 		return true;
 	}
-	if (tcc_equals_ci(token, "u64") || tcc_equals_ci(token, "uint64") || tcc_equals_ci(token, "ubigint") ||
-	    tcc_equals_ci(token, "ulonglong")) {
+	if (tcc_equals_ci(token, "u64")) {
 		*out_type = TCC_FFI_U64;
 		return true;
 	}
-	if (tcc_equals_ci(token, "ptr") || tcc_equals_ci(token, "pointer") || tcc_equals_ci(token, "c_ptr")) {
+	if (tcc_equals_ci(token, "ptr")) {
 		*out_type = TCC_FFI_PTR;
 		return true;
 	}
-	if (tcc_equals_ci(token, "f32") || tcc_equals_ci(token, "float") || tcc_equals_ci(token, "real")) {
+	if (tcc_equals_ci(token, "f32")) {
 		*out_type = TCC_FFI_F32;
 		return true;
 	}
-	if (tcc_equals_ci(token, "f64") || tcc_equals_ci(token, "double")) {
+	if (tcc_equals_ci(token, "f64")) {
 		*out_type = TCC_FFI_F64;
 		return true;
 	}
-	if (tcc_equals_ci(token, "varchar") || tcc_equals_ci(token, "text") || tcc_equals_ci(token, "string") ||
-	    tcc_equals_ci(token, "cstring")) {
+	if (tcc_equals_ci(token, "varchar")) {
 		*out_type = TCC_FFI_VARCHAR;
 		return true;
 	}
-	if (tcc_equals_ci(token, "blob") || tcc_equals_ci(token, "bytea") || tcc_equals_ci(token, "binary") ||
-	    tcc_equals_ci(token, "varbinary") || tcc_equals_ci(token, "buffer") || tcc_equals_ci(token, "bytes")) {
+	if (tcc_equals_ci(token, "blob")) {
 		*out_type = TCC_FFI_BLOB;
 		return true;
 	}
@@ -8273,7 +8116,7 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 		*out_type = TCC_FFI_TIME;
 		return true;
 	}
-	if (tcc_equals_ci(token, "timestamp") || tcc_equals_ci(token, "datetime")) {
+	if (tcc_equals_ci(token, "timestamp")) {
 		*out_type = TCC_FFI_TIMESTAMP;
 		return true;
 	}
@@ -8281,7 +8124,7 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 		*out_type = TCC_FFI_INTERVAL;
 		return true;
 	}
-	if (tcc_equals_ci(token, "decimal") || tcc_equals_ci(token, "numeric")) {
+	if (tcc_equals_ci(token, "decimal")) {
 		*out_type = TCC_FFI_DECIMAL;
 		return true;
 	}
@@ -8321,19 +8164,6 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 			if (!ok) {
 				return false;
 			}
-		}
-		if (tcc_ffi_list_type_from_child(child_type, out_type)) {
-			return true;
-		}
-		*out_type = TCC_FFI_LIST;
-		return true;
-	}
-	if (token_len >= 5 && (token[0] == 'l' || token[0] == 'L') && (token[1] == 'i' || token[1] == 'I') &&
-	    (token[2] == 's' || token[2] == 'S') && (token[3] == 't' || token[3] == 'T') && token[4] == '_') {
-		tcc_ffi_type_t child_type = TCC_FFI_VOID;
-		size_t child_array_size = 0;
-		if (!tcc_parse_type_token(token + 5, false, &child_type, &child_array_size) || child_type == TCC_FFI_VOID) {
-			return false;
 		}
 		if (tcc_ffi_list_type_from_child(child_type, out_type)) {
 			return true;
@@ -10890,29 +10720,7 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 				const char *phase = "compile";
 				const char *code = "E_COMPILE_FAILED";
 				const char *message = "generated helper compile failed";
-				if (strstr(err.message, "wrapper_mode")) {
-					phase = "bind";
-					code = "E_BAD_WRAPPER_MODE";
-					message = "invalid wrapper_mode";
-				} else if (strstr(err.message, "return_type") || strstr(err.message, "arg_types") ||
-				           strstr(err.message, "struct token") || strstr(err.message, "map token") ||
-				           strstr(err.message, "fixed-width scalar tokens only")) {
-					phase = "bind";
-					code = "E_BAD_SIGNATURE";
-					message = "invalid helper signature";
-				} else if (strstr(err.message, "failed to generate codegen wrapper") || strstr(err.message, "out of memory")) {
-					phase = "codegen";
-					code = "E_CODEGEN_FAILED";
-					message = "generated helper codegen failed";
-				} else if (strstr(err.message, "no persistent extension connection")) {
-					phase = "load";
-					code = "E_NO_CONNECTION";
-					message = "no persistent extension connection available";
-				} else if (strstr(err.message, "generated module init returned false")) {
-					phase = "load";
-					code = "E_INIT_FAILED";
-					message = "generated helper module init returned false";
-				}
+				tcc_codegen_classify_error_message(err.message, &phase, &code, &message);
 				tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL,
 				              entry->sql_name, entry->symbol, NULL, "database");
 				goto tcc_c_helpers_done;
