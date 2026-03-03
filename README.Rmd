@@ -22,10 +22,10 @@ knitr::opts_chunk$set(
 The fastest path is `quick_compile`: one call compiles C source, generates a wrapper, relocates in memory, and registers a SQL function.
 
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
-if [ -f build/release/ducktinycc.duckdb_extension ]; then
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
+-- Compile and register one scalar UDF.
 SELECT ok, mode, phase, code, message
 FROM tcc_module(
   mode := 'quick_compile',
@@ -36,11 +36,9 @@ FROM tcc_module(
   arg_types := ['i32', 'i32']
 );
 
+-- Call the generated function.
 SELECT add_i32(20, 22) AS answer;
 SQL
-else
-  echo "build/release/ducktinycc.duckdb_extension not found; run make release first."
-fi
 ```
 
 ## API Overview
@@ -68,11 +66,13 @@ The generated module init calls `ducktinycc_register_signature(...)`, which regi
 
 ### Compile In One Call
 
+This example uses one-shot compile with `libm`, then calls the generated function.
+
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
-if [ -f build/release/ducktinycc.duckdb_extension ]; then
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
+-- Compile and register qpow.
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -85,36 +85,57 @@ double qpow(double x, double y){ return pow(x, y); }',
   library := 'm'
 );
 
+-- Use the generated function.
 SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
 SQL
-else
-  echo "build/release/ducktinycc.duckdb_extension not found; run make release first."
-fi
 ```
 
 ### Stage Then Compile
 
+This example stages source and binding first, then compiles in a separate call.
+
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
-if [ -f build/release/ducktinycc.duckdb_extension ]; then
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
-SELECT * FROM tcc_module(mode := 'tcc_new_state');
-SELECT * FROM tcc_module(mode := 'add_source', source := 'long long times2(long long x){ return x * 2; }');
-SELECT * FROM tcc_module(mode := 'tinycc_bind', symbol := 'times2', sql_name := 'times2');
-SELECT * FROM tcc_module(mode := 'compile', return_type := 'i64', arg_types := ['i64']);
+-- Reset staged state.
+SELECT *
+FROM tcc_module(
+  mode := 'tcc_new_state'
+);
+
+-- Stage source text.
+SELECT *
+FROM tcc_module(
+  mode := 'add_source',
+  source := 'long long times2(long long x){return x*2;}'
+);
+
+-- Stage symbol/sql name.
+SELECT *
+FROM tcc_module(
+  mode := 'tinycc_bind',
+  symbol := 'times2',
+  sql_name := 'times2'
+);
+
+-- Compile and register.
+SELECT *
+FROM tcc_module(
+  mode := 'compile',
+  return_type := 'i64',
+  arg_types := ['i64']
+);
 
 SELECT times2(21) AS value;
 SQL
-else
-  echo "build/release/ducktinycc.duckdb_extension not found; run make release first."
-fi
 ```
 
 ### Inspect Runtime Paths and Library Resolution
 
+This example shows where TinyCC looks for assets and how a library probe resolves candidates.
+
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
-if [ -f build/release/ducktinycc.duckdb_extension ]; then
 duckdb -unsigned <<'SQL'
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
@@ -124,9 +145,6 @@ FROM tcc_system_paths();
 SELECT kind, key, value, exists, detail
 FROM tcc_library_probe(library := 'libtcc1.a');
 SQL
-else
-  echo "build/release/ducktinycc.duckdb_extension not found; run make release first."
-fi
 ```
 
 ### Embedded R Demo (Unix-like)
@@ -134,15 +152,10 @@ fi
 The embedded R demo is still part of the repository. We keep it as an advanced interop example rather than a default workflow. The full source is inlined below and compiled through `tcc_module(...)`.
 
 ```{bash eval=TRUE, collapse=FALSE, comment=""}
-if ! command -v R >/dev/null 2>&1; then
-  echo "R not found; skipping embedded-R demo."
-elif [ ! -f build/release/ducktinycc.duckdb_extension ]; then
-  echo "build/release/ducktinycc.duckdb_extension not found; run make release first."
-else
-  export R_HOME="${R_HOME:-$(R RHOME)}"
-  R_INCLUDE_FLAGS="$(R CMD config --cppflags | tr ' ' '\n' | grep '^-I' | tr '\n' ' ')"
-  R_LIBDIR_FLAGS="$(R CMD config --ldflags | tr ' ' '\n' | grep '^-L' | tr '\n' ' ')"
-  cat > /tmp/ducktinycc_embed_r_udf.c <<'C'
+export R_HOME="${R_HOME:-$(R RHOME)}"
+R_INCLUDE_FLAGS="$(R CMD config --cppflags | tr ' ' '\n' | grep '^-I' | tr '\n' ' ')"
+R_LIBDIR_FLAGS="$(R CMD config --ldflags | tr ' ' '\n' | grep '^-L' | tr '\n' ' ')"
+cat > /tmp/ducktinycc_embed_r_udf.c <<'C'
 #include <Rembedded.h>
 #include <Rinternals.h>
 #include <R_ext/Parse.h>
@@ -154,7 +167,11 @@ const char *r_hello_from_embedded(void) {
     static char out[256];
 
     if (!r_initialized) {
-        char *argv[] = {(char *)"ducktinycc-embedded-r", (char *)"--silent", (char *)"--no-save"};
+        char *argv[] = {
+            (char *)"ducktinycc-embedded-r",
+            (char *)"--silent",
+            (char *)"--no-save"
+        };
         Rf_initEmbeddedR((int)(sizeof(argv) / sizeof(argv[0])), argv);
         r_initialized = 1;
     }
@@ -180,23 +197,61 @@ const char *r_hello_from_embedded(void) {
     return out;
 }
 C
-  SOURCE_SQL="$(sed "s/'/''/g" /tmp/ducktinycc_embed_r_udf.c)"
+SOURCE_SQL="$(sed "s/'/''/g" /tmp/ducktinycc_embed_r_udf.c)"
 duckdb -unsigned <<SQL
 LOAD 'build/release/ducktinycc.duckdb_extension';
 PRAGMA threads=1;
 
-SELECT ok, mode, code FROM tcc_module(mode := 'tcc_new_state');
-SELECT ok, mode, code FROM tcc_module(mode := 'add_include', include_path := 'third_party/tinycc/include');
-SELECT ok, mode, code FROM tcc_module(mode := 'add_sysinclude', sysinclude_path := 'third_party/tinycc/include');
-SELECT ok, mode, code FROM tcc_module(mode := 'add_define', define_name := 'R_LEGACY_RCOMPLEX', define_value := '1');
-SELECT ok, mode, code FROM tcc_module(mode := 'add_option', option := '${R_INCLUDE_FLAGS} ${R_LIBDIR_FLAGS}');
-SELECT ok, mode, code FROM tcc_module(mode := 'add_library', library := 'R');
-SELECT ok, mode, code FROM tcc_module(mode := 'add_source', source := '${SOURCE_SQL}');
-SELECT ok, mode, code FROM tcc_module(mode := 'tinycc_bind', symbol := 'r_hello_from_embedded', sql_name := 'r_hello_from_embedded');
-SELECT ok, mode, code FROM tcc_module(mode := 'compile', return_type := 'varchar', arg_types := []);
+-- Stage embedded-R build inputs and source.
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'tcc_new_state'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_include',
+  include_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_sysinclude',
+  sysinclude_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_define',
+  define_name := 'R_LEGACY_RCOMPLEX',
+  define_value := '1'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_option',
+  option := '${R_INCLUDE_FLAGS} ${R_LIBDIR_FLAGS}'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_library',
+  library := 'R'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_source',
+  source := '${SOURCE_SQL}'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'tinycc_bind',
+  symbol := 'r_hello_from_embedded',
+  sql_name := 'r_hello_from_embedded'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'compile',
+  return_type := 'varchar',
+  arg_types := []
+);
 SELECT r_hello_from_embedded() AS msg;
 SQL
-fi
 ```
 
 ## Build and Test
