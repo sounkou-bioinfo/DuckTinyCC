@@ -123,15 +123,17 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - Bullets: what changed, why it matters, and any compatibility/runtime note.
 
 ## Tasks Ahead (Near Term)
-- Deduplicate code paths in runtime bridge/marshalling:
-  - row vs batch decode/encode for nested `LIST/ARRAY/STRUCT/MAP/UNION`.
-  - repeated allocation/cleanup branches in `tcc_execute_compiled_scalar_udf`.
-- Deduplicate codegen helper assembly for `c_struct`/`c_union`/`c_bitfield` where patterns are shared.
-- Add explicit lifetime/allocation documentation for C-facing helper/runtime functions:
-  - borrowed vs owned memory for descriptor structs (`ducktinycc_list_t`, `ducktinycc_array_t`, `ducktinycc_struct_t`, `ducktinycc_map_t`, `ducktinycc_union_t`).
-  - validity bitmap lifetime and indexing semantics (`offset` handling).
-  - pointer helper ownership rules (`tcc_alloc`, `tcc_free_ptr`, read/write helpers).
-  - contracts for generated helper functions (`*_new`, `*_free`, getters/setters, enum helpers).
+- Test coverage expansion:
+  - deeper nested composites inside UNION members (e.g., `union<a:list<struct<...>>;b:map<k;v>>`).
+  - UNION output with nested composite members (return union containing list/struct from C).
+  - edge cases: NULL union values, empty lists in unions, deeply recursive nesting.
+- Runtime bridge dedup opportunities:
+  - row vs batch allocation/cleanup branches in `tcc_execute_compiled_scalar_udf` still have some repeated patterns.
+  - list/array bridge paths are layout-identical and could share more code.
+- Release preparation:
+  - version bump policy enforcement (`0.0.4.9000` → `0.0.4` release cut).
+  - community extension submission review against latest `community-extensions/` templates.
+  - README.Rmd → README.md render and final review.
 
 ## Working Rules for This Repo
 - API is intentionally evolving; pre-`1.0.0`, do not spend effort on backward-compatibility shims unless explicitly required for a release.
