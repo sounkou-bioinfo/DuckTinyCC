@@ -480,6 +480,70 @@ SQL
     │ 27 rows                                                                                                                     5 columns │
     └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
+### Inject Symbols and Pass Pointers
+
+`add_symbol` injects arbitrary name/address pairs into the TCC state
+before compilation. Compiled C code can reference these symbols
+directly. This is the foundation for passing function pointers, data
+addresses, or opaque handles to compiled code.
+
+The simplest pattern uses the address itself as the value (no
+dereference):
+
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+
+-- Stage a symbol: the literal 42 becomes the symbol's address
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_symbol',
+  symbol_name := 'MY_MAGIC',
+  symbol_ptr := 42::UBIGINT
+);
+
+-- C code reads the address back via extern + cast
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+extern char MY_MAGIC[];
+long long get_magic(void) {
+  return (long long)(unsigned long long)(void *)MY_MAGIC;
+}',
+  symbol := 'get_magic',
+  sql_name := 'get_magic',
+  return_type := 'i64',
+  arg_types := []
+);
+
+SELECT get_magic() AS magic;
+SQL
+```
+
+    ┌─────────┬────────────┬─────────┐
+    │   ok    │    mode    │  code   │
+    │ boolean │  varchar   │ varchar │
+    ├─────────┼────────────┼─────────┤
+    │ true    │ add_symbol │ OK      │
+    └─────────┴────────────┴─────────┘
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    ┌───────┐
+    │ magic │
+    │ int64 │
+    ├───────┤
+    │    42 │
+    └───────┘
+
+For a real-world use of `add_symbol` to pass function pointers, see
+`demo/r_udf_via_ducktinycc.R`, which injects R C API addresses and
+compiles a trampoline that calls back into R from a DuckDB scalar UDF.
+
 ### Embedded R Demo (Unix-like)
 
 The embedded R demo is still part of the repository. We keep it as an
