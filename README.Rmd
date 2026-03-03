@@ -378,7 +378,9 @@ SQL
 
 ## What Remains Before 1.0.0
 
-We have broad nested-type coverage today, including `UNION`, but we still have focused cleanup work before API freeze. The remaining work is to harden `UNION` behavior in deeper nested and mixed row/batch edge cases, continue simplifying and deduplicating internal nested-type marshalling paths (`LIST/ARRAY/STRUCT/MAP/UNION`), and expose a safer explicit set of DuckDB functions as C-callable symbols for generated modules.
+UNION vector handling now uses the correct DuckDB internal layout (tag at child\[0\], members at child\[1..N\]), with accessor helpers (`ducktinycc_union_tag`, `ducktinycc_union_member_ptr`, `ducktinycc_union_member_is_valid`) matching the existing LIST/STRUCT/MAP pattern. `duckdb_validity_row_is_valid` is also exported as a host symbol for direct validity queries from generated code.
+
+Remaining work before API freeze: deduplicate row vs batch codegen dispatch for nested composite returns, unify struct/union metadata types (deferred until the API surface stabilizes), add explicit lifetime/ownership documentation for all C-facing bridge descriptors and helper functions, and expand test coverage for deeper nested UNION edge cases (e.g., `union<a:list<struct<...>>;b:map<...>>`).
 
 ## Notes
 
