@@ -79,6 +79,10 @@ nested forms (`list<type>`, `type[]`, `type[N]`,
 `union<name:type;...>`). Nested signatures are recursive. `wrapper_mode`
 can be `row` (default) or `batch`.
 
+`decimal` maps to `ducktinycc_decimal_t`, a 128-bit scaled integer
+carrying `width` and `scale` metadata. SQL `DECIMAL(18,3)` values are
+passed through the bridge and round-tripped faithfully.
+
 ## How It Works
 
 At compile time, we parse signature tokens into recursive type
@@ -200,12 +204,12 @@ SQL
     ├─────────┼───────────────┼─────────┼─────────┼─────────────────────────────────┼────────────┼──────────┼─────────┼─────────────┼──────────────────┤
     │ true    │ tcc_new_state │ state   │ OK      │ new TinyCC build state prepared │ state_id=1 │ NULL     │ NULL    │ NULL        │ database         │
     └─────────┴───────────────┴─────────┴─────────┴─────────────────────────────────┴────────────┴──────────┴─────────┴─────────────┴──────────────────┘
-    ┌─────────┬────────────┬─────────┬─────────┬─────────────────┬─────────────────┬──────────┬─────────┬─────────────┬──────────────────┐
-    │   ok    │    mode    │  phase  │  code   │     message     │     detail      │ sql_name │ symbol  │ artifact_id │ connection_scope │
-    │ boolean │  varchar   │ varchar │ varchar │     varchar     │     varchar     │ varchar  │ varchar │   varchar   │     varchar      │
-    ├─────────┼────────────┼─────────┼─────────┼─────────────────┼─────────────────┼──────────┼─────────┼─────────────┼──────────────────┤
-    │ true    │ add_source │ state   │ OK      │ source appended │ source appended │ NULL     │ NULL    │ NULL        │ database         │
-    └─────────┴────────────┴─────────┴─────────┴─────────────────┴─────────────────┴──────────┴─────────┴─────────────┴──────────────────┘
+    ┌─────────┬────────────┬─────────┬─────────┬─────────────────┬────────────────────────────────────────────┬──────────┬─────────┬─────────────┬──────────────────┐
+    │   ok    │    mode    │  phase  │  code   │     message     │                   detail                   │ sql_name │ symbol  │ artifact_id │ connection_scope │
+    │ boolean │  varchar   │ varchar │ varchar │     varchar     │                  varchar                   │ varchar  │ varchar │   varchar   │     varchar      │
+    ├─────────┼────────────┼─────────┼─────────┼─────────────────┼────────────────────────────────────────────┼──────────┼─────────┼─────────────┼──────────────────┤
+    │ true    │ add_source │ state   │ OK      │ source appended │ long long times2(long long x){return x*2;} │ NULL     │ NULL    │ NULL        │ database         │
+    └─────────┴────────────┴─────────┴─────────┴─────────────────┴────────────────────────────────────────────┴──────────┴─────────┴─────────────┴──────────────────┘
     ┌─────────┬─────────────┬─────────┬─────────┬────────────────────────┬─────────┬──────────┬─────────┬─────────────┬──────────────────┐
     │   ok    │    mode     │  phase  │  code   │        message         │ detail  │ sql_name │ symbol  │ artifact_id │ connection_scope │
     │ boolean │   varchar   │ varchar │ varchar │        varchar         │ varchar │ varchar  │ varchar │   varchar   │     varchar      │
@@ -354,6 +358,43 @@ SQL
     ├───────────┤
     │         4 │
     └───────────┘
+
+### DECIMAL Round-Trip
+
+This example echoes a `DECIMAL(18,3)` value through a C function. The
+bridge represents decimals as a `ducktinycc_decimal_t` struct (a 128-bit
+scaled integer with width and scale metadata).
+
+``` bash
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_decimal_t decimal_echo(ducktinycc_decimal_t d){ return d; }',
+  symbol := 'decimal_echo',
+  sql_name := 'decimal_echo',
+  return_type := 'decimal',
+  arg_types := ['decimal']
+);
+
+SELECT decimal_echo(12.345::DECIMAL(18,3)) AS value;
+SQL
+```
+
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    ┌───────────────┐
+    │     value     │
+    │ decimal(18,3) │
+    ├───────────────┤
+    │        12.345 │
+    └───────────────┘
 
 ### Inspect Runtime Paths and Library Resolution
 
@@ -611,13 +652,19 @@ SQL
 
 ## What Remains Before 1.0.0
 
-We have broad nested-type coverage today, including `UNION`, but we
-still have focused cleanup work before API freeze. The remaining work is
-to harden `UNION` behavior in deeper nested and mixed row/batch edge
-cases, continue simplifying and deduplicating internal nested-type
-marshalling paths (`LIST/ARRAY/STRUCT/MAP/UNION`), and expose a safer
-explicit set of DuckDB functions as C-callable symbols for generated
-modules.
+UNION vector handling now uses the correct DuckDB internal layout (tag
+at child$$0$$, members at child$$1..N$$), with accessor helpers
+(`ducktinycc_union_tag`, `ducktinycc_union_member_ptr`,
+`ducktinycc_union_member_is_valid`) matching the existing
+LIST/STRUCT/MAP pattern. `duckdb_validity_row_is_valid` is also exported
+as a host symbol for direct validity queries from generated code.
+
+Remaining work before API freeze: deduplicate row vs batch codegen
+dispatch for nested composite returns, unify struct/union metadata types
+(deferred until the API surface stabilizes), add explicit
+lifetime/ownership documentation for all C-facing bridge descriptors and
+helper functions, and expand test coverage for deeper nested UNION edge
+cases (e.g., `union<a:list<struct<...>>;b:map<...>>`).
 
 ## Notes
 

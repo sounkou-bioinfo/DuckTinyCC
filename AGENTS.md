@@ -90,6 +90,24 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - helper generators: `c_struct`, `c_union`, `c_bitfield`, `c_enum`.
   - codegen/compile modes: `codegen_preview`, `compile`, `quick_compile`.
 
+## Progress Snapshot (2026-03-02)
+- Two critical UNION vector layout bugs fixed:
+  - `duckdb_vector_get_data(union_vector)` returns NULL (STRUCT physical type has size 0); now accesses tag via `duckdb_struct_vector_get_child(vector, 0)`.
+  - Member `i` is at child `[i+1]` (child[0] is tag); fixed input bridge and output write-back.
+- UNION accessor helpers added and host-exported:
+  - `ducktinycc_union_tag(&u)`, `ducktinycc_union_member_ptr(&u, idx)`, `ducktinycc_union_member_is_valid(&u, idx)`.
+  - `duckdb_validity_row_is_valid` exported as host symbol for wrappers.
+- Codegen dedup completed:
+  - `tcc_codegen_ret_null_check(ret_type)` helper replaces 8-branch type-dispatch ladders in both ROW and BATCH wrapper codegen (~120 lines removed).
+  - c_struct/c_union/c_bitfield confirmed already well-factored (shared `tcc_generate_c_composite_helpers_source`, single dispatcher, shared compile loop).
+- Internal code quality improvements:
+  - X-macro `TCC_FFI_TYPE_TABLE` for FFI type definitions.
+  - Table-driven signature parser replaces manual if/else chains.
+  - Composite meta consolidation (shared field-list/binding-list infrastructure).
+- Lifetime/ownership documentation added: `docs/LIFETIME_OWNERSHIP.md` covers all descriptor structs, validity bitmap semantics, heap domains, pointer registry contracts, and generated helper ownership rules.
+- Nested UNION tests added: `union<a:i32[];b:i64>` (list member), `union<a:i32;b:struct<x:i64;y:f64>>` (struct member). All pass debug+release.
+- Validation: `make debug`, `make release`, `make test_debug`, `make test_release` all pass.
+
 ## Versioning and NEWS Policy
 - Use R-style development versions: `x.y.z.9000` means in-development; `x.y.z` means release.
 - Pre-`1.0.0` compatibility stance: prioritize correctness, simplification, and API clarity over backward compatibility.

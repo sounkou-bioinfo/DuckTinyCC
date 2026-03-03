@@ -7960,6 +7960,38 @@ static const char *tcc_ffi_type_to_c_type_name(tcc_ffi_type_t type) {
 #undef TCC_FFI_SCALAR_ROWS
 
 /* ===== Section: Wrapper/Helper Code Generation ===== */
+
+/* tcc_codegen_ret_null_check: Returns the C expression that tests whether a return value should be treated as NULL.
+ * Returns NULL for VOID (special case) and for plain scalars (no null-check). */
+static const char *tcc_codegen_ret_null_check(tcc_ffi_type_t ret_type) {
+	if (ret_type == TCC_FFI_VOID) {
+		return NULL;
+	}
+	if (ret_type == TCC_FFI_VARCHAR) {
+		return "!result";
+	}
+	if (ret_type == TCC_FFI_BLOB) {
+		return "result.len > 0 && !result.ptr";
+	}
+	if (ret_type == TCC_FFI_PTR) {
+		return "!result";
+	}
+	if (tcc_ffi_type_is_list(ret_type) || tcc_ffi_type_is_array(ret_type)) {
+		return "result.len > 0 && !result.ptr";
+	}
+	if (tcc_ffi_type_is_struct(ret_type)) {
+		return "!result.field_ptrs || result.field_count == 0";
+	}
+	if (tcc_ffi_type_is_map(ret_type)) {
+		return "result.len > 0 && (!result.key_ptr || !result.value_ptr)";
+	}
+	if (tcc_ffi_type_is_union(ret_type)) {
+		return "!result.tag_ptr || !result.member_ptrs || result.member_count == 0";
+	}
+	/* Plain scalar: no null-check */
+	return NULL;
+}
+
 static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, const char *target_symbol,
                                                  const char *sql_name, const char *return_type,
                                                  const char *arg_types_csv, const char *wrapper_mode_token,
@@ -8053,105 +8085,37 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 			                          "  return 1;\n"
 			                          "}\n",
 			                          target_symbol, row_call_args.data ? row_call_args.data : "");
-		} else if (ok && ret_type == TCC_FFI_VARCHAR) {
+		} else if (ok && ret_type == TCC_FFI_PTR) {
+			const char *nc = tcc_codegen_ret_null_check(ret_type);
 			ok = tcc_text_buf_appendf(&src,
-			                          "  %s result = %s(%s);\n"
-			                          "  if (!result) {\n"
+			                          "  void *result = (void *)%s(%s);\n"
+			                          "  if (%s) {\n"
 			                          "    if (out_is_null) { *out_is_null = 1; }\n"
 			                          "    return 1;\n"
 			                          "  }\n"
-			                          "  *(%s *)out_value = result;\n"
+			                          "  *(unsigned long long *)out_value = (unsigned long long)(uintptr_t)result;\n"
 			                          "  if (out_is_null) { *out_is_null = 0; }\n"
 			                          "  return 1;\n"
 			                          "}\n",
-			                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
-			                          ret_c_type);
-				} else if (ok && ret_type == TCC_FFI_BLOB) {
-					ok = tcc_text_buf_appendf(&src,
-					                          "  %s result = %s(%s);\n"
-					                          "  if (result.len > 0 && !result.ptr) {\n"
-					                          "    if (out_is_null) { *out_is_null = 1; }\n"
-					                          "    return 1;\n"
-					                          "  }\n"
-				                          "  *(%s *)out_value = result;\n"
-				                          "  if (out_is_null) { *out_is_null = 0; }\n"
-				                          "  return 1;\n"
-				                          "}\n",
-				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
-				                          ret_c_type);
-			} else if (ok && ret_type == TCC_FFI_PTR) {
+			                          target_symbol, row_call_args.data ? row_call_args.data : "", nc);
+		} else if (ok) {
+			const char *nc = tcc_codegen_ret_null_check(ret_type);
+			ok = tcc_text_buf_appendf(&src, "  %s result = %s(%s);\n",
+			                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "");
+			if (ok && nc) {
 				ok = tcc_text_buf_appendf(&src,
-				                          "  void *result = (void *)%s(%s);\n"
-				                          "  if (!result) {\n"
+				                          "  if (%s) {\n"
 				                          "    if (out_is_null) { *out_is_null = 1; }\n"
 				                          "    return 1;\n"
-				                          "  }\n"
-				                          "  *(unsigned long long *)out_value = (unsigned long long)(uintptr_t)result;\n"
-				                          "  if (out_is_null) { *out_is_null = 0; }\n"
-				                          "  return 1;\n"
-				                          "}\n",
-				                          target_symbol, row_call_args.data ? row_call_args.data : "");
-				} else if (ok && (tcc_ffi_type_is_list(ret_type) || tcc_ffi_type_is_array(ret_type))) {
-					ok = tcc_text_buf_appendf(&src,
-					                          "  %s result = %s(%s);\n"
-					                          "  if (result.len > 0 && !result.ptr) {\n"
-					                          "    if (out_is_null) { *out_is_null = 1; }\n"
-					                          "    return 1;\n"
-					                          "  }\n"
-				                          "  *(%s *)out_value = result;\n"
-				                          "  if (out_is_null) { *out_is_null = 0; }\n"
-				                          "  return 1;\n"
-				                          "}\n",
-				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
-				                          ret_c_type);
-			} else if (ok && tcc_ffi_type_is_struct(ret_type)) {
+				                          "  }\n", nc);
+			}
+			if (ok) {
 				ok = tcc_text_buf_appendf(&src,
-				                          "  %s result = %s(%s);\n"
-				                          "  if (!result.field_ptrs || result.field_count == 0) {\n"
-				                          "    if (out_is_null) { *out_is_null = 1; }\n"
-				                          "    return 1;\n"
-				                          "  }\n"
 				                          "  *(%s *)out_value = result;\n"
 				                          "  if (out_is_null) { *out_is_null = 0; }\n"
 				                          "  return 1;\n"
-				                          "}\n",
-				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
-				                          ret_c_type);
-			} else if (ok && tcc_ffi_type_is_map(ret_type)) {
-				ok = tcc_text_buf_appendf(&src,
-				                          "  %s result = %s(%s);\n"
-				                          "  if (result.len > 0 && (!result.key_ptr || !result.value_ptr)) {\n"
-				                          "    if (out_is_null) { *out_is_null = 1; }\n"
-				                          "    return 1;\n"
-				                          "  }\n"
-				                          "  *(%s *)out_value = result;\n"
-				                          "  if (out_is_null) { *out_is_null = 0; }\n"
-				                          "  return 1;\n"
-				                          "}\n",
-				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
-				                          ret_c_type);
-			} else if (ok && tcc_ffi_type_is_union(ret_type)) {
-				ok = tcc_text_buf_appendf(&src,
-				                          "  %s result = %s(%s);\n"
-				                          "  if (!result.tag_ptr || !result.member_ptrs || result.member_count == 0) {\n"
-				                          "    if (out_is_null) { *out_is_null = 1; }\n"
-				                          "    return 1;\n"
-				                          "  }\n"
-				                          "  *(%s *)out_value = result;\n"
-				                          "  if (out_is_null) { *out_is_null = 0; }\n"
-				                          "  return 1;\n"
-				                          "}\n",
-				                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
-				                          ret_c_type);
-			} else if (ok) {
-				ok = tcc_text_buf_appendf(&src,
-				                          "  %s result = %s(%s);\n"
-				                          "  *(%s *)out_value = result;\n"
-			                          "  if (out_is_null) { *out_is_null = 0; }\n"
-			                          "  return 1;\n"
-			                          "}\n",
-			                          ret_c_type, target_symbol, row_call_args.data ? row_call_args.data : "",
-			                          ret_c_type);
+				                          "}\n", ret_c_type);
+			}
 		}
 	} else if (ok && wrapper_mode == TCC_WRAPPER_MODE_BATCH) {
 		ok = tcc_text_buf_appendf(
@@ -8188,73 +8152,33 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 			                          "    %s(%s);\n"
 			                          "    if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n",
 			                          target_symbol, batch_call_args.data ? batch_call_args.data : "");
-		} else if (ok && ret_type == TCC_FFI_VARCHAR) {
+		} else if (ok && ret_type == TCC_FFI_PTR) {
+			const char *nc = tcc_codegen_ret_null_check(ret_type);
 			ok = tcc_text_buf_appendf(&src,
-			                          "    %s result = %s(%s);\n"
-			                          "    if (!result) {\n"
+			                          "    void *result = (void *)%s(%s);\n"
+			                          "    if (%s) {\n"
 			                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
 			                          "      continue;\n"
 			                          "    }\n"
-			                          "    out[row] = result;\n",
-			                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
-				} else if (ok && ret_type == TCC_FFI_BLOB) {
-					ok = tcc_text_buf_appendf(&src,
-					                          "    %s result = %s(%s);\n"
-					                          "    if (result.len > 0 && !result.ptr) {\n"
-					                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
-					                          "      continue;\n"
-					                          "    }\n"
-				                          "    out[row] = result;\n",
-				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
-			} else if (ok && ret_type == TCC_FFI_PTR) {
-				ok = tcc_text_buf_appendf(&src,
-				                          "    void *result = (void *)%s(%s);\n"
-				                          "    if (!result) {\n"
-				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
-				                          "      continue;\n"
-				                          "    }\n"
-				                          "    out[row] = (unsigned long long)(uintptr_t)result;\n",
-				                          target_symbol, batch_call_args.data ? batch_call_args.data : "");
-				} else if (ok && (tcc_ffi_type_is_list(ret_type) || tcc_ffi_type_is_array(ret_type))) {
-					ok = tcc_text_buf_appendf(&src,
-					                          "    %s result = %s(%s);\n"
-					                          "    if (result.len > 0 && !result.ptr) {\n"
-					                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
-					                          "      continue;\n"
-					                          "    }\n"
-				                          "    out[row] = result;\n",
-				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
-			} else if (ok && tcc_ffi_type_is_struct(ret_type)) {
+			                          "    out[row] = (unsigned long long)(uintptr_t)result;\n",
+			                          target_symbol, batch_call_args.data ? batch_call_args.data : "", nc);
+		} else if (ok) {
+			const char *nc = tcc_codegen_ret_null_check(ret_type);
+			if (nc) {
 				ok = tcc_text_buf_appendf(&src,
 				                          "    %s result = %s(%s);\n"
-				                          "    if (!result.field_ptrs || result.field_count == 0) {\n"
+				                          "    if (%s) {\n"
 				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
 				                          "      continue;\n"
 				                          "    }\n"
 				                          "    out[row] = result;\n",
-				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
-			} else if (ok && tcc_ffi_type_is_map(ret_type)) {
-				ok = tcc_text_buf_appendf(&src,
-				                          "    %s result = %s(%s);\n"
-				                          "    if (result.len > 0 && (!result.key_ptr || !result.value_ptr)) {\n"
-				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
-				                          "      continue;\n"
-				                          "    }\n"
-				                          "    out[row] = result;\n",
-				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
-			} else if (ok && tcc_ffi_type_is_union(ret_type)) {
-				ok = tcc_text_buf_appendf(&src,
-				                          "    %s result = %s(%s);\n"
-				                          "    if (!result.tag_ptr || !result.member_ptrs || result.member_count == 0) {\n"
-				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
-				                          "      continue;\n"
-				                          "    }\n"
-				                          "    out[row] = result;\n",
-				                          ret_c_type, target_symbol, batch_call_args.data ? batch_call_args.data : "");
-			} else if (ok) {
+				                          ret_c_type, target_symbol,
+				                          batch_call_args.data ? batch_call_args.data : "", nc);
+			} else {
 				ok = tcc_text_buf_appendf(&src, "    out[row] = %s(%s);\n", target_symbol,
 				                          batch_call_args.data ? batch_call_args.data : "");
 			}
+		}
 		if (ok) {
 			ok = tcc_text_buf_appendf(&src,
 			                          "  }\n"

@@ -1998,6 +1998,91 @@ SELECT CAST(mul_f32(2.5::FLOAT, 4.0::FLOAT) AS INTEGER);
 ----
 10
 
+# ----- UNION with nested LIST member: read list length from active member
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+long long union_list_len(ducktinycc_union_t u) {
+  int tag = ducktinycc_union_tag(&u);
+  if (tag < 0) return -999;
+  /* tag 0 = list<i32>, tag 1 = i64 */
+  if (tag == 0) {
+    /* member 0 is a list; its data pointer is a ducktinycc_list_t row-slice */
+    const ducktinycc_list_t *lp = (const ducktinycc_list_t *)ducktinycc_union_member_ptr(&u, 0);
+    if (!lp) return -1;
+    return (long long)lp[u.offset].len;
+  }
+  if (tag == 1) {
+    const long long *p = (const long long *)ducktinycc_union_member_ptr(&u, 1);
+    if (!p) return -2;
+    return p[u.offset];
+  }
+  return -5;
+}',
+  symbol := 'union_list_len',
+  sql_name := 'union_list_len',
+  return_type := 'i64',
+  arg_types := ['union<a:i32[];b:i64>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT union_list_len([1, 2, 3]::INT[]::UNION(a INT[], b BIGINT)) AS val;
+----
+3
+
+query I
+SELECT union_list_len(42::BIGINT::UNION(a INT[], b BIGINT)) AS val;
+----
+42
+
+# ----- UNION with nested STRUCT member: read struct field from active member
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+long long union_struct_read(ducktinycc_union_t u) {
+  int tag = ducktinycc_union_tag(&u);
+  if (tag < 0) return -999;
+  /* tag 0 = i32, tag 1 = struct<x:i64,y:f64> */
+  if (tag == 0) {
+    const int *p = (const int *)ducktinycc_union_member_ptr(&u, 0);
+    if (!p) return -1;
+    return (long long)p[u.offset];
+  }
+  if (tag == 1) {
+    /* member 1 is a struct; data is a ducktinycc_struct_t row-slice */
+    const ducktinycc_struct_t *sp = (const ducktinycc_struct_t *)ducktinycc_union_member_ptr(&u, 1);
+    if (!sp) return -2;
+    /* read field 0 (x:i64) from the struct at this row */
+    const long long *xp = (const long long *)ducktinycc_struct_field_ptr(&sp[u.offset], 0);
+    if (!xp) return -3;
+    return xp[sp[u.offset].offset];
+  }
+  return -5;
+}',
+  symbol := 'union_struct_read',
+  sql_name := 'union_struct_read',
+  return_type := 'i64',
+  arg_types := ['union<a:i32;b:struct<x:i64;y:f64>>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT union_struct_read(7::INT::UNION(a INT, b STRUCT(x BIGINT, y DOUBLE))) AS val;
+----
+7
+
+query I
+SELECT union_struct_read({'x': 100::BIGINT, 'y': 2.5}::STRUCT(x BIGINT, y DOUBLE)::UNION(a INT, b STRUCT(x BIGINT, y DOUBLE))) AS val;
+----
+100
+
 # ---------- error: bad C source (syntax error) ----------
 query TTT
 SELECT ok, mode, code
