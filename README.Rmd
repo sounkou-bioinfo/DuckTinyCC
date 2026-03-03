@@ -17,6 +17,32 @@ knitr::opts_chunk$set(
 
 `DuckTinyCC` is a `DuckDB` `C` extension for in-process JIT compiled C UDFs allowing `C` scripting via `TinyCC`. Combined with `C` parsing facilities offered by for example the [`sitting duck extension`](https://github.com/teaguesterling/sitting_duck), we can quickly generate declarative bindings.
 
+## Get Started 
+
+Minimal end-to-end example: compile a C function and call it from SQL.
+
+```{bash eval=TRUE, collapse=FALSE, comment=""}
+duckdb -unsigned <<'SQL'
+LOAD 'build/release/ducktinycc.duckdb_extension';
+.timer on
+
+-- Compile and register a zero-arg C UDF returning VARCHAR
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *hello_from_c_udf(void){ return "hello from C UDF"; }',
+  symbol := 'hello_from_c_udf',
+  sql_name := 'hello_from_c_udf',
+  return_type := 'varchar',
+  arg_types := []
+);
+
+-- Call it like any SQL scalar function
+SELECT hello_from_c_udf() AS msg;
+SQL
+```
+
+
 ## API Surface
 
 All functionality is exposed through `tcc_module(...)` and selected with
@@ -108,30 +134,6 @@ Additional limits and behavior:
 - `struct<...>` and `map<...>` use `;` as top-level separators inside tokens.
 - `decimal`/`numeric` currently bind as `DECIMAL(18,3)` with `ducktinycc_decimal_t`.
 
-## Get Started 
-
-Minimal end-to-end example: compile a C function and call it from SQL.
-
-```{bash eval=TRUE, collapse=FALSE, comment=""}
-duckdb -unsigned <<'SQL'
-LOAD 'build/release/ducktinycc.duckdb_extension';
-.timer on
-
--- Compile and register a zero-arg C UDF returning VARCHAR
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'quick_compile',
-  source := 'const char *hello_from_c_udf(void){ return "hello from C UDF"; }',
-  symbol := 'hello_from_c_udf',
-  sql_name := 'hello_from_c_udf',
-  return_type := 'varchar',
-  arg_types := []
-);
-
--- Call it like any SQL scalar function
-SELECT hello_from_c_udf() AS msg;
-SQL
-```
 
 ## How It Works
 
