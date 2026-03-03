@@ -378,9 +378,12 @@ SQL
 
 ## What Remains Before 1.0.0
 
-UNION vector handling now uses the correct DuckDB internal layout (tag at child\[0\], members at child\[1..N\]), with accessor helpers (`ducktinycc_union_tag`, `ducktinycc_union_member_ptr`, `ducktinycc_union_member_is_valid`) matching the existing LIST/STRUCT/MAP pattern. `duckdb_validity_row_is_valid` is also exported as a host symbol for direct validity queries from generated code.
+The main outstanding feature is **DuckDB callbacks** — wrapping DuckDB functions (built-in or user-defined SQL scalars) as C function pointers so they can be passed to compiled C code that expects callback signatures like `double (*fn)(double)`. This is the DuckDB analogue of Rtinycc's `tcc_callback()` mechanism, which wraps R functions as C-callable trampolines.
 
-Remaining work before API freeze: deduplicate row vs batch codegen dispatch for nested composite returns, unify struct/union metadata types (deferred until the API surface stabilizes), add explicit lifetime/ownership documentation for all C-facing bridge descriptors and helper functions, and expand test coverage for deeper nested UNION edge cases (e.g., `union<a:list<struct<...>>;b:map<...>>`).
+The infrastructure to support this is already in place:
+
+- **`add_symbol`** injects arbitrary host pointers into TCC state before compilation. The R UDF demo (`demo/r_udf_via_ducktinycc.R`) proves the pattern end-to-end: R C API function pointers are injected, a C trampoline is compiled that calls back into R, and the result is a working DuckDB scalar UDF.
+- **DuckDB callback** would follow the same pattern: resolve a DuckDB function by name, generate a C trampoline that invokes it via the DuckDB C API (e.g., `duckdb_create_*`, `duckdb_execute_*`, or internal function invocation), and inject the trampoline as a standard C function pointer. Compiled user code would receive it as `double (*fn)(double)` and call it without knowing the implementation is a DuckDB function.
 
 ## Notes
 
