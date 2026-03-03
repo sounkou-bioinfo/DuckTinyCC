@@ -1570,6 +1570,84 @@ FROM tcc_module(
 ----
 true	quick_compile	OK
 
+# ----- UNION input round-trip: read tag and extract active member value
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+long long union_read_demo(ducktinycc_union_t u) {
+  int tag = ducktinycc_union_tag(&u);
+  if (tag < 0) return -999;
+  if (tag == 0) {
+    const long long *p = (const long long *)ducktinycc_union_member_ptr(&u, 0);
+    if (!p) return -1;
+    if (!ducktinycc_union_member_is_valid(&u, 0)) return -2;
+    return p[u.offset];
+  } else if (tag == 1) {
+    const double *p = (const double *)ducktinycc_union_member_ptr(&u, 1);
+    if (!p) return -3;
+    if (!ducktinycc_union_member_is_valid(&u, 1)) return -4;
+    return (long long)p[u.offset];
+  }
+  return -5;
+}',
+  symbol := 'union_read_demo',
+  sql_name := 'union_read_demo',
+  return_type := 'i64',
+  arg_types := ['union<i:i64;d:f64>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT union_read_demo(42::BIGINT::UNION(i BIGINT, d DOUBLE)) AS val;
+----
+42
+
+query I
+SELECT union_read_demo(3.14::DOUBLE::UNION(i BIGINT, d DOUBLE)) AS val;
+----
+3
+
+# ----- UNION output: return a union value from C
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+static uint8_t _tag_val;
+static long long _member_val;
+static const void *_member_ptrs[2];
+static const uint64_t *_member_validity[2];
+ducktinycc_union_t union_make_demo(long long x) {
+  ducktinycc_union_t out;
+  _tag_val = 0;
+  _member_val = x * 10;
+  _member_ptrs[0] = &_member_val;
+  _member_ptrs[1] = (void*)0;
+  _member_validity[0] = (void*)0;
+  _member_validity[1] = (void*)0;
+  out.tag_ptr = &_tag_val;
+  out.member_ptrs = _member_ptrs;
+  out.member_validity = _member_validity;
+  out.member_count = 2;
+  out.offset = 0;
+  return out;
+}',
+  symbol := 'union_make_demo',
+  sql_name := 'union_make_demo',
+  return_type := 'union<i:i64;d:f64>',
+  arg_types := ['i64']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT union_extract(union_make_demo(7), 'i') AS val;
+----
+70
+
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(

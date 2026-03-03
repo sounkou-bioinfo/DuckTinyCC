@@ -16,6 +16,10 @@
 - make pointer helper registration table-driven to remove repetitive registration code and keep helper signatures centralized
 - remove redundant composite-input fallback allocation/cleanup branches in `tcc_execute_compiled_scalar_udf`; typedesc bridge paths are now the single marshalling path for composite args
 - add explicit C-function documentation tag guidance in `docs/C_FUNCTION_DOCS.md` and apply ownership/heap/stack/lock/error tags on critical runtime boundary functions
+- add `TCC_FFI_COMPOUND_SCALAR_MAP` X-macro and generate `tcc_ffi_type_is_list`, `tcc_ffi_type_is_array`, `tcc_ffi_list_child_type`, `tcc_ffi_list_type_from_child`, `tcc_ffi_array_child_type`, `tcc_ffi_array_type_from_child` from it, replacing ~250 lines of hand-written switch/case boilerplate
+- replace sequential `tcc_equals_ci` if/else chain in `tcc_parse_type_token` with table-driven lookup over `simple_tokens[]` array, eliminating ~60 lines
+- consolidate `tcc_struct_meta_destroy` and `tcc_union_meta_destroy` via shared `tcc_composite_meta_free_inner` helper
+- document `decimal` type bridge (`ducktinycc_decimal_t`) and add DECIMAL round-trip example in README.Rmd
 
 ## ducktinycc 0.0.3 (2026-03-02)
 

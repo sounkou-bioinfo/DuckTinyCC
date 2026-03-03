@@ -111,6 +111,9 @@ DUCKDB_EXTENSION_EXTERN
 /* - ducktinycc_span_fits: Bounds-check helper used by pointer/bridge accessors. */
 /* - ducktinycc_struct_field_is_valid: STRUCT descriptor accessor helper for generated wrappers. */
 /* - ducktinycc_struct_field_ptr: STRUCT descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_union_tag: UNION descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_union_member_ptr: UNION descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_union_member_is_valid: UNION descriptor accessor helper for generated wrappers. */
 /* - ducktinycc_valid_is_set: Validity bitmap helper for generated wrappers and bridge descriptors. */
 /* - ducktinycc_valid_set: Validity bitmap helper for generated wrappers and bridge descriptors. */
 /* - ducktinycc_write_bytes: Typed write helper into raw memory or bridge descriptors. */
@@ -2824,27 +2827,33 @@ static void tcc_host_sig_ctx_destroy(void *ptr) {
 }
 
 /* ===== Section: Type Grammar + FFI Type Mapping ===== */
+/* X-macro mapping each scalar FFI type to its LIST and ARRAY compound variants. */
+#define TCC_FFI_COMPOUND_SCALAR_MAP(X)                                                                                       \
+	X(TCC_FFI_BOOL, TCC_FFI_LIST_BOOL, TCC_FFI_ARRAY_BOOL)                                                                \
+	X(TCC_FFI_I8, TCC_FFI_LIST_I8, TCC_FFI_ARRAY_I8)                                                                      \
+	X(TCC_FFI_U8, TCC_FFI_LIST_U8, TCC_FFI_ARRAY_U8)                                                                      \
+	X(TCC_FFI_I16, TCC_FFI_LIST_I16, TCC_FFI_ARRAY_I16)                                                                    \
+	X(TCC_FFI_U16, TCC_FFI_LIST_U16, TCC_FFI_ARRAY_U16)                                                                    \
+	X(TCC_FFI_I32, TCC_FFI_LIST_I32, TCC_FFI_ARRAY_I32)                                                                    \
+	X(TCC_FFI_U32, TCC_FFI_LIST_U32, TCC_FFI_ARRAY_U32)                                                                    \
+	X(TCC_FFI_I64, TCC_FFI_LIST_I64, TCC_FFI_ARRAY_I64)                                                                    \
+	X(TCC_FFI_U64, TCC_FFI_LIST_U64, TCC_FFI_ARRAY_U64)                                                                    \
+	X(TCC_FFI_F32, TCC_FFI_LIST_F32, TCC_FFI_ARRAY_F32)                                                                    \
+	X(TCC_FFI_F64, TCC_FFI_LIST_F64, TCC_FFI_ARRAY_F64)                                                                    \
+	X(TCC_FFI_UUID, TCC_FFI_LIST_UUID, TCC_FFI_ARRAY_UUID)                                                                  \
+	X(TCC_FFI_DATE, TCC_FFI_LIST_DATE, TCC_FFI_ARRAY_DATE)                                                                  \
+	X(TCC_FFI_TIME, TCC_FFI_LIST_TIME, TCC_FFI_ARRAY_TIME)                                                                  \
+	X(TCC_FFI_TIMESTAMP, TCC_FFI_LIST_TIMESTAMP, TCC_FFI_ARRAY_TIMESTAMP)                                                    \
+	X(TCC_FFI_INTERVAL, TCC_FFI_LIST_INTERVAL, TCC_FFI_ARRAY_INTERVAL)                                                      \
+	X(TCC_FFI_DECIMAL, TCC_FFI_LIST_DECIMAL, TCC_FFI_ARRAY_DECIMAL)
+
 /* tcc_ffi_type_is_list: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_ffi_type_is_list(tcc_ffi_type_t type) {
 	switch (type) {
 	case TCC_FFI_LIST:
-	case TCC_FFI_LIST_BOOL:
-	case TCC_FFI_LIST_I8:
-	case TCC_FFI_LIST_U8:
-	case TCC_FFI_LIST_I16:
-	case TCC_FFI_LIST_U16:
-	case TCC_FFI_LIST_I32:
-	case TCC_FFI_LIST_U32:
-	case TCC_FFI_LIST_I64:
-	case TCC_FFI_LIST_U64:
-	case TCC_FFI_LIST_F32:
-	case TCC_FFI_LIST_F64:
-	case TCC_FFI_LIST_UUID:
-	case TCC_FFI_LIST_DATE:
-	case TCC_FFI_LIST_TIME:
-	case TCC_FFI_LIST_TIMESTAMP:
-	case TCC_FFI_LIST_INTERVAL:
-	case TCC_FFI_LIST_DECIMAL:
+#define TCC_IS_LIST_CASE(SCALAR, LIST, ARRAY) case LIST:
+		TCC_FFI_COMPOUND_SCALAR_MAP(TCC_IS_LIST_CASE)
+#undef TCC_IS_LIST_CASE
 		return true;
 	default:
 		return false;
@@ -2878,34 +2887,40 @@ static bool tcc_ffi_type_is_fixed_width_scalar(tcc_ffi_type_t type) {
 	}
 }
 
+/* Shared helper to free the parallel arrays in struct/union composite metadata. */
+static void tcc_composite_meta_free_inner(int count, char **names, char **tokens, tcc_ffi_type_t *types, size_t *sizes) {
+	int i;
+	if (names) {
+		for (i = 0; i < count; i++) {
+			if (names[i]) {
+				duckdb_free(names[i]);
+			}
+		}
+		duckdb_free(names);
+	}
+	if (tokens) {
+		for (i = 0; i < count; i++) {
+			if (tokens[i]) {
+				duckdb_free(tokens[i]);
+			}
+		}
+		duckdb_free(tokens);
+	}
+	if (types) {
+		duckdb_free(types);
+	}
+	if (sizes) {
+		duckdb_free(sizes);
+	}
+}
+
 /* tcc_struct_meta_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_struct_meta_destroy(tcc_ffi_struct_meta_t *meta) {
-	int i;
 	if (!meta) {
 		return;
 	}
-	if (meta->field_names) {
-		for (i = 0; i < meta->field_count; i++) {
-			if (meta->field_names[i]) {
-				duckdb_free(meta->field_names[i]);
-			}
-		}
-		duckdb_free(meta->field_names);
-	}
-	if (meta->field_tokens) {
-		for (i = 0; i < meta->field_count; i++) {
-			if (meta->field_tokens[i]) {
-				duckdb_free(meta->field_tokens[i]);
-			}
-		}
-		duckdb_free(meta->field_tokens);
-	}
-	if (meta->field_types) {
-		duckdb_free(meta->field_types);
-	}
-	if (meta->field_sizes) {
-		duckdb_free(meta->field_sizes);
-	}
+	tcc_composite_meta_free_inner(meta->field_count, meta->field_names, meta->field_tokens, meta->field_types,
+	                              meta->field_sizes);
 	memset(meta, 0, sizeof(*meta));
 }
 
@@ -2955,32 +2970,11 @@ static void tcc_map_meta_array_destroy(tcc_ffi_map_meta_t *metas, int count) {
 
 /* tcc_union_meta_destroy: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
 static void tcc_union_meta_destroy(tcc_ffi_union_meta_t *meta) {
-	int i;
 	if (!meta) {
 		return;
 	}
-	if (meta->member_names) {
-		for (i = 0; i < meta->member_count; i++) {
-			if (meta->member_names[i]) {
-				duckdb_free(meta->member_names[i]);
-			}
-		}
-		duckdb_free(meta->member_names);
-	}
-	if (meta->member_tokens) {
-		for (i = 0; i < meta->member_count; i++) {
-			if (meta->member_tokens[i]) {
-				duckdb_free(meta->member_tokens[i]);
-			}
-		}
-		duckdb_free(meta->member_tokens);
-	}
-	if (meta->member_types) {
-		duckdb_free(meta->member_types);
-	}
-	if (meta->member_sizes) {
-		duckdb_free(meta->member_sizes);
-	}
+	tcc_composite_meta_free_inner(meta->member_count, meta->member_names, meta->member_tokens, meta->member_types,
+	                              meta->member_sizes);
 	memset(meta, 0, sizeof(*meta));
 }
 
@@ -3002,57 +2996,9 @@ static bool tcc_ffi_list_child_type(tcc_ffi_type_t list_type, tcc_ffi_type_t *ou
 		return false;
 	}
 	switch (list_type) {
-	case TCC_FFI_LIST_BOOL:
-		*out_child = TCC_FFI_BOOL;
-		return true;
-	case TCC_FFI_LIST_I8:
-		*out_child = TCC_FFI_I8;
-		return true;
-	case TCC_FFI_LIST_U8:
-		*out_child = TCC_FFI_U8;
-		return true;
-	case TCC_FFI_LIST_I16:
-		*out_child = TCC_FFI_I16;
-		return true;
-	case TCC_FFI_LIST_U16:
-		*out_child = TCC_FFI_U16;
-		return true;
-	case TCC_FFI_LIST_I32:
-		*out_child = TCC_FFI_I32;
-		return true;
-	case TCC_FFI_LIST_U32:
-		*out_child = TCC_FFI_U32;
-		return true;
-	case TCC_FFI_LIST_I64:
-		*out_child = TCC_FFI_I64;
-		return true;
-	case TCC_FFI_LIST_U64:
-		*out_child = TCC_FFI_U64;
-		return true;
-	case TCC_FFI_LIST_F32:
-		*out_child = TCC_FFI_F32;
-		return true;
-	case TCC_FFI_LIST_F64:
-		*out_child = TCC_FFI_F64;
-		return true;
-	case TCC_FFI_LIST_UUID:
-		*out_child = TCC_FFI_UUID;
-		return true;
-	case TCC_FFI_LIST_DATE:
-		*out_child = TCC_FFI_DATE;
-		return true;
-	case TCC_FFI_LIST_TIME:
-		*out_child = TCC_FFI_TIME;
-		return true;
-	case TCC_FFI_LIST_TIMESTAMP:
-		*out_child = TCC_FFI_TIMESTAMP;
-		return true;
-	case TCC_FFI_LIST_INTERVAL:
-		*out_child = TCC_FFI_INTERVAL;
-		return true;
-	case TCC_FFI_LIST_DECIMAL:
-		*out_child = TCC_FFI_DECIMAL;
-		return true;
+#define TCC_LIST_CHILD_CASE(SCALAR, LIST, ARRAY) case LIST: *out_child = SCALAR; return true;
+		TCC_FFI_COMPOUND_SCALAR_MAP(TCC_LIST_CHILD_CASE)
+#undef TCC_LIST_CHILD_CASE
 	default:
 		return false;
 	}
@@ -3064,57 +3010,9 @@ static bool tcc_ffi_list_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type
 		return false;
 	}
 	switch (child_type) {
-	case TCC_FFI_BOOL:
-		*out_list_type = TCC_FFI_LIST_BOOL;
-		return true;
-	case TCC_FFI_I8:
-		*out_list_type = TCC_FFI_LIST_I8;
-		return true;
-	case TCC_FFI_U8:
-		*out_list_type = TCC_FFI_LIST_U8;
-		return true;
-	case TCC_FFI_I16:
-		*out_list_type = TCC_FFI_LIST_I16;
-		return true;
-	case TCC_FFI_U16:
-		*out_list_type = TCC_FFI_LIST_U16;
-		return true;
-	case TCC_FFI_I32:
-		*out_list_type = TCC_FFI_LIST_I32;
-		return true;
-	case TCC_FFI_U32:
-		*out_list_type = TCC_FFI_LIST_U32;
-		return true;
-	case TCC_FFI_I64:
-		*out_list_type = TCC_FFI_LIST_I64;
-		return true;
-	case TCC_FFI_U64:
-		*out_list_type = TCC_FFI_LIST_U64;
-		return true;
-	case TCC_FFI_F32:
-		*out_list_type = TCC_FFI_LIST_F32;
-		return true;
-	case TCC_FFI_F64:
-		*out_list_type = TCC_FFI_LIST_F64;
-		return true;
-	case TCC_FFI_UUID:
-		*out_list_type = TCC_FFI_LIST_UUID;
-		return true;
-	case TCC_FFI_DATE:
-		*out_list_type = TCC_FFI_LIST_DATE;
-		return true;
-	case TCC_FFI_TIME:
-		*out_list_type = TCC_FFI_LIST_TIME;
-		return true;
-	case TCC_FFI_TIMESTAMP:
-		*out_list_type = TCC_FFI_LIST_TIMESTAMP;
-		return true;
-	case TCC_FFI_INTERVAL:
-		*out_list_type = TCC_FFI_LIST_INTERVAL;
-		return true;
-	case TCC_FFI_DECIMAL:
-		*out_list_type = TCC_FFI_LIST_DECIMAL;
-		return true;
+#define TCC_LIST_FROM_CHILD_CASE(SCALAR, LIST, ARRAY) case SCALAR: *out_list_type = LIST; return true;
+		TCC_FFI_COMPOUND_SCALAR_MAP(TCC_LIST_FROM_CHILD_CASE)
+#undef TCC_LIST_FROM_CHILD_CASE
 	default:
 		return false;
 	}
@@ -3124,23 +3022,9 @@ static bool tcc_ffi_list_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_type
 static bool tcc_ffi_type_is_array(tcc_ffi_type_t type) {
 	switch (type) {
 	case TCC_FFI_ARRAY:
-	case TCC_FFI_ARRAY_BOOL:
-	case TCC_FFI_ARRAY_I8:
-	case TCC_FFI_ARRAY_U8:
-	case TCC_FFI_ARRAY_I16:
-	case TCC_FFI_ARRAY_U16:
-	case TCC_FFI_ARRAY_I32:
-	case TCC_FFI_ARRAY_U32:
-	case TCC_FFI_ARRAY_I64:
-	case TCC_FFI_ARRAY_U64:
-	case TCC_FFI_ARRAY_F32:
-	case TCC_FFI_ARRAY_F64:
-	case TCC_FFI_ARRAY_UUID:
-	case TCC_FFI_ARRAY_DATE:
-	case TCC_FFI_ARRAY_TIME:
-	case TCC_FFI_ARRAY_TIMESTAMP:
-	case TCC_FFI_ARRAY_INTERVAL:
-	case TCC_FFI_ARRAY_DECIMAL:
+#define TCC_IS_ARRAY_CASE(SCALAR, LIST, ARRAY) case ARRAY:
+		TCC_FFI_COMPOUND_SCALAR_MAP(TCC_IS_ARRAY_CASE)
+#undef TCC_IS_ARRAY_CASE
 		return true;
 	default:
 		return false;
@@ -3168,57 +3052,9 @@ static bool tcc_ffi_array_child_type(tcc_ffi_type_t array_type, tcc_ffi_type_t *
 		return false;
 	}
 	switch (array_type) {
-	case TCC_FFI_ARRAY_BOOL:
-		*out_child = TCC_FFI_BOOL;
-		return true;
-	case TCC_FFI_ARRAY_I8:
-		*out_child = TCC_FFI_I8;
-		return true;
-	case TCC_FFI_ARRAY_U8:
-		*out_child = TCC_FFI_U8;
-		return true;
-	case TCC_FFI_ARRAY_I16:
-		*out_child = TCC_FFI_I16;
-		return true;
-	case TCC_FFI_ARRAY_U16:
-		*out_child = TCC_FFI_U16;
-		return true;
-	case TCC_FFI_ARRAY_I32:
-		*out_child = TCC_FFI_I32;
-		return true;
-	case TCC_FFI_ARRAY_U32:
-		*out_child = TCC_FFI_U32;
-		return true;
-	case TCC_FFI_ARRAY_I64:
-		*out_child = TCC_FFI_I64;
-		return true;
-	case TCC_FFI_ARRAY_U64:
-		*out_child = TCC_FFI_U64;
-		return true;
-	case TCC_FFI_ARRAY_F32:
-		*out_child = TCC_FFI_F32;
-		return true;
-	case TCC_FFI_ARRAY_F64:
-		*out_child = TCC_FFI_F64;
-		return true;
-	case TCC_FFI_ARRAY_UUID:
-		*out_child = TCC_FFI_UUID;
-		return true;
-	case TCC_FFI_ARRAY_DATE:
-		*out_child = TCC_FFI_DATE;
-		return true;
-	case TCC_FFI_ARRAY_TIME:
-		*out_child = TCC_FFI_TIME;
-		return true;
-	case TCC_FFI_ARRAY_TIMESTAMP:
-		*out_child = TCC_FFI_TIMESTAMP;
-		return true;
-	case TCC_FFI_ARRAY_INTERVAL:
-		*out_child = TCC_FFI_INTERVAL;
-		return true;
-	case TCC_FFI_ARRAY_DECIMAL:
-		*out_child = TCC_FFI_DECIMAL;
-		return true;
+#define TCC_ARRAY_CHILD_CASE(SCALAR, LIST, ARRAY) case ARRAY: *out_child = SCALAR; return true;
+		TCC_FFI_COMPOUND_SCALAR_MAP(TCC_ARRAY_CHILD_CASE)
+#undef TCC_ARRAY_CHILD_CASE
 	default:
 		return false;
 	}
@@ -3230,57 +3066,9 @@ static bool tcc_ffi_array_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_typ
 		return false;
 	}
 	switch (child_type) {
-	case TCC_FFI_BOOL:
-		*out_array_type = TCC_FFI_ARRAY_BOOL;
-		return true;
-	case TCC_FFI_I8:
-		*out_array_type = TCC_FFI_ARRAY_I8;
-		return true;
-	case TCC_FFI_U8:
-		*out_array_type = TCC_FFI_ARRAY_U8;
-		return true;
-	case TCC_FFI_I16:
-		*out_array_type = TCC_FFI_ARRAY_I16;
-		return true;
-	case TCC_FFI_U16:
-		*out_array_type = TCC_FFI_ARRAY_U16;
-		return true;
-	case TCC_FFI_I32:
-		*out_array_type = TCC_FFI_ARRAY_I32;
-		return true;
-	case TCC_FFI_U32:
-		*out_array_type = TCC_FFI_ARRAY_U32;
-		return true;
-	case TCC_FFI_I64:
-		*out_array_type = TCC_FFI_ARRAY_I64;
-		return true;
-	case TCC_FFI_U64:
-		*out_array_type = TCC_FFI_ARRAY_U64;
-		return true;
-	case TCC_FFI_F32:
-		*out_array_type = TCC_FFI_ARRAY_F32;
-		return true;
-	case TCC_FFI_F64:
-		*out_array_type = TCC_FFI_ARRAY_F64;
-		return true;
-	case TCC_FFI_UUID:
-		*out_array_type = TCC_FFI_ARRAY_UUID;
-		return true;
-	case TCC_FFI_DATE:
-		*out_array_type = TCC_FFI_ARRAY_DATE;
-		return true;
-	case TCC_FFI_TIME:
-		*out_array_type = TCC_FFI_ARRAY_TIME;
-		return true;
-	case TCC_FFI_TIMESTAMP:
-		*out_array_type = TCC_FFI_ARRAY_TIMESTAMP;
-		return true;
-	case TCC_FFI_INTERVAL:
-		*out_array_type = TCC_FFI_ARRAY_INTERVAL;
-		return true;
-	case TCC_FFI_DECIMAL:
-		*out_array_type = TCC_FFI_ARRAY_DECIMAL;
-		return true;
+#define TCC_ARRAY_FROM_CHILD_CASE(SCALAR, LIST, ARRAY) case SCALAR: *out_array_type = ARRAY; return true;
+		TCC_FFI_COMPOUND_SCALAR_MAP(TCC_ARRAY_FROM_CHILD_CASE)
+#undef TCC_ARRAY_FROM_CHILD_CASE
 	default:
 		return false;
 	}
@@ -4632,7 +4420,11 @@ static tcc_value_bridge_t *tcc_build_value_bridge(duckdb_vector vector, const tc
 	}
 	if (tcc_ffi_type_is_union(desc->ffi_type)) {
 		idx_t i;
-		uint8_t *tags = (uint8_t *)duckdb_vector_get_data(vector);
+		/* UNION layout: child[0] = tag vector (uint8_t), child[1..N] = member vectors.
+		 * The union vector itself has no data buffer (PhysicalType::STRUCT size=0),
+		 * so we must access tags via the tag child vector. */
+		duckdb_vector tag_vector = duckdb_struct_vector_get_child(vector, 0);
+		uint8_t *tags = tag_vector ? (uint8_t *)duckdb_vector_get_data(tag_vector) : NULL;
 		ducktinycc_union_t *rows = NULL;
 		idx_t member_count = desc->as.union_like.count;
 		if (!tags || !desc->as.union_like.members || member_count <= 0) {
@@ -4654,7 +4446,8 @@ static tcc_value_bridge_t *tcc_build_value_bridge(duckdb_vector vector, const tc
 		}
 		memset(bridge->children, 0, sizeof(tcc_value_bridge_t *) * (size_t)member_count);
 		for (i = 0; i < member_count; i++) {
-			duckdb_vector member_vector = duckdb_struct_vector_get_child(vector, i);
+			/* member i is at child[i+1] since child[0] is the tag */
+			duckdb_vector member_vector = duckdb_struct_vector_get_child(vector, i + 1);
 			tcc_value_bridge_t *member_bridge;
 			if (!member_vector) {
 				if (out_error) {
@@ -4999,7 +4792,9 @@ static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t
 	}
 	if (tcc_ffi_type_is_union(desc->ffi_type)) {
 		const ducktinycc_union_t *u = (const ducktinycc_union_t *)src_ptr;
-		uint8_t *tags = (uint8_t *)duckdb_vector_get_data(vector);
+		/* UNION layout: child[0] = tag vector, child[1..N] = member vectors. */
+		duckdb_vector tag_vector = duckdb_struct_vector_get_child(vector, 0);
+		uint8_t *tags = tag_vector ? (uint8_t *)duckdb_vector_get_data(tag_vector) : NULL;
 		idx_t member_count = desc->as.union_like.count;
 		idx_t member_idx;
 		uint8_t tag;
@@ -5013,7 +4808,8 @@ static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t
 		}
 		tags[row] = tag;
 		for (member_idx = 0; member_idx < member_count; member_idx++) {
-			duckdb_vector member_vector = duckdb_struct_vector_get_child(vector, member_idx);
+			/* member member_idx is at child[member_idx+1] since child[0] is the tag */
+			duckdb_vector member_vector = duckdb_struct_vector_get_child(vector, member_idx + 1);
 			if (!member_vector) {
 				if (out_error) {
 					*out_error = "ducktinycc missing union output member vector";
@@ -6049,6 +5845,33 @@ static int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx
 	return ducktinycc_valid_is_set(m->value_validity, global_idx);
 }
 
+/* ducktinycc_union_tag: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
+static int ducktinycc_union_tag(const ducktinycc_union_t *u) {
+	if (!u || !u->tag_ptr) {
+		return -1;
+	}
+	return (int)u->tag_ptr[u->offset];
+}
+
+/* ducktinycc_union_member_ptr: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
+static const void *ducktinycc_union_member_ptr(const ducktinycc_union_t *u, uint64_t member_idx) {
+	if (!u || !u->member_ptrs || member_idx >= u->member_count) {
+		return NULL;
+	}
+	return u->member_ptrs[member_idx];
+}
+
+/* ducktinycc_union_member_is_valid: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
+static int ducktinycc_union_member_is_valid(const ducktinycc_union_t *u, uint64_t member_idx) {
+	if (!u || !u->member_ptrs || member_idx >= u->member_count) {
+		return 0;
+	}
+	if (!u->member_validity || !u->member_validity[member_idx]) {
+		return 1;
+	}
+	return ducktinycc_valid_is_set(u->member_validity[member_idx], u->offset);
+}
+
 #define TCC_HOST_SYMBOL_TABLE(X)                                                                                          \
 	X("duckdb_ext_api", &duckdb_ext_api)                                                                                 \
 	X("ducktinycc_register_signature", ducktinycc_register_signature)                                                    \
@@ -6093,7 +5916,11 @@ static int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx
 	X("ducktinycc_map_key_ptr", ducktinycc_map_key_ptr)                                                                  \
 	X("ducktinycc_map_value_ptr", ducktinycc_map_value_ptr)                                                              \
 	X("ducktinycc_map_key_is_valid", ducktinycc_map_key_is_valid)                                                        \
-	X("ducktinycc_map_value_is_valid", ducktinycc_map_value_is_valid)
+	X("ducktinycc_map_value_is_valid", ducktinycc_map_value_is_valid)                                                      \
+	X("ducktinycc_union_tag", ducktinycc_union_tag)                                                                        \
+	X("ducktinycc_union_member_ptr", ducktinycc_union_member_ptr)                                                          \
+	X("ducktinycc_union_member_is_valid", ducktinycc_union_member_is_valid)                                                \
+	X("duckdb_validity_row_is_valid", duckdb_validity_row_is_valid)
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
 /* tcc_add_host_symbols: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
@@ -6799,7 +6626,24 @@ static char *tcc_find_top_level_char(char *input, char target) {
 
 /* tcc_parse_type_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_type_t *out_type, size_t *out_array_size) {
+	/* Table-driven lookup for simple type tokens. */
+	static const struct {
+		const char *name;
+		tcc_ffi_type_t type;
+	} simple_tokens[] = {
+	    {"bool", TCC_FFI_BOOL},         {"i8", TCC_FFI_I8},
+	    {"u8", TCC_FFI_U8},             {"i16", TCC_FFI_I16},
+	    {"u16", TCC_FFI_U16},           {"i32", TCC_FFI_I32},
+	    {"u32", TCC_FFI_U32},           {"i64", TCC_FFI_I64},
+	    {"u64", TCC_FFI_U64},           {"f32", TCC_FFI_F32},
+	    {"f64", TCC_FFI_F64},           {"ptr", TCC_FFI_PTR},
+	    {"varchar", TCC_FFI_VARCHAR},   {"blob", TCC_FFI_BLOB},
+	    {"uuid", TCC_FFI_UUID},         {"date", TCC_FFI_DATE},
+	    {"time", TCC_FFI_TIME},         {"timestamp", TCC_FFI_TIMESTAMP},
+	    {"interval", TCC_FFI_INTERVAL}, {"decimal", TCC_FFI_DECIMAL},
+	};
 	size_t token_len;
+	size_t i;
 	if (!token || token[0] == '\0' || !out_type) {
 		return false;
 	}
@@ -6811,85 +6655,11 @@ static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_typ
 		*out_type = TCC_FFI_VOID;
 		return true;
 	}
-	if (tcc_equals_ci(token, "bool")) {
-		*out_type = TCC_FFI_BOOL;
-		return true;
-	}
-	if (tcc_equals_ci(token, "i8")) {
-		*out_type = TCC_FFI_I8;
-		return true;
-	}
-	if (tcc_equals_ci(token, "u8")) {
-		*out_type = TCC_FFI_U8;
-		return true;
-	}
-	if (tcc_equals_ci(token, "i16")) {
-		*out_type = TCC_FFI_I16;
-		return true;
-	}
-	if (tcc_equals_ci(token, "u16")) {
-		*out_type = TCC_FFI_U16;
-		return true;
-	}
-	if (tcc_equals_ci(token, "i32")) {
-		*out_type = TCC_FFI_I32;
-		return true;
-	}
-	if (tcc_equals_ci(token, "u32")) {
-		*out_type = TCC_FFI_U32;
-		return true;
-	}
-	if (tcc_equals_ci(token, "i64")) {
-		*out_type = TCC_FFI_I64;
-		return true;
-	}
-	if (tcc_equals_ci(token, "u64")) {
-		*out_type = TCC_FFI_U64;
-		return true;
-	}
-	if (tcc_equals_ci(token, "ptr")) {
-		*out_type = TCC_FFI_PTR;
-		return true;
-	}
-	if (tcc_equals_ci(token, "f32")) {
-		*out_type = TCC_FFI_F32;
-		return true;
-	}
-	if (tcc_equals_ci(token, "f64")) {
-		*out_type = TCC_FFI_F64;
-		return true;
-	}
-	if (tcc_equals_ci(token, "varchar")) {
-		*out_type = TCC_FFI_VARCHAR;
-		return true;
-	}
-	if (tcc_equals_ci(token, "blob")) {
-		*out_type = TCC_FFI_BLOB;
-		return true;
-	}
-	if (tcc_equals_ci(token, "uuid")) {
-		*out_type = TCC_FFI_UUID;
-		return true;
-	}
-	if (tcc_equals_ci(token, "date")) {
-		*out_type = TCC_FFI_DATE;
-		return true;
-	}
-	if (tcc_equals_ci(token, "time")) {
-		*out_type = TCC_FFI_TIME;
-		return true;
-	}
-	if (tcc_equals_ci(token, "timestamp")) {
-		*out_type = TCC_FFI_TIMESTAMP;
-		return true;
-	}
-	if (tcc_equals_ci(token, "interval")) {
-		*out_type = TCC_FFI_INTERVAL;
-		return true;
-	}
-	if (tcc_equals_ci(token, "decimal")) {
-		*out_type = TCC_FFI_DECIMAL;
-		return true;
+	for (i = 0; i < sizeof(simple_tokens) / sizeof(simple_tokens[0]); i++) {
+		if (tcc_equals_ci(token, simple_tokens[i].name)) {
+			*out_type = simple_tokens[i].type;
+			return true;
+		}
 	}
 	if (token_len > 8 && (token[0] == 's' || token[0] == 'S') && (token[1] == 't' || token[1] == 'T') &&
 	    (token[2] == 'r' || token[2] == 'R') && (token[3] == 'u' || token[3] == 'U') &&
@@ -8626,7 +8396,11 @@ static char *tcc_codegen_build_compilation_unit(const char *user_source, const c
 		                      "extern const void *ducktinycc_map_key_ptr(const ducktinycc_map_t *m, uint64_t idx, uint64_t key_size);\n"
 		                      "extern const void *ducktinycc_map_value_ptr(const ducktinycc_map_t *m, uint64_t idx, uint64_t value_size);\n"
 		                      "extern int ducktinycc_map_key_is_valid(const ducktinycc_map_t *m, uint64_t idx);\n"
-		                      "extern int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx);\n";
+		                      "extern int ducktinycc_map_value_is_valid(const ducktinycc_map_t *m, uint64_t idx);\n"
+		                      "extern int ducktinycc_union_tag(const ducktinycc_union_t *u);\n"
+		                      "extern const void *ducktinycc_union_member_ptr(const ducktinycc_union_t *u, uint64_t member_idx);\n"
+		                      "extern int ducktinycc_union_member_is_valid(const ducktinycc_union_t *u, uint64_t member_idx);\n"
+		                      "extern int duckdb_validity_row_is_valid(uint64_t *validity, uint64_t row);\n";
 	size_t n0;
 	size_t n1;
 	size_t n2;
