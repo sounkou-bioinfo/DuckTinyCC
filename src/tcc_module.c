@@ -840,6 +840,10 @@ static void tcc_map_meta_destroy(tcc_ffi_map_meta_t *meta);
 static void tcc_map_meta_array_destroy(tcc_ffi_map_meta_t *metas, int count);
 static void tcc_union_meta_destroy(tcc_ffi_union_meta_t *meta);
 static void tcc_union_meta_array_destroy(tcc_ffi_union_meta_t *metas, int count);
+static bool tcc_parse_composite_fields_inner(char *inner, bool allow_auto_names, const char *kind_label,
+                                             int *out_count, char ***out_names, char ***out_tokens,
+                                             tcc_ffi_type_t **out_types, size_t **out_sizes,
+                                             tcc_error_buffer_t *error_buf);
 static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t *out_meta,
                                         tcc_error_buffer_t *error_buf);
 static bool tcc_parse_map_meta_token(const char *token, tcc_ffi_map_meta_t *out_meta, tcc_error_buffer_t *error_buf);
@@ -5656,148 +5660,26 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		return false;
 	}
 	if (!tcc_parse_wrapper_mode(wrapper_mode, &mode, &err)) {
-		if (arg_types) {
-			duckdb_free(arg_types);
-		}
-		if (arg_array_sizes) {
-			duckdb_free(arg_array_sizes);
-		}
-		if (arg_struct_metas) {
-			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-		}
-		if (arg_map_metas) {
-			tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-		}
-		if (arg_union_metas) {
-			tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-		}
-		tcc_struct_meta_destroy(&ret_struct_meta);
-		tcc_map_meta_destroy(&ret_map_meta);
-		tcc_union_meta_destroy(&ret_union_meta);
-		return false;
+		goto fail;
 	}
 	if (!tcc_typedesc_parse_token(return_type, true, &return_desc, &err)) {
-		if (arg_types) {
-			duckdb_free(arg_types);
-		}
-		if (arg_array_sizes) {
-			duckdb_free(arg_array_sizes);
-		}
-		if (arg_struct_metas) {
-			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-		}
-		if (arg_map_metas) {
-			tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-		}
-		if (arg_union_metas) {
-			tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-		}
-		tcc_struct_meta_destroy(&ret_struct_meta);
-		tcc_map_meta_destroy(&ret_map_meta);
-		tcc_union_meta_destroy(&ret_union_meta);
-		return false;
+		goto fail;
 	}
 	if (!tcc_split_csv_tokens(arg_types_csv, &arg_tokens, &err)) {
-		if (arg_types) {
-			duckdb_free(arg_types);
-		}
-		if (arg_array_sizes) {
-			duckdb_free(arg_array_sizes);
-		}
-		if (arg_struct_metas) {
-			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-		}
-		if (arg_map_metas) {
-			tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-		}
-		if (arg_union_metas) {
-			tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-		}
-		tcc_struct_meta_destroy(&ret_struct_meta);
-		tcc_map_meta_destroy(&ret_map_meta);
-		tcc_union_meta_destroy(&ret_union_meta);
-		tcc_typedesc_destroy(return_desc);
-		return false;
+		goto fail;
 	}
 	if ((int)arg_tokens.count != arg_count) {
-		if (arg_types) {
-			duckdb_free(arg_types);
-		}
-		if (arg_array_sizes) {
-			duckdb_free(arg_array_sizes);
-		}
-		if (arg_struct_metas) {
-			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-		}
-		if (arg_map_metas) {
-			tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-		}
-		if (arg_union_metas) {
-			tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-		}
-		tcc_struct_meta_destroy(&ret_struct_meta);
-		tcc_map_meta_destroy(&ret_map_meta);
-		tcc_union_meta_destroy(&ret_union_meta);
-		tcc_typedesc_destroy(return_desc);
-		tcc_string_list_destroy(&arg_tokens);
-		return false;
+		goto fail;
 	}
 	if (arg_count > 0) {
 		arg_descs = (tcc_typedesc_t **)duckdb_malloc(sizeof(tcc_typedesc_t *) * (size_t)arg_count);
 		if (!arg_descs) {
-			if (arg_types) {
-				duckdb_free(arg_types);
-			}
-			if (arg_array_sizes) {
-				duckdb_free(arg_array_sizes);
-			}
-			if (arg_struct_metas) {
-				tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-			}
-			if (arg_map_metas) {
-				tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-			}
-			if (arg_union_metas) {
-				tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-			}
-			tcc_struct_meta_destroy(&ret_struct_meta);
-			tcc_map_meta_destroy(&ret_map_meta);
-			tcc_union_meta_destroy(&ret_union_meta);
-			tcc_typedesc_destroy(return_desc);
-			tcc_string_list_destroy(&arg_tokens);
-			return false;
+			goto fail;
 		}
 		memset(arg_descs, 0, sizeof(tcc_typedesc_t *) * (size_t)arg_count);
 		for (i = 0; i < arg_count; i++) {
 			if (!tcc_typedesc_parse_token(arg_tokens.items[i], false, &arg_descs[i], &err)) {
-				int j;
-				for (j = 0; j < i; j++) {
-					if (arg_descs[j]) {
-						tcc_typedesc_destroy(arg_descs[j]);
-					}
-				}
-				duckdb_free(arg_descs);
-				if (arg_types) {
-					duckdb_free(arg_types);
-				}
-				if (arg_array_sizes) {
-					duckdb_free(arg_array_sizes);
-				}
-				if (arg_struct_metas) {
-					tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-				}
-				if (arg_map_metas) {
-					tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-				}
-				if (arg_union_metas) {
-					tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-				}
-				tcc_struct_meta_destroy(&ret_struct_meta);
-				tcc_map_meta_destroy(&ret_map_meta);
-				tcc_union_meta_destroy(&ret_union_meta);
-				tcc_typedesc_destroy(return_desc);
-				tcc_string_list_destroy(&arg_tokens);
-				return false;
+				goto fail;
 			}
 		}
 	}
@@ -5805,73 +5687,11 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 
 	fn = duckdb_create_scalar_function();
 	if (!fn) {
-		if (arg_descs) {
-			for (i = 0; i < arg_count; i++) {
-				if (arg_descs[i]) {
-					tcc_typedesc_destroy(arg_descs[i]);
-				}
-			}
-			duckdb_free(arg_descs);
-		}
-		if (return_desc) {
-			tcc_typedesc_destroy(return_desc);
-		}
-		if (arg_types) {
-			duckdb_free(arg_types);
-		}
-		if (arg_array_sizes) {
-			duckdb_free(arg_array_sizes);
-		}
-		if (arg_struct_metas) {
-			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-		}
-		if (arg_map_metas) {
-			tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-		}
-		if (arg_union_metas) {
-			tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-		}
-		tcc_struct_meta_destroy(&ret_struct_meta);
-		tcc_map_meta_destroy(&ret_map_meta);
-		tcc_union_meta_destroy(&ret_union_meta);
-		if (fn) {
-			duckdb_destroy_scalar_function(&fn);
-		}
-		return false;
+		goto fail;
 	}
 	ctx = (tcc_host_sig_ctx_t *)duckdb_malloc(sizeof(tcc_host_sig_ctx_t));
 	if (!ctx) {
-		if (arg_descs) {
-			for (i = 0; i < arg_count; i++) {
-				if (arg_descs[i]) {
-					tcc_typedesc_destroy(arg_descs[i]);
-				}
-			}
-			duckdb_free(arg_descs);
-		}
-		if (return_desc) {
-			tcc_typedesc_destroy(return_desc);
-		}
-		if (arg_types) {
-			duckdb_free(arg_types);
-		}
-		if (arg_array_sizes) {
-			duckdb_free(arg_array_sizes);
-		}
-		if (arg_struct_metas) {
-			tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-		}
-		if (arg_map_metas) {
-			tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-		}
-		if (arg_union_metas) {
-			tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-		}
-		tcc_struct_meta_destroy(&ret_struct_meta);
-		tcc_map_meta_destroy(&ret_map_meta);
-		tcc_union_meta_destroy(&ret_union_meta);
-		duckdb_destroy_scalar_function(&fn);
-		return false;
+		goto fail;
 	}
 	memset(ctx, 0, sizeof(tcc_host_sig_ctx_t));
 	ctx->wrapper_mode = mode;
@@ -5946,6 +5766,42 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	rc = duckdb_register_scalar_function(con, fn);
 	duckdb_destroy_scalar_function(&fn);
 	return rc == DuckDBSuccess;
+
+fail:
+	tcc_string_list_destroy(&arg_tokens);
+	if (arg_descs) {
+		for (i = 0; i < arg_count; i++) {
+			if (arg_descs[i]) {
+				tcc_typedesc_destroy(arg_descs[i]);
+			}
+		}
+		duckdb_free(arg_descs);
+	}
+	if (return_desc) {
+		tcc_typedesc_destroy(return_desc);
+	}
+	if (arg_types) {
+		duckdb_free(arg_types);
+	}
+	if (arg_array_sizes) {
+		duckdb_free(arg_array_sizes);
+	}
+	if (arg_struct_metas) {
+		tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
+	}
+	if (arg_map_metas) {
+		tcc_map_meta_array_destroy(arg_map_metas, arg_count);
+	}
+	if (arg_union_metas) {
+		tcc_union_meta_array_destroy(arg_union_metas, arg_count);
+	}
+	tcc_struct_meta_destroy(&ret_struct_meta);
+	tcc_map_meta_destroy(&ret_map_meta);
+	tcc_union_meta_destroy(&ret_union_meta);
+	if (fn) {
+		duckdb_destroy_scalar_function(&fn);
+	}
+	return false;
 }
 
 /* ducktinycc_valid_is_set: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
@@ -7341,48 +7197,32 @@ static bool tcc_parse_c_enum_constants(const char *arg_types_csv, tcc_string_lis
 	return true;
 }
 
-/* tcc_parse_struct_meta_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
-static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t *out_meta,
-                                        tcc_error_buffer_t *error_buf) {
-	size_t token_len;
-	char *inner = NULL;
-	char *cur;
-	int field_count = 0;
+/* tcc_parse_composite_fields_inner: Shared parser for struct/union field lists.
+   Parses semicolon-delimited `name:type` fields from an already-extracted inner string.
+   If allow_auto_names is true (struct), unnamed fields get auto-generated names (f1, f2, ...).
+   If false (union), a colon-separated name is required.
+   Outputs are allocated arrays that caller must free on failure via the fail label pattern. */
+static bool tcc_parse_composite_fields_inner(char *inner, bool allow_auto_names, const char *kind_label,
+                                             int *out_count, char ***out_names, char ***out_tokens,
+                                             tcc_ffi_type_t **out_types, size_t **out_sizes,
+                                             tcc_error_buffer_t *error_buf) {
+	char *cur = inner;
+	int count = 0;
 	int cap = 0;
-	char **field_names = NULL;
-	char **field_tokens = NULL;
-	tcc_ffi_type_t *field_types = NULL;
-	size_t *field_sizes = NULL;
-	if (!token || !out_meta) {
-		tcc_set_error(error_buf, "invalid struct token");
-		return false;
-	}
-	memset(out_meta, 0, sizeof(*out_meta));
-	token_len = strlen(token);
-	if (token_len <= 8 || !((token[0] == 's' || token[0] == 'S') && (token[1] == 't' || token[1] == 'T') &&
-	                        (token[2] == 'r' || token[2] == 'R') && (token[3] == 'u' || token[3] == 'U') &&
-	                        (token[4] == 'c' || token[4] == 'C') && (token[5] == 't' || token[5] == 'T') &&
-	                        token[6] == '<' && token[token_len - 1] == '>')) {
-		tcc_set_error(error_buf, "struct token must use struct<...>");
-		return false;
-	}
-	inner = (char *)duckdb_malloc(token_len - 6);
-	if (!inner) {
-		tcc_set_error(error_buf, "out of memory");
-		return false;
-	}
-	memcpy(inner, token + 7, token_len - 8);
-	inner[token_len - 8] = '\0';
-	cur = inner;
+	char **names = NULL;
+	char **tokens = NULL;
+	tcc_ffi_type_t *types = NULL;
+	size_t *sizes = NULL;
+	char err_msg[128];
 	while (cur && *cur) {
 		char *part = tcc_next_top_level_part(&cur, ';');
 		char *colon;
 		char *name_part;
 		char *type_part;
 		size_t part_len;
-		tcc_ffi_type_t field_type = TCC_FFI_VOID;
-		size_t field_array_size = 0;
-		size_t field_size;
+		tcc_ffi_type_t parsed_type = TCC_FFI_VOID;
+		size_t parsed_array_size = 0;
+		size_t parsed_size;
 		char auto_name[32];
 		char **new_names;
 		char **new_tokens;
@@ -7396,7 +7236,8 @@ static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t
 			part[--part_len] = '\0';
 		}
 		if (part_len == 0) {
-			tcc_set_error(error_buf, "struct token contains empty field");
+			snprintf(err_msg, sizeof(err_msg), "%s token contains empty field", kind_label);
+			tcc_set_error(error_buf, err_msg);
 			goto fail;
 		}
 		colon = tcc_find_top_level_char(part, ':');
@@ -7419,32 +7260,41 @@ static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t
 				type_part[--part_len] = '\0';
 			}
 			if (!tcc_is_identifier_token(name_part)) {
-				tcc_set_error(error_buf, "struct field names must be identifiers");
+				snprintf(err_msg, sizeof(err_msg), "%s field names must be identifiers", kind_label);
+				tcc_set_error(error_buf, err_msg);
 				goto fail;
 			}
 			if (type_part[0] == '\0') {
-				tcc_set_error(error_buf, "struct field type is missing");
+				snprintf(err_msg, sizeof(err_msg), "%s field type is missing", kind_label);
+				tcc_set_error(error_buf, err_msg);
 				goto fail;
 			}
-		} else {
-			snprintf(auto_name, sizeof(auto_name), "f%d", field_count + 1);
+		} else if (allow_auto_names) {
+			snprintf(auto_name, sizeof(auto_name), "f%d", count + 1);
 			name_part = auto_name;
 			type_part = part;
-		}
-		if (!tcc_parse_type_token(type_part, false, &field_type, &field_array_size)) {
-			tcc_set_error(error_buf, "struct field type token is unsupported");
+		} else {
+			snprintf(err_msg, sizeof(err_msg), "%s member must use name:type", kind_label);
+			tcc_set_error(error_buf, err_msg);
 			goto fail;
 		}
-		if (field_type == TCC_FFI_VOID) {
-			tcc_set_error(error_buf, "struct fields cannot use void");
+		if (!tcc_parse_type_token(type_part, false, &parsed_type, &parsed_array_size)) {
+			snprintf(err_msg, sizeof(err_msg), "%s field type token is unsupported", kind_label);
+			tcc_set_error(error_buf, err_msg);
 			goto fail;
 		}
-		field_size = tcc_ffi_type_size(field_type);
-		if (field_size == 0) {
-			tcc_set_error(error_buf, "struct field has unsupported storage type");
+		if (parsed_type == TCC_FFI_VOID) {
+			snprintf(err_msg, sizeof(err_msg), "%s fields cannot use void", kind_label);
+			tcc_set_error(error_buf, err_msg);
 			goto fail;
 		}
-		if (field_count >= cap) {
+		parsed_size = tcc_ffi_type_size(parsed_type);
+		if (parsed_size == 0) {
+			snprintf(err_msg, sizeof(err_msg), "%s field has unsupported storage type", kind_label);
+			tcc_set_error(error_buf, err_msg);
+			goto fail;
+		}
+		if (count >= cap) {
 			int new_cap = cap == 0 ? 4 : cap * 2;
 			new_names = (char **)duckdb_malloc(sizeof(char *) * (size_t)new_cap);
 			new_tokens = (char **)duckdb_malloc(sizeof(char *) * (size_t)new_cap);
@@ -7468,77 +7318,107 @@ static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t
 			}
 			memset(new_names, 0, sizeof(char *) * (size_t)new_cap);
 			memset(new_tokens, 0, sizeof(char *) * (size_t)new_cap);
-			if (field_names && field_count > 0) {
-				memcpy(new_names, field_names, sizeof(char *) * (size_t)field_count);
-				memcpy(new_tokens, field_tokens, sizeof(char *) * (size_t)field_count);
-				memcpy(new_types, field_types, sizeof(tcc_ffi_type_t) * (size_t)field_count);
-				memcpy(new_sizes, field_sizes, sizeof(size_t) * (size_t)field_count);
-				duckdb_free(field_names);
-				duckdb_free(field_tokens);
-				duckdb_free(field_types);
-				duckdb_free(field_sizes);
+			if (names && count > 0) {
+				memcpy(new_names, names, sizeof(char *) * (size_t)count);
+				memcpy(new_tokens, tokens, sizeof(char *) * (size_t)count);
+				memcpy(new_types, types, sizeof(tcc_ffi_type_t) * (size_t)count);
+				memcpy(new_sizes, sizes, sizeof(size_t) * (size_t)count);
+				duckdb_free(names);
+				duckdb_free(tokens);
+				duckdb_free(types);
+				duckdb_free(sizes);
 			}
-			field_names = new_names;
-			field_tokens = new_tokens;
-			field_types = new_types;
-			field_sizes = new_sizes;
+			names = new_names;
+			tokens = new_tokens;
+			types = new_types;
+			sizes = new_sizes;
 			cap = new_cap;
 		}
-		field_names[field_count] = tcc_strdup(name_part);
-		if (!field_names[field_count]) {
+		names[count] = tcc_strdup(name_part);
+		tokens[count] = tcc_strdup(type_part);
+		if (!names[count] || !tokens[count]) {
 			tcc_set_error(error_buf, "out of memory");
 			goto fail;
 		}
-		field_tokens[field_count] = tcc_strdup(type_part);
-		if (!field_tokens[field_count]) {
-			tcc_set_error(error_buf, "out of memory");
-			goto fail;
-		}
-		field_types[field_count] = field_type;
-		field_sizes[field_count] = field_size;
-		field_count++;
+		types[count] = parsed_type;
+		sizes[count] = parsed_size;
+		count++;
 	}
-	if (field_count <= 0) {
-		tcc_set_error(error_buf, "struct token requires at least one field");
+	if (count <= 0) {
+		snprintf(err_msg, sizeof(err_msg), "%s token requires at least one field", kind_label);
+		tcc_set_error(error_buf, err_msg);
 		goto fail;
 	}
-	duckdb_free(inner);
-	out_meta->field_count = field_count;
-	out_meta->field_names = field_names;
-	out_meta->field_tokens = field_tokens;
-	out_meta->field_types = field_types;
-	out_meta->field_sizes = field_sizes;
+	*out_count = count;
+	*out_names = names;
+	*out_tokens = tokens;
+	*out_types = types;
+	*out_sizes = sizes;
 	return true;
 fail:
-	if (inner) {
-		duckdb_free(inner);
-	}
-	if (field_names) {
+	if (names) {
 		int i;
-		for (i = 0; i < field_count; i++) {
-			if (field_names[i]) {
-				duckdb_free(field_names[i]);
+		for (i = 0; i < count; i++) {
+			if (names[i]) {
+				duckdb_free(names[i]);
 			}
 		}
-		duckdb_free(field_names);
+		duckdb_free(names);
 	}
-	if (field_tokens) {
+	if (tokens) {
 		int i;
-		for (i = 0; i < field_count; i++) {
-			if (field_tokens[i]) {
-				duckdb_free(field_tokens[i]);
+		for (i = 0; i < count; i++) {
+			if (tokens[i]) {
+				duckdb_free(tokens[i]);
 			}
 		}
-		duckdb_free(field_tokens);
+		duckdb_free(tokens);
 	}
-	if (field_types) {
-		duckdb_free(field_types);
+	if (types) {
+		duckdb_free(types);
 	}
-	if (field_sizes) {
-		duckdb_free(field_sizes);
+	if (sizes) {
+		duckdb_free(sizes);
+	}
+	*out_count = 0;
+	*out_names = NULL;
+	*out_tokens = NULL;
+	*out_types = NULL;
+	*out_sizes = NULL;
+	return false;
+}
+
+/* tcc_parse_struct_meta_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
+static bool tcc_parse_struct_meta_token(const char *token, tcc_ffi_struct_meta_t *out_meta,
+                                        tcc_error_buffer_t *error_buf) {
+	size_t token_len;
+	char *inner = NULL;
+	bool ok;
+	if (!token || !out_meta) {
+		tcc_set_error(error_buf, "invalid struct token");
+		return false;
 	}
 	memset(out_meta, 0, sizeof(*out_meta));
-	return false;
+	token_len = strlen(token);
+	if (token_len <= 8 || !((token[0] == 's' || token[0] == 'S') && (token[1] == 't' || token[1] == 'T') &&
+	                        (token[2] == 'r' || token[2] == 'R') && (token[3] == 'u' || token[3] == 'U') &&
+	                        (token[4] == 'c' || token[4] == 'C') && (token[5] == 't' || token[5] == 'T') &&
+	                        token[6] == '<' && token[token_len - 1] == '>')) {
+		tcc_set_error(error_buf, "struct token must use struct<...>");
+		return false;
+	}
+	inner = (char *)duckdb_malloc(token_len - 6);
+	if (!inner) {
+		tcc_set_error(error_buf, "out of memory");
+		return false;
+	}
+	memcpy(inner, token + 7, token_len - 8);
+	inner[token_len - 8] = '\0';
+	ok = tcc_parse_composite_fields_inner(inner, true, "struct", &out_meta->field_count, &out_meta->field_names,
+	                                      &out_meta->field_tokens, &out_meta->field_types, &out_meta->field_sizes,
+	                                      error_buf);
+	duckdb_free(inner);
+	return ok;
 }
 
 /* tcc_parse_map_meta_token: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
@@ -7652,13 +7532,7 @@ static bool tcc_parse_union_meta_token(const char *token, tcc_ffi_union_meta_t *
                                        tcc_error_buffer_t *error_buf) {
 	size_t token_len;
 	char *inner = NULL;
-	char *cur;
-	int member_count = 0;
-	int cap = 0;
-	char **member_names = NULL;
-	char **member_tokens = NULL;
-	tcc_ffi_type_t *member_types = NULL;
-	size_t *member_sizes = NULL;
+	bool ok;
 	if (!token || !out_meta) {
 		tcc_set_error(error_buf, "invalid union token");
 		return false;
@@ -7678,157 +7552,11 @@ static bool tcc_parse_union_meta_token(const char *token, tcc_ffi_union_meta_t *
 	}
 	memcpy(inner, token + 6, token_len - 7);
 	inner[token_len - 7] = '\0';
-	cur = inner;
-	while (cur && *cur) {
-		char *part = tcc_next_top_level_part(&cur, ';');
-		char *colon;
-		char *name_part;
-		char *type_part;
-		size_t part_len;
-		tcc_ffi_type_t member_type = TCC_FFI_VOID;
-		size_t member_array_size = 0;
-		size_t member_size = 0;
-		while (*part && isspace((unsigned char)*part)) {
-			part++;
-		}
-		part_len = strlen(part);
-		while (part_len > 0 && isspace((unsigned char)part[part_len - 1])) {
-			part[--part_len] = '\0';
-		}
-		if (part_len == 0) {
-			tcc_set_error(error_buf, "union token contains empty member");
-			goto fail;
-		}
-		colon = tcc_find_top_level_char(part, ':');
-		if (!colon) {
-			tcc_set_error(error_buf, "union member must use name:type");
-			goto fail;
-		}
-		*colon = '\0';
-		name_part = part;
-		type_part = colon + 1;
-		while (*name_part && isspace((unsigned char)*name_part)) {
-			name_part++;
-		}
-		part_len = strlen(name_part);
-		while (part_len > 0 && isspace((unsigned char)name_part[part_len - 1])) {
-			name_part[--part_len] = '\0';
-		}
-		while (*type_part && isspace((unsigned char)*type_part)) {
-			type_part++;
-		}
-		part_len = strlen(type_part);
-		while (part_len > 0 && isspace((unsigned char)type_part[part_len - 1])) {
-			type_part[--part_len] = '\0';
-		}
-		if (!tcc_is_identifier_token(name_part)) {
-			tcc_set_error(error_buf, "union member names must be identifiers");
-			goto fail;
-		}
-		if (type_part[0] == '\0') {
-			tcc_set_error(error_buf, "union member type is missing");
-			goto fail;
-		}
-		if (!tcc_parse_type_token(type_part, false, &member_type, &member_array_size) || member_type == TCC_FFI_VOID) {
-			tcc_set_error(error_buf, "union member type token is unsupported");
-			goto fail;
-		}
-		member_size = tcc_ffi_type_size(member_type);
-		if (member_size == 0) {
-			tcc_set_error(error_buf, "union member has unsupported storage type");
-			goto fail;
-		}
-		if (member_count >= cap) {
-			int new_cap = cap == 0 ? 4 : cap * 2;
-			char **new_names = (char **)duckdb_malloc(sizeof(char *) * (size_t)new_cap);
-			char **new_tokens = (char **)duckdb_malloc(sizeof(char *) * (size_t)new_cap);
-			tcc_ffi_type_t *new_types = (tcc_ffi_type_t *)duckdb_malloc(sizeof(tcc_ffi_type_t) * (size_t)new_cap);
-			size_t *new_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)new_cap);
-			if (!new_names || !new_tokens || !new_types || !new_sizes) {
-				if (new_names) {
-					duckdb_free(new_names);
-				}
-				if (new_tokens) {
-					duckdb_free(new_tokens);
-				}
-				if (new_types) {
-					duckdb_free(new_types);
-				}
-				if (new_sizes) {
-					duckdb_free(new_sizes);
-				}
-				tcc_set_error(error_buf, "out of memory");
-				goto fail;
-			}
-			memset(new_names, 0, sizeof(char *) * (size_t)new_cap);
-			memset(new_tokens, 0, sizeof(char *) * (size_t)new_cap);
-			if (member_names && member_count > 0) {
-				memcpy(new_names, member_names, sizeof(char *) * (size_t)member_count);
-				memcpy(new_tokens, member_tokens, sizeof(char *) * (size_t)member_count);
-				memcpy(new_types, member_types, sizeof(tcc_ffi_type_t) * (size_t)member_count);
-				memcpy(new_sizes, member_sizes, sizeof(size_t) * (size_t)member_count);
-				duckdb_free(member_names);
-				duckdb_free(member_tokens);
-				duckdb_free(member_types);
-				duckdb_free(member_sizes);
-			}
-			member_names = new_names;
-			member_tokens = new_tokens;
-			member_types = new_types;
-			member_sizes = new_sizes;
-			cap = new_cap;
-		}
-		member_names[member_count] = tcc_strdup(name_part);
-		member_tokens[member_count] = tcc_strdup(type_part);
-		if (!member_names[member_count] || !member_tokens[member_count]) {
-			tcc_set_error(error_buf, "out of memory");
-			goto fail;
-		}
-		member_types[member_count] = member_type;
-		member_sizes[member_count] = member_size;
-		member_count++;
-	}
-	if (member_count <= 0) {
-		tcc_set_error(error_buf, "union token requires at least one member");
-		goto fail;
-	}
+	ok = tcc_parse_composite_fields_inner(inner, false, "union", &out_meta->member_count, &out_meta->member_names,
+	                                      &out_meta->member_tokens, &out_meta->member_types, &out_meta->member_sizes,
+	                                      error_buf);
 	duckdb_free(inner);
-	out_meta->member_count = member_count;
-	out_meta->member_names = member_names;
-	out_meta->member_tokens = member_tokens;
-	out_meta->member_types = member_types;
-	out_meta->member_sizes = member_sizes;
-	return true;
-fail:
-	if (inner) {
-		duckdb_free(inner);
-	}
-	if (member_names) {
-		int i;
-		for (i = 0; i < member_count; i++) {
-			if (member_names[i]) {
-				duckdb_free(member_names[i]);
-			}
-		}
-		duckdb_free(member_names);
-	}
-	if (member_tokens) {
-		int i;
-		for (i = 0; i < member_count; i++) {
-			if (member_tokens[i]) {
-				duckdb_free(member_tokens[i]);
-			}
-		}
-		duckdb_free(member_tokens);
-	}
-	if (member_types) {
-		duckdb_free(member_types);
-	}
-	if (member_sizes) {
-		duckdb_free(member_sizes);
-	}
-	memset(out_meta, 0, sizeof(*out_meta));
-	return false;
+	return ok;
 }
 
 /* tcc_typedesc_destroy: Type-system conversion/parsing helper. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
@@ -8364,7 +8092,7 @@ static void tcc_codegen_classify_error_message(const char *error_message, const 
 }
 
 /* Resolves target symbol from explicit args or session-level bound symbol. */
-static const char *tcc_effective_symbol(tcc_module_state_t *state, tcc_module_bind_data_t *bind) {
+static const char *tcc_effective_symbol(tcc_module_state_t *state, const tcc_module_bind_data_t *bind) {
 	if (bind->symbol && bind->symbol[0] != '\0') {
 		return bind->symbol;
 	}
@@ -8375,7 +8103,7 @@ static const char *tcc_effective_symbol(tcc_module_state_t *state, tcc_module_bi
 }
 
 /* Resolves SQL function name from explicit args or session-level fallback. */
-static const char *tcc_effective_sql_name(tcc_module_state_t *state, tcc_module_bind_data_t *bind,
+static const char *tcc_effective_sql_name(tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
                                           const char *effective_symbol) {
 	if (bind->sql_name && bind->sql_name[0] != '\0') {
 		return bind->sql_name;
@@ -9268,6 +8996,301 @@ static bool tcc_mode_requires_write_lock(const char *mode) {
 	       strcmp(mode, "c_enum") == 0;
 }
 
+/* ===== Extracted mode handlers ===== */
+
+/* Handles add_include/add_sysinclude/add_library_path/add_library/add_option/add_header/add_source. */
+static void tcc_mode_add_staged(tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
+                                duckdb_data_chunk output) {
+	const char *mode = bind->mode;
+	tcc_string_list_t *target = NULL;
+	const char *value = NULL;
+	const char *label = NULL;
+	const char *arg_name = NULL;
+	if (strcmp(mode, "add_include") == 0) {
+		target = &state->session.include_paths;
+		value = bind->include_path;
+		label = "include path added";
+		arg_name = "include_path";
+	} else if (strcmp(mode, "add_sysinclude") == 0) {
+		target = &state->session.sysinclude_paths;
+		value = bind->sysinclude_path;
+		label = "sysinclude path added";
+		arg_name = "sysinclude_path";
+	} else if (strcmp(mode, "add_library_path") == 0) {
+		target = &state->session.library_paths;
+		value = bind->library_path;
+		label = "library path added";
+		arg_name = "library_path";
+	} else if (strcmp(mode, "add_library") == 0) {
+		target = &state->session.libraries;
+		value = bind->library;
+		label = "library added";
+		arg_name = "library";
+	} else if (strcmp(mode, "add_option") == 0) {
+		target = &state->session.options;
+		value = bind->option;
+		label = "compiler option added";
+		arg_name = "option";
+	} else if (strcmp(mode, "add_header") == 0) {
+		target = &state->session.headers;
+		value = bind->header;
+		label = "header source added";
+		arg_name = "header";
+	} else if (strcmp(mode, "add_source") == 0) {
+		target = &state->session.sources;
+		value = bind->source;
+		label = "source appended";
+		arg_name = "source";
+	}
+	if (!target) {
+		tcc_write_row(output, false, mode, "bind", "E_BAD_MODE", "unknown add mode", NULL, NULL, NULL, NULL,
+		              "database");
+		return;
+	}
+	if (value && tcc_string_list_append(target, value)) {
+		state->session.config_version++;
+		tcc_write_row(output, true, mode, "state", "OK", label, value, NULL, NULL, NULL, "database");
+	} else {
+		char msg[128];
+		snprintf(msg, sizeof(msg), "%s is required", arg_name);
+		tcc_write_row(output, false, mode, "bind", "E_MISSING_ARGS", msg, NULL, NULL, NULL, NULL, "database");
+	}
+}
+
+/* Handles c_struct/c_union/c_bitfield/c_enum modes. */
+static void tcc_mode_c_helpers(tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
+                               const char *runtime_path, duckdb_data_chunk output) {
+#ifdef DUCKTINYCC_WASM_UNSUPPORTED
+	tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
+	              "TinyCC compile codegen path not supported for WASM build", NULL, bind->sql_name, bind->symbol,
+	              NULL, "database");
+#else
+	const bool is_enum = strcmp(bind->mode, "c_enum") == 0;
+	const bool is_union = strcmp(bind->mode, "c_union") == 0;
+	const bool force_bitfield = strcmp(bind->mode, "c_bitfield") == 0;
+	const char *kind_keyword = is_union ? "union" : "struct";
+	const char *type_name = bind->symbol;
+	char prefix_buf[256];
+	const char *prefix = NULL;
+	tcc_error_buffer_t err;
+	tcc_c_field_list_t fields;
+	tcc_string_list_t enum_constants;
+	tcc_helper_binding_list_t helper_bindings;
+	char *helper_source = NULL;
+	char *combined_source = NULL;
+	idx_t i;
+	memset(&err, 0, sizeof(err));
+	memset(&fields, 0, sizeof(fields));
+	memset(&enum_constants, 0, sizeof(enum_constants));
+	memset(&helper_bindings, 0, sizeof(helper_bindings));
+
+	if (!type_name || !tcc_is_identifier_token(type_name)) {
+		tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "symbol must be a valid C identifier",
+		              NULL, bind->sql_name, bind->symbol, NULL, "database");
+		goto done;
+	}
+	if (bind->sql_name && bind->sql_name[0] != '\0') {
+		prefix = bind->sql_name;
+	} else if (is_enum) {
+		int n = snprintf(prefix_buf, sizeof(prefix_buf), "enum_%s", type_name);
+		if (n < 0 || (size_t)n >= sizeof(prefix_buf)) {
+			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "failed to build helper prefix", NULL,
+			              bind->sql_name, bind->symbol, NULL, "database");
+			goto done;
+		}
+		prefix = prefix_buf;
+	} else {
+		int n = snprintf(prefix_buf, sizeof(prefix_buf), "%s_%s", is_union ? "union" : "struct", type_name);
+		if (n < 0 || (size_t)n >= sizeof(prefix_buf)) {
+			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "failed to build helper prefix", NULL,
+			              bind->sql_name, bind->symbol, NULL, "database");
+			goto done;
+		}
+		prefix = prefix_buf;
+	}
+	if (!prefix || !tcc_is_identifier_token(prefix)) {
+		tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS",
+		              "sql_name must be a valid C/SQL identifier when provided", NULL, bind->sql_name, bind->symbol,
+		              NULL, "database");
+		goto done;
+	}
+	if (is_enum) {
+		if (!tcc_parse_c_enum_constants(bind->arg_types, &enum_constants, &err)) {
+			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "invalid c_enum constants",
+			              err.message[0] ? err.message : NULL, prefix, type_name, NULL, "database");
+			goto done;
+		}
+		helper_source = tcc_generate_c_enum_helpers_source(type_name, prefix, &enum_constants, &err);
+		if (!helper_source) {
+			tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED",
+			              "failed to generate enum helpers", err.message[0] ? err.message : NULL, prefix, type_name,
+			              NULL, "database");
+			goto done;
+		}
+		if (!tcc_build_c_enum_bindings(prefix, &enum_constants, &helper_bindings, &err)) {
+			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS",
+			              "failed to build enum helper signatures", err.message[0] ? err.message : NULL, prefix,
+			              type_name, NULL, "database");
+			goto done;
+		}
+	} else {
+		if (!tcc_parse_c_field_specs(bind->arg_types, force_bitfield, &fields, &err)) {
+			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "invalid c struct/union field specs",
+			              err.message[0] ? err.message : NULL, prefix, type_name, NULL, "database");
+			goto done;
+		}
+		helper_source = tcc_generate_c_composite_helpers_source(kind_keyword, type_name, prefix, &fields, &err);
+		if (!helper_source) {
+			tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED",
+			              "failed to generate struct/union helpers", err.message[0] ? err.message : NULL, prefix,
+			              type_name, NULL, "database");
+			goto done;
+		}
+		if (!tcc_build_c_composite_bindings(prefix, &fields, &helper_bindings, &err)) {
+			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS",
+			              "failed to build struct/union helper signatures", err.message[0] ? err.message : NULL,
+			              prefix, type_name, NULL, "database");
+			goto done;
+		}
+	}
+
+	if (bind->source && bind->source[0] != '\0') {
+		size_t n0 = strlen(bind->source);
+		size_t n1 = strlen(helper_source);
+		combined_source = (char *)duckdb_malloc(n0 + n1 + 3);
+		if (!combined_source) {
+			tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED",
+			              "failed to allocate helper source buffer", NULL, prefix, type_name, NULL, "database");
+			goto done;
+		}
+		memcpy(combined_source, bind->source, n0);
+		combined_source[n0] = '\n';
+		memcpy(combined_source + n0 + 1, helper_source, n1);
+		combined_source[n0 + n1 + 1] = '\0';
+	} else {
+		combined_source = tcc_strdup(helper_source);
+		if (!combined_source) {
+			tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED",
+			              "failed to allocate helper source buffer", NULL, prefix, type_name, NULL, "database");
+			goto done;
+		}
+	}
+
+	for (i = 0; i < helper_bindings.count; i++) {
+		const tcc_helper_binding_t *entry = &helper_bindings.items[i];
+		memset(&err, 0, sizeof(err));
+		if (!tcc_compile_generated_binding(runtime_path, state, combined_source, entry, &err)) {
+			const char *phase = "compile";
+			const char *code = "E_COMPILE_FAILED";
+			const char *message = "generated helper compile failed";
+			tcc_codegen_classify_error_message(err.message, &phase, &code, &message);
+			tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL,
+			              entry->sql_name, entry->symbol, NULL, "database");
+			goto done;
+		}
+	}
+	{
+		char detail[256];
+		snprintf(detail, sizeof(detail), "generated=%llu prefix=%.96s target=%.96s",
+		         (unsigned long long)helper_bindings.count, prefix, type_name);
+		tcc_write_row(output, true, bind->mode, "load", "OK", "generated and registered helper UDFs", detail,
+		              prefix, type_name, NULL, "database");
+	}
+
+done:
+	if (helper_source) {
+		duckdb_free(helper_source);
+	}
+	if (combined_source) {
+		duckdb_free(combined_source);
+	}
+	tcc_c_field_list_destroy(&fields);
+	tcc_string_list_destroy(&enum_constants);
+	tcc_helper_binding_list_destroy(&helper_bindings);
+#endif
+}
+
+/* Handles codegen_preview mode. */
+static void tcc_mode_codegen_preview(tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
+                                     duckdb_data_chunk output) {
+	const char *target_symbol = tcc_effective_symbol(state, bind);
+	const char *sql_name = tcc_effective_sql_name(state, bind, target_symbol);
+	tcc_codegen_source_ctx_t source_ctx;
+	tcc_error_buffer_t err;
+	memset(&err, 0, sizeof(err));
+	tcc_codegen_source_ctx_init(&source_ctx);
+	if (!target_symbol || target_symbol[0] == '\0') {
+		tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS",
+		              "symbol is required (bind or argument)", NULL, sql_name, target_symbol, NULL, "database");
+		goto done;
+	}
+	if (!tcc_codegen_prepare_sources(state, bind, sql_name, target_symbol, &source_ctx, &err)) {
+		const char *phase = "codegen";
+		const char *code = "E_CODEGEN_FAILED";
+		const char *message = "ffi codegen failed";
+		tcc_codegen_classify_error_message(err.message, &phase, &code, &message);
+		tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL,
+		              sql_name, target_symbol, NULL, "database");
+		goto done;
+	}
+	tcc_write_row(output, true, bind->mode, "codegen", "OK", "generated codegen source",
+	              source_ctx.compilation_unit_source, sql_name, target_symbol, source_ctx.module_symbol,
+	              "database");
+done:
+	tcc_codegen_source_ctx_destroy(&source_ctx);
+}
+
+/* Handles compile/quick_compile modes. */
+static void tcc_mode_compile(tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
+                             const char *runtime_path, duckdb_data_chunk output) {
+#ifdef DUCKTINYCC_WASM_UNSUPPORTED
+	tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
+	              "TinyCC compile codegen path not supported for WASM build", NULL, bind->sql_name, bind->symbol,
+	              NULL, "database");
+#else
+	const char *target_symbol = tcc_effective_symbol(state, bind);
+	const char *sql_name = tcc_effective_sql_name(state, bind, target_symbol);
+	char module_symbol[128];
+	tcc_error_buffer_t err;
+	tcc_registered_artifact_t *artifact = NULL;
+	char artifact_id[256];
+	const char *phase = "compile";
+	const char *code = "E_COMPILE_FAILED";
+	const char *message = "compile failed";
+	memset(&err, 0, sizeof(err));
+
+	if (strcmp(bind->mode, "quick_compile") == 0 && (!bind->source || bind->source[0] == '\0')) {
+		tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS",
+		              "source is required in quick_compile mode", NULL, sql_name, target_symbol, NULL,
+		              "connection");
+		return;
+	}
+	if (!target_symbol || target_symbol[0] == '\0') {
+		tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS",
+		              "symbol is required (bind or argument)", NULL, sql_name, target_symbol, NULL, "database");
+		return;
+	}
+	if (tcc_codegen_compile_and_load_module(runtime_path, state, bind, sql_name, target_symbol, &artifact, &err,
+	                                        module_symbol, sizeof(module_symbol)) != 0) {
+		tcc_codegen_classify_error_message(err.message, &phase, &code, &message);
+		tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL,
+		              sql_name, target_symbol, NULL, "database");
+		return;
+	}
+	if (!tcc_registry_store_metadata(state, sql_name, module_symbol, artifact->state_id, artifact)) {
+		tcc_artifact_destroy(artifact);
+		tcc_write_row(output, false, bind->mode, "register", "E_STORE_FAILED",
+		              "failed to store ffi module artifact metadata", NULL, sql_name, target_symbol, NULL,
+		              "connection");
+		return;
+	}
+	snprintf(artifact_id, sizeof(artifact_id), "%s@ffi_state_%llu", sql_name,
+	         (unsigned long long)artifact->state_id);
+	tcc_write_row(output, true, bind->mode, "load", "OK", "compiled and registered SQL function via codegen",
+	              runtime_path, sql_name, target_symbol, artifact_id, "database");
+#endif
+}
+
 /* Main dispatcher for all `tcc_module(...)` modes. */
 static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk output) {
 	tcc_module_state_t *state = (tcc_module_state_t *)duckdb_function_get_extra_info(info);
@@ -9318,69 +9341,8 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		snprintf(detail, sizeof(detail), "state_id=%llu", (unsigned long long)state->session.state_id);
 		tcc_write_row(output, true, bind->mode, "state", "OK", "new TinyCC build state prepared", detail, NULL,
 		              NULL, NULL, "database");
-	} else if (strcmp(bind->mode, "add_include") == 0) {
-		if (bind->include_path && tcc_string_list_append(&state->session.include_paths, bind->include_path)) {
-			state->session.config_version++;
-			tcc_write_row(output, true, bind->mode, "state", "OK", "include path added", bind->include_path, NULL,
-			              NULL, NULL, "database");
-		} else {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "include_path is required", NULL,
-			              NULL, NULL, NULL, "database");
-		}
-	} else if (strcmp(bind->mode, "add_sysinclude") == 0) {
-		if (bind->sysinclude_path && tcc_string_list_append(&state->session.sysinclude_paths, bind->sysinclude_path)) {
-			state->session.config_version++;
-			tcc_write_row(output, true, bind->mode, "state", "OK", "sysinclude path added", bind->sysinclude_path,
-			              NULL, NULL, NULL, "database");
-		} else {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "sysinclude_path is required", NULL,
-			              NULL, NULL, NULL, "database");
-		}
-	} else if (strcmp(bind->mode, "add_library_path") == 0) {
-		if (bind->library_path && tcc_string_list_append(&state->session.library_paths, bind->library_path)) {
-			state->session.config_version++;
-			tcc_write_row(output, true, bind->mode, "state", "OK", "library path added", bind->library_path, NULL,
-			              NULL, NULL, "database");
-		} else {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "library_path is required", NULL,
-			              NULL, NULL, NULL, "database");
-		}
-	} else if (strcmp(bind->mode, "add_library") == 0) {
-		if (bind->library && tcc_string_list_append(&state->session.libraries, bind->library)) {
-			state->session.config_version++;
-			tcc_write_row(output, true, bind->mode, "state", "OK", "library added", bind->library, NULL, NULL, NULL,
-			              "connection");
-		} else {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "library is required", NULL, NULL,
-			              NULL, NULL, "database");
-		}
-	} else if (strcmp(bind->mode, "add_option") == 0) {
-		if (bind->option && tcc_string_list_append(&state->session.options, bind->option)) {
-			state->session.config_version++;
-			tcc_write_row(output, true, bind->mode, "state", "OK", "compiler option added", bind->option, NULL,
-			              NULL, NULL, "database");
-		} else {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "option is required", NULL, NULL,
-			              NULL, NULL, "database");
-		}
-	} else if (strcmp(bind->mode, "add_header") == 0) {
-		if (bind->header && tcc_string_list_append(&state->session.headers, bind->header)) {
-			state->session.config_version++;
-			tcc_write_row(output, true, bind->mode, "state", "OK", "header source added", "header appended", NULL,
-			              NULL, NULL, "database");
-		} else {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "header is required", NULL, NULL,
-			              NULL, NULL, "database");
-		}
-	} else if (strcmp(bind->mode, "add_source") == 0) {
-		if (bind->source && tcc_string_list_append(&state->session.sources, bind->source)) {
-			state->session.config_version++;
-			tcc_write_row(output, true, bind->mode, "state", "OK", "source appended", "source appended", NULL,
-			              NULL, NULL, "database");
-		} else {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "source is required", NULL, NULL,
-			              NULL, NULL, "database");
-		}
+	} else if (strncmp(bind->mode, "add_", 4) == 0 && strcmp(bind->mode, "add_define") != 0) {
+		tcc_mode_add_staged(state, bind, output);
 	} else if (strcmp(bind->mode, "add_define") == 0) {
 		if (bind->define_name && bind->define_name[0] != '\0') {
 			const char *define_value = bind->define_value ? bind->define_value : "1";
@@ -9441,229 +9403,11 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		              "connection");
 	} else if (strcmp(bind->mode, "c_struct") == 0 || strcmp(bind->mode, "c_union") == 0 ||
 	           strcmp(bind->mode, "c_bitfield") == 0 || strcmp(bind->mode, "c_enum") == 0) {
-#ifdef DUCKTINYCC_WASM_UNSUPPORTED
-		tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-		              "TinyCC compile codegen path not supported for WASM build", NULL, bind->sql_name, bind->symbol,
-		              NULL, "database");
-#else
-		const bool is_enum = strcmp(bind->mode, "c_enum") == 0;
-		const bool is_union = strcmp(bind->mode, "c_union") == 0;
-		const bool force_bitfield = strcmp(bind->mode, "c_bitfield") == 0;
-		const char *kind_keyword = is_union ? "union" : "struct";
-		const char *type_name = bind->symbol;
-		char prefix_buf[256];
-		const char *prefix = NULL;
-		tcc_error_buffer_t err;
-		tcc_c_field_list_t fields;
-		tcc_string_list_t enum_constants;
-		tcc_helper_binding_list_t helper_bindings;
-		char *helper_source = NULL;
-		char *combined_source = NULL;
-		idx_t i;
-		memset(&err, 0, sizeof(err));
-		memset(&fields, 0, sizeof(fields));
-		memset(&enum_constants, 0, sizeof(enum_constants));
-		memset(&helper_bindings, 0, sizeof(helper_bindings));
-
-		if (!type_name || !tcc_is_identifier_token(type_name)) {
-			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "symbol must be a valid C identifier",
-			              NULL, bind->sql_name, bind->symbol, NULL, "database");
-			goto tcc_c_helpers_done;
-		}
-		if (bind->sql_name && bind->sql_name[0] != '\0') {
-			prefix = bind->sql_name;
-		} else if (is_enum) {
-			int n = snprintf(prefix_buf, sizeof(prefix_buf), "enum_%s", type_name);
-			if (n < 0 || (size_t)n >= sizeof(prefix_buf)) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "failed to build helper prefix", NULL,
-				              bind->sql_name, bind->symbol, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-			prefix = prefix_buf;
-		} else {
-			int n = snprintf(prefix_buf, sizeof(prefix_buf), "%s_%s", is_union ? "union" : "struct", type_name);
-			if (n < 0 || (size_t)n >= sizeof(prefix_buf)) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "failed to build helper prefix", NULL,
-				              bind->sql_name, bind->symbol, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-			prefix = prefix_buf;
-		}
-		if (!prefix || !tcc_is_identifier_token(prefix)) {
-			tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS",
-			              "sql_name must be a valid C/SQL identifier when provided", NULL, bind->sql_name, bind->symbol,
-			              NULL, "database");
-			goto tcc_c_helpers_done;
-		}
-		if (is_enum) {
-			if (!tcc_parse_c_enum_constants(bind->arg_types, &enum_constants, &err)) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "invalid c_enum constants",
-				              err.message[0] ? err.message : NULL, prefix, type_name, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-			helper_source = tcc_generate_c_enum_helpers_source(type_name, prefix, &enum_constants, &err);
-			if (!helper_source) {
-				tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED", "failed to generate enum helpers",
-				              err.message[0] ? err.message : NULL, prefix, type_name, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-			if (!tcc_build_c_enum_bindings(prefix, &enum_constants, &helper_bindings, &err)) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "failed to build enum helper signatures",
-				              err.message[0] ? err.message : NULL, prefix, type_name, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-		} else {
-			if (!tcc_parse_c_field_specs(bind->arg_types, force_bitfield, &fields, &err)) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS", "invalid c struct/union field specs",
-				              err.message[0] ? err.message : NULL, prefix, type_name, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-			helper_source = tcc_generate_c_composite_helpers_source(kind_keyword, type_name, prefix, &fields, &err);
-			if (!helper_source) {
-				tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED",
-				              "failed to generate struct/union helpers", err.message[0] ? err.message : NULL, prefix,
-				              type_name, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-			if (!tcc_build_c_composite_bindings(prefix, &fields, &helper_bindings, &err)) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_ARGS",
-				              "failed to build struct/union helper signatures", err.message[0] ? err.message : NULL,
-				              prefix, type_name, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-		}
-
-		if (bind->source && bind->source[0] != '\0') {
-			size_t n0 = strlen(bind->source);
-			size_t n1 = strlen(helper_source);
-			combined_source = (char *)duckdb_malloc(n0 + n1 + 3);
-			if (!combined_source) {
-				tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED",
-				              "failed to allocate helper source buffer", NULL, prefix, type_name, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-			memcpy(combined_source, bind->source, n0);
-			combined_source[n0] = '\n';
-			memcpy(combined_source + n0 + 1, helper_source, n1);
-			combined_source[n0 + n1 + 1] = '\0';
-		} else {
-			combined_source = tcc_strdup(helper_source);
-			if (!combined_source) {
-				tcc_write_row(output, false, bind->mode, "codegen", "E_CODEGEN_FAILED",
-				              "failed to allocate helper source buffer", NULL, prefix, type_name, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-		}
-
-		for (i = 0; i < helper_bindings.count; i++) {
-			const tcc_helper_binding_t *entry = &helper_bindings.items[i];
-			memset(&err, 0, sizeof(err));
-			if (!tcc_compile_generated_binding(runtime_path, state, combined_source, entry, &err)) {
-				const char *phase = "compile";
-				const char *code = "E_COMPILE_FAILED";
-				const char *message = "generated helper compile failed";
-				tcc_codegen_classify_error_message(err.message, &phase, &code, &message);
-				tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL,
-				              entry->sql_name, entry->symbol, NULL, "database");
-				goto tcc_c_helpers_done;
-			}
-		}
-		{
-			char detail[256];
-			snprintf(detail, sizeof(detail), "generated=%llu prefix=%.96s target=%.96s",
-			         (unsigned long long)helper_bindings.count, prefix, type_name);
-			tcc_write_row(output, true, bind->mode, "load", "OK", "generated and registered helper UDFs", detail,
-			              prefix, type_name, NULL, "database");
-		}
-
-tcc_c_helpers_done:
-		if (helper_source) {
-			duckdb_free(helper_source);
-			helper_source = NULL;
-		}
-		if (combined_source) {
-			duckdb_free(combined_source);
-			combined_source = NULL;
-		}
-		tcc_c_field_list_destroy(&fields);
-		tcc_string_list_destroy(&enum_constants);
-		tcc_helper_binding_list_destroy(&helper_bindings);
-	#endif
+		tcc_mode_c_helpers(state, bind, runtime_path, output);
 	} else if (strcmp(bind->mode, "codegen_preview") == 0) {
-		const char *target_symbol = tcc_effective_symbol(state, bind);
-		const char *sql_name = tcc_effective_sql_name(state, bind, target_symbol);
-		tcc_codegen_source_ctx_t source_ctx;
-		tcc_error_buffer_t err;
-		memset(&err, 0, sizeof(err));
-		tcc_codegen_source_ctx_init(&source_ctx);
-		if (!target_symbol || target_symbol[0] == '\0') {
-			tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required (bind or argument)",
-			              NULL, sql_name, target_symbol, NULL, "database");
-			goto tcc_codegen_preview_done;
-		}
-		if (!tcc_codegen_prepare_sources(state, bind, sql_name, target_symbol, &source_ctx, &err)) {
-			const char *phase = "codegen";
-			const char *code = "E_CODEGEN_FAILED";
-			const char *message = "ffi codegen failed";
-			tcc_codegen_classify_error_message(err.message, &phase, &code, &message);
-			tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL, sql_name,
-			              target_symbol, NULL, "database");
-			goto tcc_codegen_preview_done;
-		}
-		tcc_write_row(output, true, bind->mode, "codegen", "OK", "generated codegen source",
-		              source_ctx.compilation_unit_source, sql_name, target_symbol, source_ctx.module_symbol, "database");
-		goto tcc_codegen_preview_done;
-tcc_codegen_preview_done:
-		tcc_codegen_source_ctx_destroy(&source_ctx);
+		tcc_mode_codegen_preview(state, bind, output);
 	} else if (strcmp(bind->mode, "compile") == 0 || strcmp(bind->mode, "quick_compile") == 0) {
-#ifdef DUCKTINYCC_WASM_UNSUPPORTED
-			tcc_write_row(output, false, bind->mode, "runtime", "E_PLATFORM_WASM_UNSUPPORTED",
-			              "TinyCC compile codegen path not supported for WASM build", NULL, bind->sql_name,
-			              bind->symbol, NULL, "database");
-#else
-			const char *target_symbol = tcc_effective_symbol(state, bind);
-			const char *sql_name = tcc_effective_sql_name(state, bind, target_symbol);
-			char module_symbol[128];
-			tcc_error_buffer_t err;
-			tcc_registered_artifact_t *artifact = NULL;
-			char artifact_id[256];
-			const char *phase = "compile";
-			const char *code = "E_COMPILE_FAILED";
-			const char *message = "compile failed";
-			memset(&err, 0, sizeof(err));
-
-			if (strcmp(bind->mode, "quick_compile") == 0 && (!bind->source || bind->source[0] == '\0')) {
-				tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS",
-				              "source is required in quick_compile mode", NULL, sql_name, target_symbol, NULL,
-				              "connection");
-				goto tcc_module_done;
-			}
-
-			if (!target_symbol || target_symbol[0] == '\0') {
-				tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS", "symbol is required (bind or argument)",
-				              NULL, sql_name, target_symbol, NULL, "database");
-				goto tcc_module_done;
-			}
-
-				if (tcc_codegen_compile_and_load_module(runtime_path, state, bind, sql_name, target_symbol, &artifact, &err,
-				                                        module_symbol, sizeof(module_symbol)) != 0) {
-					tcc_codegen_classify_error_message(err.message, &phase, &code, &message);
-					tcc_write_row(output, false, bind->mode, phase, code, message, err.message[0] ? err.message : NULL, sql_name,
-					              target_symbol, NULL, "database");
-					goto tcc_module_done;
-				}
-			if (!tcc_registry_store_metadata(state, sql_name, module_symbol, artifact->state_id, artifact)) {
-				tcc_artifact_destroy(artifact);
-				tcc_write_row(output, false, bind->mode, "register", "E_STORE_FAILED",
-				              "failed to store ffi module artifact metadata", NULL, sql_name, target_symbol, NULL,
-				              "connection");
-				goto tcc_module_done;
-			}
-			snprintf(artifact_id, sizeof(artifact_id), "%s@ffi_state_%llu", sql_name,
-			         (unsigned long long)artifact->state_id);
-			tcc_write_row(output, true, bind->mode, "load", "OK", "compiled and registered SQL function via codegen",
-			              runtime_path, sql_name, target_symbol, artifact_id, "database");
-#endif
+		tcc_mode_compile(state, bind, runtime_path, output);
 	} else {
 		tcc_write_row(output, false, bind->mode, "bind", "E_BAD_MODE", "unknown mode", NULL, NULL, NULL, NULL,
 		              "connection");
@@ -9982,6 +9726,7 @@ bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 
 	state = (tcc_module_state_t *)duckdb_malloc(sizeof(tcc_module_state_t));
 	if (!state) {
+		duckdb_destroy_logical_type(&list_varchar_type);
 		duckdb_destroy_logical_type(&varchar_type);
 		duckdb_destroy_table_function(&tf);
 		return false;

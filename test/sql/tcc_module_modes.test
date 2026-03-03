@@ -1805,3 +1805,131 @@ SELECT CAST(enum_color_auto_RED_AUTO() AS VARCHAR),
        CAST((enum_color_auto_GREEN_AUTO() - enum_color_auto_RED_AUTO()) AS VARCHAR);
 ----
 0	2	true	1
+
+# ---------- scalar type quick_compile round-trips: i8 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'signed char add_i8(signed char a, signed char b){ return a + b; }',
+  symbol := 'add_i8',
+  sql_name := 'add_i8',
+  return_type := 'i8',
+  arg_types := ['i8', 'i8']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_i8(10::TINYINT, 20::TINYINT);
+----
+30
+
+# ---------- scalar type quick_compile round-trips: u8 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'unsigned char add_u8(unsigned char a, unsigned char b){ return a + b; }',
+  symbol := 'add_u8',
+  sql_name := 'add_u8',
+  return_type := 'u8',
+  arg_types := ['u8', 'u8']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_u8(100::UTINYINT, 50::UTINYINT);
+----
+150
+
+# ---------- scalar type quick_compile round-trips: i16 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'short add_i16(short a, short b){ return a + b; }',
+  symbol := 'add_i16',
+  sql_name := 'add_i16',
+  return_type := 'i16',
+  arg_types := ['i16', 'i16']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_i16(1000::SMALLINT, 2000::SMALLINT);
+----
+3000
+
+# ---------- scalar type quick_compile round-trips: u16 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'unsigned short add_u16(unsigned short a, unsigned short b){ return a + b; }',
+  symbol := 'add_u16',
+  sql_name := 'add_u16',
+  return_type := 'u16',
+  arg_types := ['u16', 'u16']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_u16(30000::USMALLINT, 10000::USMALLINT);
+----
+40000
+
+# ---------- scalar type quick_compile round-trips: u32 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'unsigned int add_u32(unsigned int a, unsigned int b){ return a + b; }',
+  symbol := 'add_u32',
+  sql_name := 'add_u32',
+  return_type := 'u32',
+  arg_types := ['u32', 'u32']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_u32(100000::UINTEGER, 200000::UINTEGER);
+----
+300000
+
+# ---------- scalar type quick_compile round-trips: f32 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'float mul_f32(float a, float b){ return a * b; }',
+  symbol := 'mul_f32',
+  sql_name := 'mul_f32',
+  return_type := 'f32',
+  arg_types := ['f32', 'f32']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT CAST(mul_f32(2.5::FLOAT, 4.0::FLOAT) AS INTEGER);
+----
+10
+
+# ---------- error: bad C source (syntax error) ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'int bad_syntax(int x { return x; }',
+  symbol := 'bad_syntax',
+  sql_name := 'bad_syntax',
+  return_type := 'i32',
+  arg_types := ['i32']
+);
+----
+false	quick_compile	E_COMPILE_FAILED

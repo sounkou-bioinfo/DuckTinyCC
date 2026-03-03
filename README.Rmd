@@ -62,6 +62,18 @@ The generated module init calls `ducktinycc_register_signature(...)`, which regi
 
 `tcc_new_state` resets staged build inputs and increments `state_id`; it does not allocate a new `TCCState`. `config_reset` clears staged state and runtime path, but it does not remove already registered internal UDF entries.
 
+## Build and Test during development
+
+```sh
+make configure
+make debug
+make release
+
+make test_debug
+make test_release
+```
+
+
 ## Examples
 
 ### Compile In One Call
@@ -338,18 +350,9 @@ SELECT r_hello_from_embedded() AS msg;
 SQL
 ```
 
-## Build and Test
 
-```sh
-make configure
-make debug
-make release
 
-make test_debug
-make test_release
-```
-
-## What Remains Before 1.0
+## What Remains Before 1.0.0
 
 We have broad nested-type coverage today, including `UNION`, but we still have focused cleanup work before API freeze. The remaining work is to harden `UNION` behavior in deeper nested and mixed row/batch edge cases, continue simplifying and deduplicating internal nested-type marshalling paths (`LIST/ARRAY/STRUCT/MAP/UNION`), and expose a safer explicit set of DuckDB functions as C-callable symbols for generated modules.
 

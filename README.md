@@ -99,6 +99,17 @@ does not allocate a new `TCCState`. `config_reset` clears staged state
 and runtime path, but it does not remove already registered internal UDF
 entries.
 
+## Build and Test during development
+
+``` sh
+make configure
+make debug
+make release
+
+make test_debug
+make test_release
+```
+
 ## Examples
 
 ### Compile In One Call
@@ -598,18 +609,7 @@ SQL
     │ hello from embedded R 4.5.2 │
     └─────────────────────────────┘
 
-## Build and Test
-
-``` sh
-make configure
-make debug
-make release
-
-make test_debug
-make test_release
-```
-
-## What Remains Before 1.0
+## What Remains Before 1.0.0
 
 We have broad nested-type coverage today, including `UNION`, but we
 still have focused cleanup work before API freeze. The remaining work is

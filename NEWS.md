@@ -2,6 +2,13 @@
 
 ## ducktinycc 0.0.3.9000 (2026-03-03)
 
+- fix `list_varchar_type` leak in `RegisterTccModuleFunction`: logical type is now destroyed on early-return path before the table function is fully registered
+- consolidate `ducktinycc_register_signature` cleanup: replaced 6 duplicated cleanup blocks (~150 lines) with a single `goto fail` error path
+- extract mode handler functions from monolithic `tcc_module_function` dispatcher: `tcc_mode_add_staged`, `tcc_mode_c_helpers`, `tcc_mode_codegen_preview`, `tcc_mode_compile` reduce the dispatcher from ~575 to ~125 lines
+- add `const` qualifier to `bind` parameter in `tcc_effective_symbol` and `tcc_effective_sql_name` for const-correctness
+- deduplicate struct/union meta-token parsing: new shared `tcc_parse_composite_fields_inner` eliminates ~170 lines of near-identical logic between `tcc_parse_struct_meta_token` and `tcc_parse_union_meta_token`
+- add test coverage for `i8`, `u8`, `i16`, `u16`, `u32`, and `f32` scalar type quick_compile round-trips
+- add test for bad C source (syntax error) producing `E_COMPILE_FAILED`
 - harden scalar-function registration cleanup: temporary `duckdb_scalar_function` objects are now destroyed on both success and error paths to prevent leaks in repeated registration flows
 - remove duplicated composite return writeback branches in `tcc_execute_compiled_scalar_udf`; composite return marshalling is now routed through the typedesc-based recursive writer path
 - normalize empty descriptor semantics for generated wrappers/runtime: `blob`/`list`/`array` results with `len == 0` and `ptr == NULL` are treated as empty (not NULL), while non-empty results still require non-NULL pointers
