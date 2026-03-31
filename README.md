@@ -103,6 +103,23 @@ does not allocate a new `TCCState`. `config_reset` clears staged state
 and runtime path, but it does not remove already registered internal UDF
 entries.
 
+Registering the same SQL name twice within the same session is rejected
+with `E_INIT_FAILED`. Use `tcc_new_state` to reset staged state before
+re-registering.
+
+### Embedded runtime
+
+`libtcc1.a` and the TinyCC include headers (`stdarg.h`, `stddef.h`,
+`tccdefs.h`, etc.) are baked directly into the extension binary as byte
+arrays at build time by `cmake/gen_embedded_runtime.cmake`. On the first
+`compile` or `quick_compile` call, `tcc_ensure_embedded_runtime()`
+extracts them to a content-hash-keyed temp directory
+(e.g. `/tmp/ducktinycc_f4441fa0/`). Subsequent calls within the same
+process reuse that directory without re-extracting. This means the
+extension is fully self-contained: no separate TinyCC installation or
+runtime path configuration is needed after deployment. The
+`tcc_system_paths()` table function shows where the runtime was placed.
+
 ## Build and Test during development
 
 ``` sh
@@ -112,6 +129,10 @@ make release
 
 make test_debug
 make test_release
+
+# Verify the embedded runtime (hides the build-dir and runs the full test suite)
+make test_embedded_debug
+make test_embedded_release
 ```
 
 ## Examples
@@ -216,12 +237,12 @@ SQL
     ├─────────┼─────────────┼─────────┼─────────┼────────────────────────┼─────────┼──────────┼─────────┼─────────────┼──────────────────┤
     │ true    │ tinycc_bind │ bind    │ OK      │ symbol binding updated │ times2  │ times2   │ times2  │ NULL        │ connection       │
     └─────────┴─────────────┴─────────┴─────────┴────────────────────────┴─────────┴──────────┴─────────┴─────────────┴──────────────────┘
-    ┌─────────┬─────────┬─────────┬─────────┬──────────────────────────────────────────────────┬───────────────────────────────────────────────────┬──────────┬─────────┬────────────────────┬──────────────────┐
-    │   ok    │  mode   │  phase  │  code   │                     message                      │                      detail                       │ sql_name │ symbol  │    artifact_id     │ connection_scope │
-    │ boolean │ varchar │ varchar │ varchar │                     varchar                      │                      varchar                      │ varchar  │ varchar │      varchar       │     varchar      │
-    ├─────────┼─────────┼─────────┼─────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────────┼──────────┼─────────┼────────────────────┼──────────────────┤
-    │ true    │ compile │ load    │ OK      │ compiled and registered SQL function via codegen │ /root/DuckTinyCC/cmake_build/release/tinycc_build │ times2   │ times2  │ times2@ffi_state_1 │ database         │
-    └─────────┴─────────┴─────────┴─────────┴──────────────────────────────────────────────────┴───────────────────────────────────────────────────┴──────────┴─────────┴────────────────────┴──────────────────┘
+    ┌─────────┬─────────┬─────────┬─────────┬──────────────────────────────────────────────────┬──────────────────────────┬──────────┬─────────┬────────────────────┬──────────────────┐
+    │   ok    │  mode   │  phase  │  code   │                     message                      │          detail          │ sql_name │ symbol  │    artifact_id     │ connection_scope │
+    │ boolean │ varchar │ varchar │ varchar │                     varchar                      │         varchar          │ varchar  │ varchar │      varchar       │     varchar      │
+    ├─────────┼─────────┼─────────┼─────────┼──────────────────────────────────────────────────┼──────────────────────────┼──────────┼─────────┼────────────────────┼──────────────────┤
+    │ true    │ compile │ load    │ OK      │ compiled and registered SQL function via codegen │ /tmp/ducktinycc_f4441fa0 │ times2   │ times2  │ times2@ffi_state_1 │ database         │
+    └─────────┴─────────┴─────────┴─────────┴──────────────────────────────────────────────────┴──────────────────────────┴──────────┴─────────┴────────────────────┴──────────────────┘
     ┌───────┐
     │ value │
     │ int64 │
@@ -413,72 +434,72 @@ FROM tcc_library_probe(library := 'libtcc1.a');
 SQL
 ```
 
-    ┌──────────────┬──────────────┬───────────────────────────────────────────────────────────────────┬─────────┐
-    │     kind     │     key      │                               value                               │ exists  │
-    │   varchar    │   varchar    │                              varchar                              │ boolean │
-    ├──────────────┼──────────────┼───────────────────────────────────────────────────────────────────┼─────────┤
-    │ runtime      │ runtime_path │ /root/DuckTinyCC/cmake_build/release/tinycc_build                 │ true    │
-    │ include_path │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build/include         │ false   │
-    │ include_path │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc/include │ false   │
-    │ library_path │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build                 │ true    │
-    │ library_path │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib             │ true    │
-    │ library_path │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc         │ false   │
-    │ library_path │ path         │ /usr/lib                                                          │ true    │
-    │ library_path │ path         │ /usr/lib64                                                        │ true    │
-    │ library_path │ path         │ /usr/local/lib                                                    │ true    │
-    │ library_path │ path         │ /lib                                                              │ true    │
-    │ library_path │ path         │ /lib64                                                            │ true    │
-    │ library_path │ path         │ /lib32                                                            │ true    │
-    │ library_path │ path         │ /usr/local/lib64                                                  │ false   │
-    │ library_path │ path         │ /usr/lib/x86_64-linux-gnu                                         │ true    │
-    │ library_path │ path         │ /usr/lib/i386-linux-gnu                                           │ false   │
-    │ library_path │ path         │ /lib/x86_64-linux-gnu                                             │ true    │
-    │ library_path │ path         │ /lib32/x86_64-linux-gnu                                           │ false   │
-    │ library_path │ path         │ /usr/lib/x86_64-linux-musl                                        │ false   │
-    │ library_path │ path         │ /usr/lib/i386-linux-musl                                          │ false   │
-    │ library_path │ path         │ /lib/x86_64-linux-musl                                            │ false   │
-    │ library_path │ path         │ /lib32/x86_64-linux-musl                                          │ false   │
-    │ library_path │ path         │ /usr/lib/amd64-linux-gnu                                          │ false   │
-    │ library_path │ path         │ /usr/lib/aarch64-linux-gnu                                        │ false   │
-    │ library_path │ path         │ /usr/lib/R/lib                                                    │ true    │
-    │ library_path │ path         │ /usr/lib/jvm/default-java/lib/server                              │ true    │
-    ├──────────────┴──────────────┴───────────────────────────────────────────────────────────────────┴─────────┤
-    │ 25 rows                                                                                         4 columns │
-    └───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-    ┌─────────────┬──────────────┬─────────────────────────────────────────────────────────────┬─────────┬──────────────────────────────────┐
-    │    kind     │     key      │                            value                            │ exists  │              detail              │
-    │   varchar   │   varchar    │                           varchar                           │ boolean │             varchar              │
-    ├─────────────┼──────────────┼─────────────────────────────────────────────────────────────┼─────────┼──────────────────────────────────┤
-    │ input       │ library      │ libtcc1.a                                                   │ false   │ library probe request            │
-    │ runtime     │ runtime_path │ /root/DuckTinyCC/cmake_build/release/tinycc_build           │ true    │ effective runtime path           │
-    │ search_path │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build           │ true    │ searched path                    │
-    │ search_path │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib       │ true    │ searched path                    │
-    │ search_path │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build/lib/tcc   │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib                                                    │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/lib64                                                  │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/local/lib                                              │ true    │ searched path                    │
-    │ search_path │ path         │ /lib                                                        │ true    │ searched path                    │
-    │ search_path │ path         │ /lib64                                                      │ true    │ searched path                    │
-    │ search_path │ path         │ /lib32                                                      │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/local/lib64                                            │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/x86_64-linux-gnu                                   │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/lib/i386-linux-gnu                                     │ false   │ searched path                    │
-    │ search_path │ path         │ /lib/x86_64-linux-gnu                                       │ true    │ searched path                    │
-    │ search_path │ path         │ /lib32/x86_64-linux-gnu                                     │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/x86_64-linux-musl                                  │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/i386-linux-musl                                    │ false   │ searched path                    │
-    │ search_path │ path         │ /lib/x86_64-linux-musl                                      │ false   │ searched path                    │
-    │ search_path │ path         │ /lib32/x86_64-linux-musl                                    │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/amd64-linux-gnu                                    │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/aarch64-linux-gnu                                  │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/R/lib                                              │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/lib/jvm/default-java/lib/server                        │ true    │ searched path                    │
-    │ candidate   │ libtcc1.a    │ /root/DuckTinyCC/cmake_build/release/tinycc_build/libtcc1.a │ true    │ resolved                         │
-    │ resolved    │ path         │ /root/DuckTinyCC/cmake_build/release/tinycc_build/libtcc1.a │ true    │ resolved library path            │
-    │ resolved    │ link_name    │ tcc1                                                        │ true    │ normalized tcc_add_library value │
-    ├─────────────┴──────────────┴─────────────────────────────────────────────────────────────┴─────────┴──────────────────────────────────┤
-    │ 27 rows                                                                                                                     5 columns │
-    └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+    ┌──────────────┬──────────────┬──────────────────────────────────────────┬─────────┐
+    │     kind     │     key      │                  value                   │ exists  │
+    │   varchar    │   varchar    │                 varchar                  │ boolean │
+    ├──────────────┼──────────────┼──────────────────────────────────────────┼─────────┤
+    │ runtime      │ runtime_path │ /tmp/ducktinycc_f4441fa0                 │ true    │
+    │ include_path │ path         │ /tmp/ducktinycc_f4441fa0/include         │ true    │
+    │ include_path │ path         │ /tmp/ducktinycc_f4441fa0/lib/tcc/include │ false   │
+    │ library_path │ path         │ /tmp/ducktinycc_f4441fa0                 │ true    │
+    │ library_path │ path         │ /tmp/ducktinycc_f4441fa0/lib             │ false   │
+    │ library_path │ path         │ /tmp/ducktinycc_f4441fa0/lib/tcc         │ false   │
+    │ library_path │ path         │ /usr/lib                                 │ true    │
+    │ library_path │ path         │ /usr/lib64                               │ true    │
+    │ library_path │ path         │ /usr/local/lib                           │ true    │
+    │ library_path │ path         │ /lib                                     │ true    │
+    │ library_path │ path         │ /lib64                                   │ true    │
+    │ library_path │ path         │ /lib32                                   │ true    │
+    │ library_path │ path         │ /usr/local/lib64                         │ false   │
+    │ library_path │ path         │ /usr/lib/x86_64-linux-gnu                │ true    │
+    │ library_path │ path         │ /usr/lib/i386-linux-gnu                  │ false   │
+    │ library_path │ path         │ /lib/x86_64-linux-gnu                    │ true    │
+    │ library_path │ path         │ /lib32/x86_64-linux-gnu                  │ false   │
+    │ library_path │ path         │ /usr/lib/x86_64-linux-musl               │ false   │
+    │ library_path │ path         │ /usr/lib/i386-linux-musl                 │ false   │
+    │ library_path │ path         │ /lib/x86_64-linux-musl                   │ false   │
+    │ library_path │ path         │ /lib32/x86_64-linux-musl                 │ false   │
+    │ library_path │ path         │ /usr/lib/amd64-linux-gnu                 │ false   │
+    │ library_path │ path         │ /usr/lib/aarch64-linux-gnu               │ false   │
+    │ library_path │ path         │ /usr/lib/R/lib                           │ true    │
+    │ library_path │ path         │ /usr/lib/jvm/default-java/lib/server     │ true    │
+    ├──────────────┴──────────────┴──────────────────────────────────────────┴─────────┤
+    │ 25 rows                                                                4 columns │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+    ┌─────────────┬──────────────┬──────────────────────────────────────┬─────────┬──────────────────────────────────┐
+    │    kind     │     key      │                value                 │ exists  │              detail              │
+    │   varchar   │   varchar    │               varchar                │ boolean │             varchar              │
+    ├─────────────┼──────────────┼──────────────────────────────────────┼─────────┼──────────────────────────────────┤
+    │ input       │ library      │ libtcc1.a                            │ false   │ library probe request            │
+    │ runtime     │ runtime_path │ /tmp/ducktinycc_f4441fa0             │ true    │ effective runtime path           │
+    │ search_path │ path         │ /tmp/ducktinycc_f4441fa0             │ true    │ searched path                    │
+    │ search_path │ path         │ /tmp/ducktinycc_f4441fa0/lib         │ false   │ searched path                    │
+    │ search_path │ path         │ /tmp/ducktinycc_f4441fa0/lib/tcc     │ false   │ searched path                    │
+    │ search_path │ path         │ /usr/lib                             │ true    │ searched path                    │
+    │ search_path │ path         │ /usr/lib64                           │ true    │ searched path                    │
+    │ search_path │ path         │ /usr/local/lib                       │ true    │ searched path                    │
+    │ search_path │ path         │ /lib                                 │ true    │ searched path                    │
+    │ search_path │ path         │ /lib64                               │ true    │ searched path                    │
+    │ search_path │ path         │ /lib32                               │ true    │ searched path                    │
+    │ search_path │ path         │ /usr/local/lib64                     │ false   │ searched path                    │
+    │ search_path │ path         │ /usr/lib/x86_64-linux-gnu            │ true    │ searched path                    │
+    │ search_path │ path         │ /usr/lib/i386-linux-gnu              │ false   │ searched path                    │
+    │ search_path │ path         │ /lib/x86_64-linux-gnu                │ true    │ searched path                    │
+    │ search_path │ path         │ /lib32/x86_64-linux-gnu              │ false   │ searched path                    │
+    │ search_path │ path         │ /usr/lib/x86_64-linux-musl           │ false   │ searched path                    │
+    │ search_path │ path         │ /usr/lib/i386-linux-musl             │ false   │ searched path                    │
+    │ search_path │ path         │ /lib/x86_64-linux-musl               │ false   │ searched path                    │
+    │ search_path │ path         │ /lib32/x86_64-linux-musl             │ false   │ searched path                    │
+    │ search_path │ path         │ /usr/lib/amd64-linux-gnu             │ false   │ searched path                    │
+    │ search_path │ path         │ /usr/lib/aarch64-linux-gnu           │ false   │ searched path                    │
+    │ search_path │ path         │ /usr/lib/R/lib                       │ true    │ searched path                    │
+    │ search_path │ path         │ /usr/lib/jvm/default-java/lib/server │ true    │ searched path                    │
+    │ candidate   │ libtcc1.a    │ /tmp/ducktinycc_f4441fa0/libtcc1.a   │ true    │ resolved                         │
+    │ resolved    │ path         │ /tmp/ducktinycc_f4441fa0/libtcc1.a   │ true    │ resolved library path            │
+    │ resolved    │ link_name    │ tcc1                                 │ true    │ normalized tcc_add_library value │
+    ├─────────────┴──────────────┴──────────────────────────────────────┴─────────┴──────────────────────────────────┤
+    │ 27 rows                                                                                              5 columns │
+    └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ### Inject Symbols and Pass Pointers
 
