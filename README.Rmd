@@ -64,6 +64,12 @@ The generated module init calls `ducktinycc_register_signature(...)`, which regi
 
 `tcc_new_state` resets staged build inputs and increments `state_id`; it does not allocate a new `TCCState`. `config_reset` clears staged state and runtime path, but it does not remove already registered internal UDF entries.
 
+Registering the same SQL name twice within the same session is rejected with `E_INIT_FAILED`. Use `tcc_new_state` to reset staged state before re-registering.
+
+### Embedded runtime
+
+`libtcc1.a` and the TinyCC include headers (`stdarg.h`, `stddef.h`, `tccdefs.h`, etc.) are baked directly into the extension binary as byte arrays at build time by `cmake/gen_embedded_runtime.cmake`. On the first `compile` or `quick_compile` call, `tcc_ensure_embedded_runtime()` extracts them to a content-hash-keyed temp directory (e.g. `/tmp/ducktinycc_f4441fa0/`). Subsequent calls within the same process reuse that directory without re-extracting. This means the extension is fully self-contained: no separate TinyCC installation or runtime path configuration is needed after deployment. The `tcc_system_paths()` table function shows where the runtime was placed.
+
 ## Build and Test during development
 
 ```sh
@@ -73,6 +79,10 @@ make release
 
 make test_debug
 make test_release
+
+# Verify the embedded runtime (hides the build-dir and runs the full test suite)
+make test_embedded_debug
+make test_embedded_release
 ```
 
 

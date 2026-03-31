@@ -1,4 +1,4 @@
-.PHONY: clean clean_all rdm
+.PHONY: clean clean_all rdm test_embedded_debug test_embedded_release
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -29,6 +29,12 @@ release: build_extension_library_release build_extension_with_metadata_release
 test: test_debug
 test_debug: test_extension_debug
 test_release: test_extension_release
+
+test_embedded_debug: debug
+	bash $(PROJ_DIR)scripts/test_embedded_runtime.sh debug
+
+test_embedded_release: release
+	bash $(PROJ_DIR)scripts/test_embedded_runtime.sh release
 
 # Override header fetch to use the actual DuckDB release version, not the C API version
 update_duckdb_headers_custom:

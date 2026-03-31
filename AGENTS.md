@@ -121,8 +121,8 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Pre-`1.0.0` breaking changes are acceptable without shims when they reduce complexity or fix incorrect behavior, but they must be called out in `NEWS.md`.
 - Version bump rules:
   - On any user-visible API/behavior/docs change on development branch, keep/bump to `.9000`.
-  - At release cut, drop `.9000` (for example `0.0.3.9000` -> `0.0.3`).
-  - Immediately after release, bump next development version (for example `0.0.3` -> `0.0.4.9000`).
+  - At release cut, increment `.9000` (for example `0.0.3.9000` -> `0.0.4`).
+  - Immediately after release, bump next development version (for example `0.0.3` -> `0.0.3.9000`).
 - `NEWS.md` is mandatory and manually maintained (not generated).
 - Every change that affects SQL surface, C bridge behavior, runtime requirements, or helper ABI must add an entry under the current top development section in `NEWS.md`.
 - `NEWS.md` entry format should stay concise and explicit:
@@ -138,7 +138,7 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - row vs batch allocation/cleanup branches in `tcc_execute_compiled_scalar_udf` still have some repeated patterns.
   - list/array bridge paths are layout-identical and could share more code.
 - Release preparation:
-  - version bump policy enforcement (`0.0.4.9000` → `0.0.4` release cut).
+  - version bump policy enforcement (`0.0.3.9000` → `0.0.4` release cut).
   - community extension submission review against latest `community-extensions/` templates.
   - README.Rmd → README.md render and final review.
 

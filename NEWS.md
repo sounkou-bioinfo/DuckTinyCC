@@ -2,6 +2,10 @@
 
 ## ducktinycc 0.0.3.9000 (2026-03-03)
 
+- **self-contained runtime**: `libtcc1.a` and all TinyCC include headers (`stdarg.h`, `stddef.h`, `tccdefs.h`, etc.) are now embedded as byte arrays directly in the extension binary via `cmake/gen_embedded_runtime.cmake`. On first use, `tcc_ensure_embedded_runtime()` extracts them to a content-hash-keyed temp directory (e.g. `/tmp/ducktinycc_<hash>/`) so that deployed extensions require no external TinyCC runtime files. The extraction is process-global, thread-safe via atomic spinlock, and cross-process reusable (same hash → same dir). `DUCKTINYCC_DEFAULT_RUNTIME_PATH` is removed; `tcc_default_runtime_path()` always uses the embedded extraction path so runtime behaviour is identical on all platforms.
+
+- **bugfix (cross-platform)**: `compile`/`quick_compile` now check the internal SQL-name registry before attempting to call `duckdb_register_scalar_function`. If the name is already registered the mode returns `false`/`E_INIT_FAILED` immediately, instead of relying on DuckDB's registration return value — which silently succeeds on macOS (replacing the function) but fails on Linux. This makes duplicate-name rejection consistent across all platforms.
+
 - fix `list_varchar_type` leak in `RegisterTccModuleFunction`: logical type is now destroyed on early-return path before the table function is fully registered
 - consolidate `ducktinycc_register_signature` cleanup: replaced 6 duplicated cleanup blocks (~150 lines) with a single `goto fail` error path
 - extract mode handler functions from monolithic `tcc_module_function` dispatcher: `tcc_mode_add_staged`, `tcc_mode_c_helpers`, `tcc_mode_codegen_preview`, `tcc_mode_compile` reduce the dispatcher from ~575 to ~125 lines
