@@ -612,16 +612,6 @@ FROM tcc_module(
 );
 SELECT ok, mode, code
 FROM tcc_module(
-  mode := 'add_include',
-  include_path := 'third_party/tinycc/include'
-);
-SELECT ok, mode, code
-FROM tcc_module(
-  mode := 'add_sysinclude',
-  sysinclude_path := 'third_party/tinycc/include'
-);
-SELECT ok, mode, code
-FROM tcc_module(
   mode := 'add_define',
   define_name := 'R_LEGACY_RCOMPLEX',
   define_value := '1'
@@ -663,18 +653,6 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ tcc_new_state │ OK      │
     └─────────┴───────────────┴─────────┘
-    ┌─────────┬─────────────┬─────────┐
-    │   ok    │    mode     │  code   │
-    │ boolean │   varchar   │ varchar │
-    ├─────────┼─────────────┼─────────┤
-    │ true    │ add_include │ OK      │
-    └─────────┴─────────────┴─────────┘
-    ┌─────────┬────────────────┬─────────┐
-    │   ok    │      mode      │  code   │
-    │ boolean │    varchar     │ varchar │
-    ├─────────┼────────────────┼─────────┤
-    │ true    │ add_sysinclude │ OK      │
-    └─────────┴────────────────┴─────────┘
     ┌─────────┬────────────┬─────────┐
     │   ok    │    mode    │  code   │
     │ boolean │  varchar   │ varchar │
