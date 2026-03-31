@@ -2083,6 +2083,130 @@ SELECT union_struct_read({'x': 100::BIGINT, 'y': 2.5}::STRUCT(x BIGINT, y DOUBLE
 ----
 100
 
+# ----- UNION NULL input: NULL union row produces NULL output (not -999)
+query I
+SELECT union_read_demo(NULL::UNION(i BIGINT, d DOUBLE)) AS val;
+----
+NULL
+
+# ----- UNION NULL input: NULL union passed to union_list_len produces NULL
+query I
+SELECT union_list_len(NULL::UNION(a INT[], b BIGINT)) AS val;
+----
+NULL
+
+# ----- UNION output with nested LIST member: return union<a:i32[];b:i64> from C
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+/* Return union member 0 (i32[]) containing a small list; member 1 (i64) is null. */
+static int _out_tag;
+static ducktinycc_list_t _out_list;
+static int _out_elems[3];
+static const void *_out_member_ptrs[2];
+static const uint64_t *_out_member_validity[2];
+ducktinycc_union_t union_make_list(long long n) {
+  ducktinycc_union_t out;
+  int i;
+  for (i = 0; i < (int)n && i < 3; i++) _out_elems[i] = (i + 1) * 10;
+  _out_list.ptr = _out_elems;
+  _out_list.validity = (const uint64_t *)0;
+  _out_list.offset = 0;
+  _out_list.len = (uint64_t)n;
+  _out_tag = 0;
+  _out_member_ptrs[0] = &_out_list;
+  _out_member_ptrs[1] = (void*)0;
+  _out_member_validity[0] = (void*)0;
+  _out_member_validity[1] = (void*)0;
+  out.tag_ptr = (uint8_t *)&_out_tag;
+  out.member_ptrs = _out_member_ptrs;
+  out.member_validity = _out_member_validity;
+  out.member_count = 2;
+  out.offset = 0;
+  return out;
+}',
+  symbol := 'union_make_list',
+  sql_name := 'union_make_list',
+  return_type := 'union<a:i32[];b:i64>',
+  arg_types := ['i64']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT union_extract(union_make_list(3), 'a')::VARCHAR AS val;
+----
+[10, 20, 30]
+
+query T
+SELECT union_extract(union_make_list(0), 'a')::VARCHAR AS val;
+----
+[]
+
+# ----- UNION with deeply nested member: union<a:list<struct<x:i64;y:f64>>;b:i64> input
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+/* Read first struct element x-field from list member, or return scalar from b member. */
+long long union_deep_read(ducktinycc_union_t u) {
+  int tag = ducktinycc_union_tag(&u);
+  if (tag < 0) return -999;
+  if (tag == 0) {
+    /* member 0 is list<struct<x:i64,y:f64>> */
+    const ducktinycc_list_t *lp = (const ducktinycc_list_t *)ducktinycc_union_member_ptr(&u, 0);
+    if (!lp) return -1;
+    if (lp[u.offset].len == 0) return 0;
+    /* list element 0 is a ducktinycc_struct_t */
+    const ducktinycc_struct_t *elems = (const ducktinycc_struct_t *)lp[u.offset].ptr;
+    if (!elems) return -2;
+    /* field 0 of the struct is x:i64 */
+    const long long *xp = (const long long *)ducktinycc_struct_field_ptr(&elems[0], 0);
+    if (!xp) return -3;
+    return xp[elems[0].offset];
+  }
+  if (tag == 1) {
+    const long long *p = (const long long *)ducktinycc_union_member_ptr(&u, 1);
+    if (!p) return -4;
+    return p[u.offset];
+  }
+  return -5;
+}',
+  symbol := 'union_deep_read',
+  sql_name := 'union_deep_read',
+  return_type := 'i64',
+  arg_types := ['union<a:list<struct<x:i64;y:f64>>;b:i64>']
+);
+----
+true	quick_compile	OK
+
+# b member: scalar i64
+query I
+SELECT union_deep_read(99::BIGINT::UNION(a STRUCT(x BIGINT, y DOUBLE)[], b BIGINT)) AS val;
+----
+99
+
+# a member: list with one struct element; x=42
+query I
+SELECT union_deep_read([{'x': 42::BIGINT, 'y': 1.5}]::STRUCT(x BIGINT, y DOUBLE)[]::UNION(a STRUCT(x BIGINT, y DOUBLE)[], b BIGINT)) AS val;
+----
+42
+
+# a member: empty list; returns 0
+query I
+SELECT union_deep_read([]::STRUCT(x BIGINT, y DOUBLE)[]::UNION(a STRUCT(x BIGINT, y DOUBLE)[], b BIGINT)) AS val;
+----
+0
+
+# NULL union: output is NULL
+query I
+SELECT union_deep_read(NULL::UNION(a STRUCT(x BIGINT, y DOUBLE)[], b BIGINT)) AS val;
+----
+NULL
+
 # ----- add_symbol: inject an arbitrary symbol into TCC state -----
 
 # Stage a symbol: the address itself encodes the value (no dereference needed)
