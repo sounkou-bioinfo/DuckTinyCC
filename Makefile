@@ -1,4 +1,4 @@
-.PHONY: clean clean_all rdm
+.PHONY: clean clean_all rdm test_embedded_debug test_embedded_release
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 

@@ -2249,18 +2249,10 @@ static const char *tcc_ensure_embedded_runtime(void) {
 #endif /* !DUCKTINYCC_WASM_UNSUPPORTED */
 
 /* tcc_default_runtime_path: Returns the TinyCC runtime directory to use when the session
- * has no explicit override.  Prefers the compile-time build path when it exists (convenient
- * for local dev/test), then falls back to the self-contained embedded extraction so that
- * deployed extensions work without any external runtime files. */
+ * has no explicit override.  Always uses the self-contained embedded extraction so that
+ * the extension works identically in all environments without any external runtime files. */
 static const char *tcc_default_runtime_path(void) {
-#ifdef DUCKTINYCC_DEFAULT_RUNTIME_PATH
-	/* Use the baked-in build path when it is still present (local dev). */
-	if (tcc_path_exists(DUCKTINYCC_DEFAULT_RUNTIME_PATH)) {
-		return DUCKTINYCC_DEFAULT_RUNTIME_PATH;
-	}
-#endif
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
-	/* Extract embedded runtime blobs to a temp dir and use that. */
 	return tcc_ensure_embedded_runtime();
 #else
 	return NULL;
@@ -9179,6 +9171,16 @@ static void tcc_mode_compile(tcc_module_state_t *state, const tcc_module_bind_da
 	if (!target_symbol || target_symbol[0] == '\0') {
 		tcc_write_row(output, false, bind->mode, "bind", "E_MISSING_ARGS",
 		              "symbol is required (bind or argument)", NULL, sql_name, target_symbol, NULL, "database");
+		return;
+	}
+	/* Reject duplicate SQL name: DuckDB's scalar-function registration behaviour
+	 * differs across platforms (Linux fails, macOS silently replaces).  Checking
+	 * our own registry first makes the "already registered" error consistent. */
+	if (sql_name && tcc_registry_find_sql_name(state, sql_name) != (idx_t)-1) {
+		tcc_write_row(output, false, bind->mode, "load", "E_INIT_FAILED",
+		              "generated module init returned false",
+		              "sql_name already registered; use tcc_new_state to reset",
+		              sql_name, target_symbol, NULL, "database");
 		return;
 	}
 	if (tcc_codegen_compile_and_load_module(runtime_path, state, bind, sql_name, target_symbol, &artifact, &err,

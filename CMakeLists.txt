@@ -158,9 +158,6 @@ if (NOT DUCKDB_WASM_EXTENSION)
     target_sources(${EXTENSION_NAME} PRIVATE "${EMBEDDED_RUNTIME_C}")
 
     target_link_libraries(${EXTENSION_NAME} PRIVATE tccstatic)
-    # Keep build-dir path as a compile-time override so local dev/test still
-    # works; the embedded blobs are the fallback when this path is absent.
-    target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKTINYCC_DEFAULT_RUNTIME_PATH="${TINYCC_BUILD_DIR}")
     if (NOT APPLE AND NOT WIN32)
         target_link_libraries(${EXTENSION_NAME} PRIVATE dl m pthread)
     endif()
