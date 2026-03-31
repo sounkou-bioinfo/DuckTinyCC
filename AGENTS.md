@@ -97,25 +97,55 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - helper generators: `c_struct`, `c_union`, `c_bitfield`, `c_enum`.
   - codegen/compile modes: `codegen_preview`, `compile`, `quick_compile`.
 
-## Progress Snapshot (2026-03-02)
-- Two critical UNION vector layout bugs fixed:
-  - `duckdb_vector_get_data(union_vector)` returns NULL (STRUCT physical type has size 0); now accesses tag via `duckdb_struct_vector_get_child(vector, 0)`.
-  - Member `i` is at child `[i+1]` (child[0] is tag); fixed input bridge and output write-back.
-- UNION accessor helpers added and host-exported:
-  - `ducktinycc_union_tag(&u)`, `ducktinycc_union_member_ptr(&u, idx)`, `ducktinycc_union_member_is_valid(&u, idx)`.
-  - `duckdb_validity_row_is_valid` exported as host symbol for wrappers.
-- Codegen dedup completed:
-  - `tcc_codegen_ret_null_check(ret_type)` helper replaces 8-branch type-dispatch ladders in both ROW and BATCH wrapper codegen (~120 lines removed).
-  - c_struct/c_union/c_bitfield confirmed already well-factored (shared `tcc_generate_c_composite_helpers_source`, single dispatcher, shared compile loop).
-- Internal code quality improvements:
-  - X-macro `TCC_FFI_TYPE_TABLE` for FFI type definitions.
-  - Table-driven signature parser replaces manual if/else chains.
-  - Composite meta consolidation (shared field-list/binding-list infrastructure).
-- Lifetime/ownership documentation added: `docs/LIFETIME_OWNERSHIP.md` covers all descriptor structs, validity bitmap semantics, heap domains, pointer registry contracts, and generated helper ownership rules.
-- Nested UNION tests added: `union<a:i32[];b:i64>` (list member), `union<a:i32;b:struct<x:i64;y:f64>>` (struct member). All pass debug+release.
-- Validation: `make debug`, `make release`, `make test_debug`, `make test_release` all pass.
+## Progress Snapshot (2026-03-31) — 0.0.4 release
+- Self-contained embedded runtime landed:
+  - `libtcc1.a` and all TinyCC include headers (`stdarg.h`, `stddef.h`, `tccdefs.h`, etc.) are baked into the extension binary as C byte arrays at build time by `cmake/gen_embedded_runtime.cmake`.
+  - On first `compile`/`quick_compile` call, `tcc_ensure_embedded_runtime()` extracts them to a content-hash-keyed temp directory (`/tmp/ducktinycc_<fnv1a-hash-of-libtcc1.a>/`).  Extraction is thread-safe (atomic spinlock) and cross-process reusable (dir is reused if already present).
+  - `DUCKTINYCC_DEFAULT_RUNTIME_PATH` compile-time definition removed; `tcc_default_runtime_path()` now always calls `tcc_ensure_embedded_runtime()`, giving identical runtime behaviour across all platforms.
+  - `make test_embedded_debug` / `make test_embedded_release` targets added; `scripts/test_embedded_runtime.sh` hides the build-dir and runs the full sqllogictest suite to prove the embedded extraction path is exercised.
+- Cross-platform duplicate SQL name fix:
+  - `tcc_mode_compile` now checks `tcc_registry_find_sql_name()` before calling `tcc_codegen_compile_and_load_module`.  If the SQL name is already registered, returns `false`/`E_INIT_FAILED` immediately, bypassing `duckdb_register_scalar_function` whose return value differs by platform (Linux: error, macOS: silent replace).
+- Released as `0.0.4`; current development branch is `0.0.4.9000`.
 
-## Versioning and NEWS Policy
+## Embedded Runtime — Architecture Notes
+- `cmake/gen_embedded_runtime.cmake` is a pure-CMake `-P` script (no `objcopy`/`ld`/platform tools):
+  - reads `libtcc1.a` via `file(READ ... HEX)` and emits `ducktinycc_embedded_libtcc1[]` + `ducktinycc_embedded_libtcc1_size`.
+  - reads each `.h` from `third_party/tinycc/include/` and emits per-file byte arrays plus a NULL-terminated manifest table (`ducktinycc_embedded_headers[]`).
+  - output is `${CMAKE_BINARY_DIR}/embedded_runtime.c`, compiled into the extension via `target_sources`.
+- `tcc_ensure_embedded_runtime()` in `src/tcc_module.c`:
+  - computes FNV-1a 32-bit hash of the embedded `libtcc1.a` content → extraction dir name.
+  - writes `libtcc1.a` to `<dir>/libtcc1.a` and each header to `<dir>/include/<name>.h`.
+  - calls `tcc_set_lib_path(s, dir)` so `{B}` expands to the extraction dir, satisfying `CONFIG_TCC_SYSINCLUDEPATHS` (`{B}/include`) without any explicit `tcc_add_sysinclude_path`.
+- `tccdefs.h` is NOT extracted: TinyCC is built with `CONFIG_TCC_PREDEFS=1`, so `tccdefs_.h` (the preprocessed form) is compiled into `libtcc.a` and never loaded from disk.
+
+## Rtools/MinGW Windows Support — Status and Blocking Issues
+- Current state: `windows_amd64` and `windows_arm64` are in `excluded_platforms`.  The exclusion is not merely build complexity — there are runtime asset gaps described below.
+- On `TCC_TARGET_PE`, `tcc_add_library()` searches library paths for `.def` files **before** `.dll`/`.a` (`libtcc.c:1291`: `%s/%s.def`, `%s/lib%s.def`, …).  Without `.def` files in `{B}/lib`, all `tcc_add_library` calls fail silently and standard C library symbols are unresolved in JIT code.
+- `tcc.h` line 278: `CONFIG_TCC_SYSINCLUDEPATHS` expands to `{B}/include` **and** `{B}/include/winapi` on Windows.  The `winapi/` subtree (`windows.h`, `windef.h`, etc.) lives in `third_party/tinycc/win32/include/` and is not currently embedded.
+- Static `.def` files in `third_party/tinycc/win32/lib/` (`kernel32.def`, `user32.def`, `gdi32.def`, `ws2_32.def`) are fixed content and can be embedded exactly like the include headers.
+- `msvcrt.def` from `win32/lib/` is **wrong for Rtools 4.2+ (UCRT)**:
+  - Rtools uses `ucrtbase.dll` as the CRT.  If JIT-compiled code resolves `calloc()` via the old `msvcrt.def` but the host (DuckDB/R) frees with UCRT's `free()`, a heap-mismatch crash results.
+  - The Rtinycc fix (see `.sync/Rtinycc/configure.win`) is to run `tcc.exe -impdef ucrtbase.dll -o lib/msvcrt.def` at install time on the target machine — generating the correct symbol list from the actual DLL present.
+  - This step is **machine-specific** and cannot be pre-baked at CI build time.
+- What Rtools/MinGW support would require:
+  1. Embed `win32/lib/kernel32.def`, `user32.def`, `gdi32.def`, `ws2_32.def` alongside `libtcc1.a` in `gen_embedded_runtime.cmake`.
+  2. Embed `third_party/tinycc/win32/include/` headers (including `winapi/` subtree) into a separate manifest extracted to `{B}/include/winapi/`.
+  3. In `tcc_ensure_embedded_runtime()`, after extracting the static `.def` files, generate the UCRT-correct `msvcrt.def` at first-run by invoking `tcc -impdef` (via libtcc in-process or a small subprocess using the embedded `tcc.exe` bytes) against the local `ucrtbase.dll`.
+  4. Test the full suite with Rtools UCRT toolchain via the MinGW cross-compilation path.
+- Until step 3 is solved, Windows targets remain excluded.  Reference: `.sync/Rtinycc/configure.win` for the proven Rtools pattern.
+
+## Tasks Ahead (Near Term)
+- Test coverage expansion:
+  - deeper nested composites inside UNION members (e.g., `union<a:list<struct<...>>;b:map<k;v>>`).
+  - UNION output with nested composite members (return union containing list/struct from C).
+  - edge cases: NULL union values, empty lists in unions, deeply recursive nesting.
+- Runtime bridge dedup opportunities:
+  - row vs batch allocation/cleanup branches in `tcc_execute_compiled_scalar_udf` still have some repeated patterns.
+  - list/array bridge paths are layout-identical and could share more code.
+- Rtools/MinGW Windows support (see section above):
+  - embed static `.def` files and `win32/include/winapi/` headers.
+  - solve UCRT `msvcrt.def` generation at first-run.
+  - remove Windows from `excluded_platforms` only after full suite passes under Rtools UCRT.
 - Use R-style development versions: `x.y.z.9000` means in-development; `x.y.z` means release.
 - Pre-`1.0.0` compatibility stance: prioritize correctness, simplification, and API clarity over backward compatibility.
 - Pre-`1.0.0` breaking changes are acceptable without shims when they reduce complexity or fix incorrect behavior, but they must be called out in `NEWS.md`.

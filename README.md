@@ -15,38 +15,35 @@ debug include/library resolution.
 The fastest path is `quick_compile`: one call compiles C source,
 generates a wrapper, relocates in memory, and registers a SQL function.
 
-``` bash
-duckdb -unsigned <<'SQL'
+``` sql
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
--- Compile and register one scalar UDF.
-SELECT ok, mode, phase, code, message
+SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
-  source := 'int add_i32(int a, int b){ return a + b; }',
-  symbol := 'add_i32',
-  sql_name := 'add_i32',
-  return_type := 'i32',
-  arg_types := ['i32', 'i32']
+  source := 'const char *hello_from_c(void){ return "hello from C"; }',
+  symbol := 'hello_from_c',
+  sql_name := 'hello_from_c',
+  return_type := 'varchar',
+  arg_types := []
 );
 
--- Call the generated function.
-SELECT add_i32(20, 22) AS answer;
-SQL
+-- Call the registered C UDF
+SELECT hello_from_c() AS msg;
 ```
 
-    ┌─────────┬───────────────┬─────────┬─────────┬──────────────────────────────────────────────────┐
-    │   ok    │     mode      │  phase  │  code   │                     message                      │
-    │ boolean │    varchar    │ varchar │ varchar │                     varchar                      │
-    ├─────────┼───────────────┼─────────┼─────────┼──────────────────────────────────────────────────┤
-    │ true    │ quick_compile │ load    │ OK      │ compiled and registered SQL function via codegen │
-    └─────────┴───────────────┴─────────┴─────────┴──────────────────────────────────────────────────┘
-    ┌────────┐
-    │ answer │
-    │ int32  │
-    ├────────┤
-    │     42 │
-    └────────┘
+    ┌─────────┬───────────────┬─────────┐
+    │   ok    │     mode      │  code   │
+    │ boolean │    varchar    │ varchar │
+    ├─────────┼───────────────┼─────────┤
+    │ true    │ quick_compile │ OK      │
+    └─────────┴───────────────┴─────────┘
+    ┌──────────────┐
+    │     msg      │
+    │   varchar    │
+    ├──────────────┤
+    │ hello from C │
+    └──────────────┘
 
 ## API Overview
 
@@ -142,8 +139,7 @@ make test_embedded_release
 This example uses one-shot compile with `libm`, then calls the generated
 function.
 
-``` bash
-duckdb -unsigned <<'SQL'
+``` sql
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
 -- Compile and register qpow.
@@ -161,7 +157,6 @@ double qpow(double x, double y){ return pow(x, y); }',
 
 -- Use the generated function.
 SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
-SQL
 ```
 
     ┌─────────┬───────────────┬─────────┐
@@ -182,8 +177,7 @@ SQL
 This example stages source and binding first, then compiles in a
 separate call.
 
-``` bash
-duckdb -unsigned <<'SQL'
+``` sql
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
 -- Reset staged state.
@@ -216,7 +210,6 @@ FROM tcc_module(
 );
 
 SELECT times2(21) AS value;
-SQL
 ```
 
     ┌─────────┬───────────────┬─────────┬─────────┬─────────────────────────────────┬────────────┬──────────┬─────────┬─────────────┬──────────────────┐
@@ -255,8 +248,7 @@ SQL
 This example takes one `STRUCT(a BIGINT, b BIGINT)` argument and sums
 valid fields.
 
-``` bash
-duckdb -unsigned <<'SQL'
+``` sql
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
 SELECT ok, mode, code
@@ -281,7 +273,6 @@ FROM tcc_module(
 
 SELECT struct_sum_demo({'a': 2::BIGINT, 'b': 5::BIGINT}::STRUCT(a BIGINT, b BIGINT)) AS both_set;
 SELECT struct_sum_demo({'a': 2::BIGINT, 'b': NULL::BIGINT}::STRUCT(a BIGINT, b BIGINT)) AS one_null;
-SQL
 ```
 
     ┌─────────┬───────────────┬─────────┐
@@ -308,8 +299,7 @@ SQL
 This example compiles one function for `BIGINT[]` (`i64[]`) and one for
 fixed-size `BIGINT[3]` (`i64[3]`).
 
-``` bash
-duckdb -unsigned <<'SQL'
+``` sql
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
 SELECT ok, mode, code
@@ -352,7 +342,6 @@ FROM tcc_module(
 
 SELECT list_sum_demo([1, NULL, 3]::BIGINT[]) AS list_sum;
 SELECT array_sum3_demo([1, NULL, 3]::BIGINT[3]) AS array_sum;
-SQL
 ```
 
     ┌─────────┬───────────────┬─────────┐
@@ -386,8 +375,7 @@ This example echoes a `DECIMAL(18,3)` value through a C function. The
 bridge represents decimals as a `ducktinycc_decimal_t` struct (a 128-bit
 scaled integer with width and scale metadata).
 
-``` bash
-duckdb -unsigned <<'SQL'
+``` sql
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
 SELECT ok, mode, code
@@ -401,7 +389,6 @@ FROM tcc_module(
 );
 
 SELECT decimal_echo(12.345::DECIMAL(18,3)) AS value;
-SQL
 ```
 
     ┌─────────┬───────────────┬─────────┐
@@ -422,8 +409,7 @@ SQL
 This example shows where TinyCC looks for assets and how a library probe
 resolves candidates.
 
-``` bash
-duckdb -unsigned <<'SQL'
+``` sql
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
 SELECT kind, key, value, exists
@@ -431,7 +417,6 @@ FROM tcc_system_paths();
 
 SELECT kind, key, value, exists, detail
 FROM tcc_library_probe(library := 'libtcc1.a');
-SQL
 ```
 
     ┌──────────────┬──────────────┬──────────────────────────────────────────┬─────────┐
@@ -511,8 +496,7 @@ addresses, or opaque handles to compiled code.
 The simplest pattern uses the address itself as the value (no
 dereference):
 
-``` bash
-duckdb -unsigned <<'SQL'
+``` sql
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
 -- Stage a symbol: the literal 42 becomes the symbol's address
@@ -539,7 +523,6 @@ long long get_magic(void) {
 );
 
 SELECT get_magic() AS magic;
-SQL
 ```
 
     ┌─────────┬────────────┬─────────┐
