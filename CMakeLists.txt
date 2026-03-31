@@ -139,7 +139,27 @@ if (NOT DUCKDB_WASM_EXTENSION)
     )
     add_dependencies(tccstatic tinycc_build)
 
+    # Embed libtcc1.a + TinyCC include headers as C byte arrays so the
+    # extension is fully self-contained at deployment (no external runtime
+    # files required).  The cmake script runs after tinycc_build so it sees
+    # the freshly built platform-specific libtcc1.a.
+    set(EMBEDDED_RUNTIME_C "${CMAKE_BINARY_DIR}/embedded_runtime.c")
+    add_custom_command(
+        OUTPUT "${EMBEDDED_RUNTIME_C}"
+        COMMAND ${CMAKE_COMMAND}
+            "-DLIBTCC1_PATH=${TINYCC_BUILD_DIR}/libtcc1.a"
+            "-DHEADERS_DIR=${TINYCC_SRC_DIR}/include"
+            "-DOUTPUT_FILE=${EMBEDDED_RUNTIME_C}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_embedded_runtime.cmake"
+        DEPENDS tinycc_build
+        COMMENT "Generating embedded TinyCC runtime (libtcc1.a + headers)"
+    )
+    set_source_files_properties("${EMBEDDED_RUNTIME_C}" PROPERTIES GENERATED TRUE)
+    target_sources(${EXTENSION_NAME} PRIVATE "${EMBEDDED_RUNTIME_C}")
+
     target_link_libraries(${EXTENSION_NAME} PRIVATE tccstatic)
+    # Keep build-dir path as a compile-time override so local dev/test still
+    # works; the embedded blobs are the fallback when this path is absent.
     target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKTINYCC_DEFAULT_RUNTIME_PATH="${TINYCC_BUILD_DIR}")
     if (NOT APPLE AND NOT WIN32)
         target_link_libraries(${EXTENSION_NAME} PRIVATE dl m pthread)
