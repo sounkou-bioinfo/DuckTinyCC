@@ -1,5 +1,5 @@
 name: ducktinycc
-version: 0.0.3.9000
-description: DuckDB TinyCC extension with tcc_* SQL surface
+version: 0.0.4
+description: Compile and register C scalar UDFs from SQL via TinyCC — self-contained, no external runtime required
 license: MIT
 excluded_platforms: wasm_mvp;wasm_eh;wasm_threads;windows_amd64;windows_arm64
