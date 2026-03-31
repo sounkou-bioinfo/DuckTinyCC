@@ -1,6 +1,10 @@
 # DuckTinyCC Extension News
 
-## ducktinycc 0.0.3.9000 (2026-03-03)
+## ducktinycc 0.0.4.9000 (development)
+
+(no changes yet)
+
+## ducktinycc 0.0.4 (2026-03-31)
 
 - **self-contained runtime**: `libtcc1.a` and all TinyCC include headers (`stdarg.h`, `stddef.h`, `tccdefs.h`, etc.) are now embedded as byte arrays directly in the extension binary via `cmake/gen_embedded_runtime.cmake`. On first use, `tcc_ensure_embedded_runtime()` extracts them to a content-hash-keyed temp directory (e.g. `/tmp/ducktinycc_<hash>/`) so that deployed extensions require no external TinyCC runtime files. The extraction is process-global, thread-safe via atomic spinlock, and cross-process reusable (same hash → same dir). `DUCKTINYCC_DEFAULT_RUNTIME_PATH` is removed; `tcc_default_runtime_path()` always uses the embedded extraction path so runtime behaviour is identical on all platforms.
 
