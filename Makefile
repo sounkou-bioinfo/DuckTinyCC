@@ -30,6 +30,12 @@ test: test_debug
 test_debug: test_extension_debug
 test_release: test_extension_release
 
+test_embedded_debug: debug
+	bash $(PROJ_DIR)scripts/test_embedded_runtime.sh debug
+
+test_embedded_release: release
+	bash $(PROJ_DIR)scripts/test_embedded_runtime.sh release
+
 # Override header fetch to use the actual DuckDB release version, not the C API version
 update_duckdb_headers_custom:
 	$(PYTHON_VENV_BIN) -c "import urllib.request;urllib.request.urlretrieve('https://raw.githubusercontent.com/duckdb/duckdb/$(DUCKDB_HEADER_VERSION)/src/include/duckdb.h', 'duckdb_capi/duckdb.h')"
