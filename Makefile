@@ -1,4 +1,5 @@
-.PHONY: clean clean_all rdm test_embedded_debug test_embedded_release
+.PHONY: clean clean_all rdm test_embedded_debug test_embedded_release \
+	community_sim_build community_sim_run community_sim
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -35,6 +36,15 @@ test_embedded_debug: debug
 
 test_embedded_release: release
 	bash $(PROJ_DIR)scripts/test_embedded_runtime.sh release
+
+community_sim_build:
+	bash $(PROJ_DIR)scripts/community_sim_build.sh
+
+community_sim_run:
+	bash $(PROJ_DIR)scripts/community_sim_run.sh
+
+community_sim: community_sim_build
+	bash $(PROJ_DIR)scripts/community_sim_run.sh
 
 # Override header fetch to use the actual DuckDB release version, not the C API version
 update_duckdb_headers_custom:
