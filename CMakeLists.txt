@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.5...3.29)
 option(DUCKDB_WASM_EXTENSION "Whether compiling for Wasm target" OFF)
+option(DUCKTINYCC_PRUNE_TINYCC_BUILD_DIR "Remove tinycc_build after linking to validate embedded runtime-only execution" OFF)
 
 ###
 # Configuration
@@ -145,12 +146,13 @@ if (NOT DUCKDB_WASM_EXTENSION)
     # the freshly built platform-specific libtcc1.a.
     #
     # Asset layout (manifest relpath -> extraction location):
-    #   Non-Windows: include/*.h  from third_party/tinycc/include/
+    #   Common:      include/**   from third_party/tinycc/include/ (recursive)
     #   Windows:     include/**   from third_party/tinycc/win32/include/ (recursive)
     #                lib/*.def    from third_party/tinycc/win32/lib/
     set(EMBEDDED_RUNTIME_C "${CMAKE_BINARY_DIR}/embedded_runtime.c")
     if(MINGW)
         set(EMBED_PLATFORM_ARGS
+            "-DHEADERS_DIR=${TINYCC_SRC_DIR}/include"
             "-DWIN32_INCLUDE_DIR=${TINYCC_SRC_DIR}/win32/include"
             "-DWIN32_LIB_DIR=${TINYCC_SRC_DIR}/win32/lib"
         )
@@ -175,6 +177,16 @@ if (NOT DUCKDB_WASM_EXTENSION)
     target_link_libraries(${EXTENSION_NAME} PRIVATE tccstatic)
     if (NOT APPLE AND NOT WIN32)
         target_link_libraries(${EXTENSION_NAME} PRIVATE dl m pthread)
+    endif()
+
+    # Optional runtime-hardening mode for local/dev validation:
+    # remove tinycc_build after link so runtime cannot accidentally fall back
+    # to build-tree assets and must exercise embedded extraction.
+    if (DUCKTINYCC_PRUNE_TINYCC_BUILD_DIR)
+        add_custom_command(TARGET ${EXTENSION_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E remove_directory "${TINYCC_BUILD_DIR}"
+            COMMENT "Pruning ${TINYCC_BUILD_DIR} to force embedded-runtime usage"
+        )
     endif()
 else()
     target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKTINYCC_WASM_UNSUPPORTED=1)

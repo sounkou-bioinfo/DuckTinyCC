@@ -37,6 +37,12 @@ test_embedded_debug: debug
 test_embedded_release: release
 	bash $(PROJ_DIR)scripts/test_embedded_runtime.sh release
 
+debug_pruned:
+	$(MAKE) EXTRA_CMAKE_FLAGS="$(EXTRA_CMAKE_FLAGS) -DDUCKTINYCC_PRUNE_TINYCC_BUILD_DIR=1" debug
+
+release_pruned:
+	$(MAKE) EXTRA_CMAKE_FLAGS="$(EXTRA_CMAKE_FLAGS) -DDUCKTINYCC_PRUNE_TINYCC_BUILD_DIR=1" release
+
 community_sim_build:
 	bash $(PROJ_DIR)scripts/community_sim_build.sh
 

@@ -117,7 +117,7 @@ function(collect_assets BASE_DIR DEST_PREFIX GLOB_PATTERN RECURSIVE OUT_SYMS OUT
         string(REPLACE "." "_" sym_suffix "${sym_suffix}")
         set(sym "ducktinycc_asset_${sym_suffix}")
 
-        list(APPEND syms "${sym}|${asset_path}")  # pack path for later use
+        list(APPEND syms "${sym}")
         list(APPEND relpaths "${manifest_relpath}")
         append_asset_as_c_array("${asset_path}" "${sym}")
     endforeach()
@@ -148,7 +148,7 @@ set(all_relpaths "")
 
 # Non-Windows: flat TinyCC internal headers -> include/
 if(DEFINED HEADERS_DIR)
-    collect_assets("${HEADERS_DIR}" "include" "*.h" FALSE unix_syms unix_relpaths)
+    collect_assets("${HEADERS_DIR}" "include" "*.h" TRUE unix_syms unix_relpaths)
     list(APPEND all_syms ${unix_syms})
     list(APPEND all_relpaths ${unix_relpaths})
 endif()
@@ -180,9 +180,7 @@ file(APPEND "${OUTPUT_FILE}"
 list(LENGTH all_syms n_assets)
 set(idx 0)
 foreach(sym_and_path ${all_syms})
-    # sym_and_path is "symname|/abs/path" — extract just the sym name
-    string(REPLACE "|" ";" sym_parts "${sym_and_path}")
-    list(GET sym_parts 0 sym)
+    set(sym "${sym_and_path}")
     list(GET all_relpaths ${idx} relpath)
     file(APPEND "${OUTPUT_FILE}"
         "    { \"${relpath}\", ${sym}_bytes, (size_t)sizeof(${sym}_bytes) },\n"
