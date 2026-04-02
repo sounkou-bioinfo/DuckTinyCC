@@ -1,6 +1,6 @@
 # DuckTinyCC Extension News
 
-## ducktinycc 0.0.4.9000 (development)
+## ducktinycc 0.1.0 (2026-04-02)
 
 - **bugfix (community extension / no system headers)**: `compile`/`quick_compile` now work correctly on systems without development headers (e.g. no `libc6-dev`/`glibc-devel`). Four compounding bugs caused `E_COMPILE_FAILED` for end-users who installed from the community extension repository:
   1. `tcc_set_lib_path` was called after `tcc_set_output_type` in `tcc_build_module_artifact`. Because TinyCC expands `{B}` in `CONFIG_TCC_SYSINCLUDEPATHS` eagerly at `tcc_set_output_type` time, the embedded runtime extraction directory (`/tmp/ducktinycc_<hash>/include`) was not searched — only the stale build-time `CONFIG_TCCDIR` path was used. Fix: call `tcc_set_lib_path(s, runtime_path)` immediately after `tcc_new()`, before `tcc_set_output_type`.
@@ -9,6 +9,8 @@
   4. TinyCC unconditionally calls `tcc_add_library(s, "c")` during `tcc_relocate` unless `-nostdlib` is set. In `TCC_OUTPUT_MEMORY` mode all undefined symbols are resolved from the host process via `dlsym(RTLD_DEFAULT, ...)`, so `libc.so` is never needed — but its absence on a bare system produced `library 'c' not found`. Fix: added `tcc_set_options(s, "-nostdlib")` in `tcc_build_module_artifact` before `tcc_set_output_type`.
 
 - **test coverage**: added UNION edge-case tests — NULL union input produces NULL output (not a sentinel), `union<a:i32[];b:i64>` return from C (UNION output with nested list member), deeply nested `union<a:list<struct<x:i64;y:f64>>;b:i64>` input round-trip including empty-list and NULL cases.
+
+- **embedded runtime portability (Windows / subdirectory support)**: `cmake/gen_embedded_runtime.cmake` and `tcc_ensure_embedded_runtime()` now use a relpath-based asset manifest instead of a flat filename list. Each manifest entry's `name` field is a forward-slash path relative to the extraction root (e.g. `"include/stdarg.h"`, `"include/winapi/windows.h"`, `"lib/kernel32.def"`). Extraction creates intermediate directories on demand via a new `tcc_mkdirs_for_relpath()` helper — no directory structure is hardcoded in C code anymore. On Windows (MINGW) builds, `CMakeLists.txt` now passes `WIN32_INCLUDE_DIR` (`third_party/tinycc/win32/include/`, recursive) and `WIN32_LIB_DIR` (`third_party/tinycc/win32/lib/`, `*.def` files) to the cmake script instead of the Unix-only flat `HEADERS_DIR`; this embeds the complete Windows CRT header tree (including `winapi/`, `sec_api/`, `sys/` subtrees) and import library definitions needed for `TCC_TARGET_PE` JIT compilation. The old flat-filename approach only covered `{B}/include/*.h` and could not represent `{B}/include/winapi/windows.h` or `{B}/lib/kernel32.def`. Community extension `windows_amd64` and `windows_arm64` targets are now enabled (removed from `excluded_platforms`). Note: the msvcrt.def bundled from `win32/lib/` targets legacy MSVCRT; UCRT environments (Rtools 4.2+) may need to regenerate it at first run (see AGENTS.md for the Rtools pattern).
 
 ## ducktinycc 0.0.4 (2026-03-31)
 

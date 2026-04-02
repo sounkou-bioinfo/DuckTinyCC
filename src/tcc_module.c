@@ -2155,15 +2155,39 @@ static bool tcc_write_file_bytes(const char *path, const unsigned char *data, si
 	return ok != 0;
 }
 
-/* tcc_ensure_embedded_runtime: Extracts the embedded libtcc1.a and TinyCC include headers
+/* tcc_mkdirs_for_relpath: Creates all intermediate directories under base_dir that are
+ * implied by the forward-slash relpath (e.g. relpath="include/winapi/windows.h" creates
+ * base_dir/include/ then base_dir/include/winapi/).  Individual mkdir failures are
+ * silently ignored (EEXIST is expected on the reuse path).  Win32 accepts forward
+ * slashes in path operations, so we use them uniformly here. */
+static void tcc_mkdirs_for_relpath(const char *base_dir, const char *relpath) {
+	char rel[512];
+	char path[1024];
+	char *p;
+	strncpy(rel, relpath, sizeof(rel) - 1);
+	rel[sizeof(rel) - 1] = '\0';
+	p = rel;
+	while ((p = strchr(p, '/')) != NULL) {
+		*p = '\0'; /* temporarily null-terminate at this slash */
+		snprintf(path, sizeof(path), "%s/%s", base_dir, rel);
+		(void)TCC_MKDIR(path); /* ignore result; EEXIST is normal on reuse */
+		*p = '/';              /* restore */
+		p++;
+	}
+}
+
+/* tcc_ensure_embedded_runtime: Extracts the embedded libtcc1.a and TinyCC runtime assets
  * to a temp directory on first call.  Returns a stable pointer to the directory path string,
  * or NULL if extraction failed (extension will still attempt to use the compile-time path).
- * Thread-safe via atomic spinlock; content-hash-keyed directory allows cross-process reuse. */
+ * Thread-safe via atomic spinlock; content-hash-keyed directory allows cross-process reuse.
+ *
+ * Manifest entry name fields are forward-slash relpaths from the extraction root,
+ * e.g. "include/stdarg.h", "include/winapi/windows.h", "lib/kernel32.def".
+ * Intermediate directories are created on demand by tcc_mkdirs_for_relpath(). */
 static const char *tcc_ensure_embedded_runtime(void) {
 	char tmp_base[512];
 	char dir_path[768];
-	char include_dir[800]; /* dir_path + "/include" (8 chars) */
-	char libtcc1_path[800]; /* dir_path + "/libtcc1.a" (10 chars) */
+	char libtcc1_path[800]; /* dir_path + "/libtcc1.a" */
 	unsigned int hash;
 	size_t i;
 	const char *tmpdir;
@@ -2198,18 +2222,16 @@ static const char *tcc_ensure_embedded_runtime(void) {
 	hash = tcc_fnv1a_hash(ducktinycc_embedded_libtcc1, ducktinycc_embedded_libtcc1_size);
 #ifdef _WIN32
 	snprintf(dir_path, sizeof(dir_path), "%s\\ducktinycc_%08x", tmp_base, hash);
-	snprintf(include_dir, sizeof(include_dir), "%s\\include", dir_path);
 	snprintf(libtcc1_path, sizeof(libtcc1_path), "%s\\libtcc1.a", dir_path);
 #else
 	snprintf(dir_path, sizeof(dir_path), "%s/ducktinycc_%08x", tmp_base, hash);
-	snprintf(include_dir, sizeof(include_dir), "%s/include", dir_path);
 	snprintf(libtcc1_path, sizeof(libtcc1_path), "%s/libtcc1.a", dir_path);
 #endif
 
-	/* If libtcc1.a already present with correct size, the dir is valid; reuse it. */
+	/* If libtcc1.a already present, the dir is valid; reuse it. */
 	if (!tcc_path_exists(libtcc1_path)) {
-		/* Create extraction dir and include/ subdir. */
-		if (!TCC_MKDIR(dir_path) || !TCC_MKDIR(include_dir)) {
+		/* Create root extraction dir. */
+		if (!TCC_MKDIR(dir_path)) {
 			g_embedded_runtime_extracted = true;
 			atomic_flag_clear_explicit(&g_embedded_runtime_lock, memory_order_release);
 			return NULL;
@@ -2222,19 +2244,20 @@ static const char *tcc_ensure_embedded_runtime(void) {
 			atomic_flag_clear_explicit(&g_embedded_runtime_lock, memory_order_release);
 			return NULL;
 		}
-		/* Write each embedded TinyCC header into include/. */
+		/* Write each embedded asset.
+		 * entry.name is a forward-slash relpath from the extraction root, e.g.
+		 *   "include/stdarg.h"           (non-Windows TinyCC internal headers)
+		 *   "include/winapi/windows.h"   (Windows API headers)
+		 *   "lib/kernel32.def"           (Windows import library definitions)
+		 * tcc_mkdirs_for_relpath creates any needed intermediate directories. */
 		for (i = 0; i < ducktinycc_embedded_headers_count; i++) {
-			char hdr_path[900];
-#ifdef _WIN32
-			snprintf(hdr_path, sizeof(hdr_path), "%s\\%s",
-			         include_dir, ducktinycc_embedded_headers[i].name);
-#else
-			snprintf(hdr_path, sizeof(hdr_path), "%s/%s",
-			         include_dir, ducktinycc_embedded_headers[i].name);
-#endif
-			/* Non-fatal: if a header fails to write, continue; TinyCC may fall
+			char asset_path[900];
+			tcc_mkdirs_for_relpath(dir_path, ducktinycc_embedded_headers[i].name);
+			snprintf(asset_path, sizeof(asset_path), "%s/%s",
+			         dir_path, ducktinycc_embedded_headers[i].name);
+			/* Non-fatal: if an asset fails to write, continue; TinyCC may fall
 			 * back to a system copy.  libtcc1.a is the critical artifact. */
-			(void)tcc_write_file_bytes(hdr_path,
+			(void)tcc_write_file_bytes(asset_path,
 			                           ducktinycc_embedded_headers[i].data,
 			                           ducktinycc_embedded_headers[i].size);
 		}

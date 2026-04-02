@@ -139,16 +139,31 @@ if (NOT DUCKDB_WASM_EXTENSION)
     )
     add_dependencies(tccstatic tinycc_build)
 
-    # Embed libtcc1.a + TinyCC include headers as C byte arrays so the
+    # Embed libtcc1.a + TinyCC runtime assets as C byte arrays so the
     # extension is fully self-contained at deployment (no external runtime
     # files required).  The cmake script runs after tinycc_build so it sees
     # the freshly built platform-specific libtcc1.a.
+    #
+    # Asset layout (manifest relpath -> extraction location):
+    #   Non-Windows: include/*.h  from third_party/tinycc/include/
+    #   Windows:     include/**   from third_party/tinycc/win32/include/ (recursive)
+    #                lib/*.def    from third_party/tinycc/win32/lib/
     set(EMBEDDED_RUNTIME_C "${CMAKE_BINARY_DIR}/embedded_runtime.c")
+    if(MINGW)
+        set(EMBED_PLATFORM_ARGS
+            "-DWIN32_INCLUDE_DIR=${TINYCC_SRC_DIR}/win32/include"
+            "-DWIN32_LIB_DIR=${TINYCC_SRC_DIR}/win32/lib"
+        )
+    else()
+        set(EMBED_PLATFORM_ARGS
+            "-DHEADERS_DIR=${TINYCC_SRC_DIR}/include"
+        )
+    endif()
     add_custom_command(
         OUTPUT "${EMBEDDED_RUNTIME_C}"
         COMMAND ${CMAKE_COMMAND}
             "-DLIBTCC1_PATH=${TINYCC_BUILD_DIR}/libtcc1.a"
-            "-DHEADERS_DIR=${TINYCC_SRC_DIR}/include"
+            ${EMBED_PLATFORM_ARGS}
             "-DOUTPUT_FILE=${EMBEDDED_RUNTIME_C}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_embedded_runtime.cmake"
         DEPENDS tinycc_build
