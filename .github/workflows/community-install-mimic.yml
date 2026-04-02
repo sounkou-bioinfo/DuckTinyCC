@@ -61,7 +61,7 @@ jobs:
             exit 1
           fi
 
-          sql="LOAD '${ext_path}'; FROM tcc_module(mode='quick_compile', source='int64_t community_ci_double(int64_t x){ return x * 2; }', sql_name='community_ci_double', signature='i64(i64)', symbol='community_ci_double'); SELECT community_ci_double(21) AS got;"
+          sql="LOAD '${ext_path}'; FROM tcc_module(mode='quick_compile', source='int64_t community_ci_double(int64_t x){ return x * 2; }', sql_name='community_ci_double', symbol='community_ci_double', return_type='i64', arg_types:=['i64']); SELECT community_ci_double(21) AS got;"
 
           ./duckdb -unsigned -c "$sql" | tee /tmp/macos_community_mimic.log
           grep -q "42" /tmp/macos_community_mimic.log
@@ -88,6 +88,8 @@ jobs:
             make
             curl
             unzip
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-python
 
@@ -121,7 +123,7 @@ jobs:
             exit 1
           fi
 
-          sql="LOAD '${ext_path}'; FROM tcc_module(mode='quick_compile', source='int64_t community_ci_double(int64_t x){ return x * 2; }', sql_name='community_ci_double', signature='i64(i64)', symbol='community_ci_double'); SELECT community_ci_double(21) AS got;"
+          sql="LOAD '${ext_path}'; FROM tcc_module(mode='quick_compile', source='int64_t community_ci_double(int64_t x){ return x * 2; }', sql_name='community_ci_double', symbol='community_ci_double', return_type='i64', arg_types:=['i64']); SELECT community_ci_double(21) AS got;"
 
           ./duckdb.exe -unsigned -c "$sql" | tee /tmp/windows_community_mimic.log
           grep -q "42" /tmp/windows_community_mimic.log
