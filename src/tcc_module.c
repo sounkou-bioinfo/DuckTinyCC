@@ -2107,7 +2107,7 @@ static bool tcc_path_exists(const char *path) {
  *
  * The extracted layout mirrors what tcc_configure_runtime_paths() expects:
  *   {dir}/libtcc1.a      -- the TinyCC relocatable helper archive
- *   {dir}/include/*.h    -- TinyCC's own stdarg.h, stddef.h, tccdefs.h, etc.
+ *   {dir}/include/       -- TinyCC's own headers (stdarg.h, stddef.h, tccdefs.h, etc.)
  *
  * TinyCC's {B}/include sysinclude expansion (CONFIG_TCC_SYSINCLUDEPATHS) is satisfied
  * when tcc_set_lib_path(s, dir) is called, because {B} expands to tcc_lib_path which
