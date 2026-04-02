@@ -6265,6 +6265,15 @@ static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_
 		tcc_set_error(error_buf, "tcc_new failed");
 		return -1;
 	}
+	/* Set lib_path BEFORE tcc_set_output_type: tcc_set_output_type eagerly
+	 * expands {B} in CONFIG_TCC_SYSINCLUDEPATHS via tcc_split_path().  If we
+	 * wait until tcc_configure_runtime_paths (called after set_output_type),
+	 * {B} resolves to CONFIG_TCCDIR (the TinyCC install dir used at build
+	 * time, which does not exist on end-user machines) instead of our
+	 * embedded-runtime extraction directory. */
+	if (runtime_path && runtime_path[0] != '\0') {
+		tcc_set_lib_path(s, runtime_path);
+	}
 	tcc_set_error_func(s, error_buf, tcc_append_error);
 	if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) != 0) {
 		tcc_set_error(error_buf, "tcc_set_output_type failed");

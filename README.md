@@ -448,9 +448,8 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     │ library_path │ path         │ /usr/lib/aarch64-linux-gnu               │ false   │
     │ library_path │ path         │ /usr/lib/R/lib                           │ true    │
     │ library_path │ path         │ /usr/lib/jvm/default-java/lib/server     │ true    │
-    ├──────────────┴──────────────┴──────────────────────────────────────────┴─────────┤
-    │ 25 rows                                                                4 columns │
-    └──────────────────────────────────────────────────────────────────────────────────┘
+    └──────────────┴──────────────┴──────────────────────────────────────────┴─────────┘
+      25 rows                                                                4 columns
     ┌─────────────┬──────────────┬──────────────────────────────────────┬─────────┬──────────────────────────────────┐
     │    kind     │     key      │                value                 │ exists  │              detail              │
     │   varchar   │   varchar    │               varchar                │ boolean │             varchar              │
@@ -482,9 +481,8 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     │ candidate   │ libtcc1.a    │ /tmp/ducktinycc_f4441fa0/libtcc1.a   │ true    │ resolved                         │
     │ resolved    │ path         │ /tmp/ducktinycc_f4441fa0/libtcc1.a   │ true    │ resolved library path            │
     │ resolved    │ link_name    │ tcc1                                 │ true    │ normalized tcc_add_library value │
-    ├─────────────┴──────────────┴──────────────────────────────────────┴─────────┴──────────────────────────────────┤
-    │ 27 rows                                                                                              5 columns │
-    └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+    └─────────────┴──────────────┴──────────────────────────────────────┴─────────┴──────────────────────────────────┘
+      27 rows                                                                                              5 columns
 
 ### Inject Symbols and Pass Pointers
 

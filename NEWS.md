@@ -2,6 +2,10 @@
 
 ## ducktinycc 0.0.4.9000 (development)
 
+- **bugfix (community extension / no system headers)**: `compile`/`quick_compile` now work correctly on systems without development headers (e.g. no `libc6-dev`/`glibc-devel`). Two compounding bugs caused `E_COMPILE_FAILED` for end-users who installed from the community extension repository:
+  1. `tcc_set_lib_path` was called after `tcc_set_output_type` in `tcc_build_module_artifact`. Because TinyCC expands `{B}` in `CONFIG_TCC_SYSINCLUDEPATHS` eagerly at `tcc_set_output_type` time, the embedded runtime extraction directory (`/tmp/ducktinycc_<hash>/include`) was not searched — only the stale build-time `CONFIG_TCCDIR` path was used. Fix: call `tcc_set_lib_path(s, runtime_path)` immediately after `tcc_new()`, before `tcc_set_output_type`.
+  2. `stdint.h` was not included in the embedded TinyCC headers, so JIT-compiled wrappers failed with `include file 'stdint.h' not found` on systems without system C headers installed. Fix: added `third_party/tinycc/include/stdint.h` — a self-contained implementation derived from `tccdefs.h` predefined type macros (`__INT32_TYPE__`, `__INT64_TYPE__`, `__INTPTR_TYPE__`, etc.) that requires no system headers.
+
 - **test coverage**: added UNION edge-case tests — NULL union input produces NULL output (not a sentinel), `union<a:i32[];b:i64>` return from C (UNION output with nested list member), deeply nested `union<a:list<struct<x:i64;y:f64>>;b:i64>` input round-trip including empty-list and NULL cases.
 
 ## ducktinycc 0.0.4 (2026-03-31)
