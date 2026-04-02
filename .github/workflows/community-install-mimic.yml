@@ -97,7 +97,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p configure/venv
-          printf '%s\n' "windows_amd64_mingw" > configure/platform.txt
+          # Metadata platform must match DuckDB CLI target (windows_amd64), while
+          # we still compile with MinGW/Rtools-like toolchain below.
+          printf '%s\n' "windows_amd64" > configure/platform.txt
           git rev-parse --short HEAD > configure/extension_version.txt
 
           make \
