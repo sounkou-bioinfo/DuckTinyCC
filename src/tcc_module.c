@@ -2126,10 +2126,6 @@ extern const unsigned char ducktinycc_embedded_libtcc1[];
 extern const size_t ducktinycc_embedded_libtcc1_size;
 extern const ducktinycc_embedded_header_entry_t ducktinycc_embedded_headers[];
 extern const size_t ducktinycc_embedded_headers_count;
-#ifdef _WIN32
-/* TinyCC built-in tool entrypoint (tcctools.c) used to generate .def files. */
-extern int tcc_tool_impdef(int argc, char **argv);
-#endif
 
 /* Process-global extraction state. */
 static char g_embedded_runtime_dir[1024] = {0};
@@ -2181,26 +2177,39 @@ static void tcc_mkdirs_for_relpath(const char *base_dir, const char *relpath) {
 }
 
 #ifdef _WIN32
-/* tcc_generate_ucrt_msvcrt_def: Generate a UCRT-correct msvcrt.def at runtime.
+/* tcc_generate_ucrt_msvcrt_def: Best-effort generation of UCRT-correct msvcrt.def.
  *
  * Why: TinyCC on PE links against "c" by resolving msvcrt.def from {B}/lib first.
  * The static msvcrt.def shipped in upstream TinyCC targets legacy MSVCRT and can
  * cause allocator mismatch when the host process is UCRT (Rtools 4.2+ / UCRT64).
  *
- * Strategy: on each process start path, regenerate {runtime}/lib/msvcrt.def from
- * the machine-local ucrtbase.dll using TinyCC's own impdef tool implementation.
+ * Strategy: if a `tcc.exe` is available (next to runtime dir or on PATH), run:
+ *   tcc.exe -impdef <SystemRoot>\System32\ucrtbase.dll -o <runtime>/lib/msvcrt.def
+ *
+ * This mirrors the proven Rtinycc approach and avoids direct linkage to internal
+ * TinyCC tcctools symbols (which are not guaranteed to be exported in libtcc.a).
  *
  * Non-fatal: if generation fails we keep whatever msvcrt.def is present.
  */
 static bool tcc_generate_ucrt_msvcrt_def(const char *runtime_dir) {
+	char tcc_exe[900];
 	char dll_path[768];
 	char out_def[900];
+	char cmd[2600];
 	const char *system_root;
-	char *argv_impdef[4];
 	int rc;
 
 	if (!runtime_dir || runtime_dir[0] == '\0') {
 		return false;
+	}
+
+	/* Prefer runtime-local tcc.exe, then PATH fallback. */
+	snprintf(tcc_exe, sizeof(tcc_exe), "%s/tcc.exe", runtime_dir);
+	if (!tcc_path_exists(tcc_exe)) {
+		snprintf(tcc_exe, sizeof(tcc_exe), "%s/bin/tcc.exe", runtime_dir);
+		if (!tcc_path_exists(tcc_exe)) {
+			snprintf(tcc_exe, sizeof(tcc_exe), "tcc.exe");
+		}
 	}
 
 	system_root = getenv("SystemRoot");
@@ -2216,11 +2225,8 @@ static bool tcc_generate_ucrt_msvcrt_def(const char *runtime_dir) {
 	tcc_mkdirs_for_relpath(runtime_dir, "lib/msvcrt.def");
 	snprintf(out_def, sizeof(out_def), "%s/lib/msvcrt.def", runtime_dir);
 
-	argv_impdef[0] = (char *)"tcc";
-	argv_impdef[1] = dll_path;
-	argv_impdef[2] = (char *)"-o";
-	argv_impdef[3] = out_def;
-	rc = tcc_tool_impdef(4, argv_impdef);
+	snprintf(cmd, sizeof(cmd), "\"%s\" -impdef \"%s\" -o \"%s\"", tcc_exe, dll_path, out_def);
+	rc = system(cmd);
 
 	return rc == 0 && tcc_path_exists(out_def);
 }

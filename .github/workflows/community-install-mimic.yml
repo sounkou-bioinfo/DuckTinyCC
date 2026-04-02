@@ -19,6 +19,7 @@ jobs:
       - name: Build extension (release, pruned runtime dir)
         shell: bash
         run: |
+          make configure
           make TARGET_DUCKDB_VERSION=v1.5.1 DUCKDB_HEADER_VERSION=v1.5.1 release_pruned
 
       - name: Download DuckDB CLI v1.5.1
@@ -77,6 +78,10 @@ jobs:
 
       - name: Build extension (release, pruned runtime dir)
         run: |
+          make \
+            PYTHON_BIN=python \
+            PYTHON_VENV_BIN=./configure/venv/bin/python \
+            configure
           make \
             TARGET_DUCKDB_VERSION=v1.5.1 \
             DUCKDB_HEADER_VERSION=v1.5.1 \
