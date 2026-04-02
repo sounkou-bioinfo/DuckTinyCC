@@ -19,8 +19,23 @@ jobs:
       - name: Build extension (release, pruned runtime dir)
         shell: bash
         run: |
-          make configure
-          make TARGET_DUCKDB_VERSION=v1.5.1 DUCKDB_HEADER_VERSION=v1.5.1 release_pruned
+          set -euo pipefail
+          mkdir -p configure/venv
+          arch="$(uname -m)"
+          if [ "$arch" = "arm64" ]; then
+            platform="osx_arm64"
+          else
+            platform="osx_amd64"
+          fi
+          printf '%s\n' "$platform" > configure/platform.txt
+          git rev-parse --short HEAD > configure/extension_version.txt
+
+          make \
+            USE_UNSTABLE_C_API=1 \
+            TARGET_DUCKDB_VERSION=v1.5.1 \
+            DUCKDB_HEADER_VERSION=v1.5.1 \
+            PYTHON_VENV_BIN=python3 \
+            release_pruned
 
       - name: Download DuckDB CLI v1.5.1
         shell: bash
@@ -78,15 +93,17 @@ jobs:
 
       - name: Build extension (release, pruned runtime dir)
         run: |
+          set -euo pipefail
+          mkdir -p configure/venv
+          printf '%s\n' "windows_amd64" > configure/platform.txt
+          git rev-parse --short HEAD > configure/extension_version.txt
+
           make \
-            PYTHON_BIN=python \
-            PYTHON_VENV_BIN=./configure/venv/bin/python \
-            configure
-          make \
+            USE_UNSTABLE_C_API=1 \
             TARGET_DUCKDB_VERSION=v1.5.1 \
             DUCKDB_HEADER_VERSION=v1.5.1 \
             PYTHON_BIN=python \
-            PYTHON_VENV_BIN=./configure/venv/bin/python \
+            PYTHON_VENV_BIN=python \
             release_pruned
 
       - name: Download DuckDB CLI v1.5.1 (windows-amd64)
