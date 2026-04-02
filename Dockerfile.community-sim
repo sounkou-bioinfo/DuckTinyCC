@@ -1,0 +1,179 @@
+# syntax=docker/dockerfile:1
+# Dockerfile.community-sim
+#
+# Mimics the DuckDB community extension CI build + a bare end-user runtime.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  Stage 1 (builder)                                                      │
+# │  Base: quay.io/pypa/manylinux_2_28_x86_64  — exact same image used by  │
+# │  the community-extensions CI (see community-extensions/.github/         │
+# │  workflows/build.yml, extension-ci-tools/docker/linux_amd64/Dockerfile) │
+# │  Builds ducktinycc.duckdb_extension with stable ABI.                   │
+# └─────────────────────────────────────────────────────────────────────────┘
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  Stage 2 (runtime-test)                                                 │
+# │  Base: ubuntu:22.04, NO build-essential / libc6-dev / C headers.       │
+# │  Simulates a typical end-user machine that only has DuckDB installed    │
+# │  (e.g. via pip install duckdb or apt-get install duckdb-cli) with no   │
+# │  C toolchain present.                                                   │
+# │  DuckDB v1.5.1 CLI — matches the community extension target version.   │
+# │  Tests quick_compile to verify the two fixes land correctly:            │
+# │    Fix 1: embedded stdint.h (no system headers needed at JIT time)     │
+# │    Fix 2: tcc_set_lib_path before tcc_set_output_type ({B} expansion)  │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Usage:
+#   docker build -t ducktinycc-sim -f Dockerfile.community-sim .
+#   docker run --rm ducktinycc-sim
+#
+# Build-only (interactive shell in the builder):
+#   docker build --target builder -t ducktinycc-builder -f Dockerfile.community-sim .
+#   docker run --rm -it ducktinycc-builder bash
+#
+# Runtime-test shell (inspect the test environment):
+#   docker run --rm -it --entrypoint bash ducktinycc-sim
+
+###############################################################################
+# Stage 1 — builder
+###############################################################################
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS builder
+
+# Install build tools not already present in the manylinux_2_28 image.
+# manylinux_2_28 (AlmaLinux 8) already supplies: gcc, make, git, python3.
+# We add cmake (AppStream 3.26+, sufficient for our CMakeLists.txt ≥3.5),
+# ninja-build, and wget (needed by the Python venv setup).
+RUN yum install -y --quiet cmake ninja-build wget python3 python3-pip && \
+    cmake --version && \
+    ninja --version && \
+    python3 --version
+
+WORKDIR /ducktinycc
+
+# Copy repo (build/ and cmake_build/ are excluded via .dockerignore to keep
+# the context small and avoid stale artifacts polluting the Docker build).
+COPY . .
+
+# Build the extension.
+#   make configure — creates configure/venv, detects platform, writes version
+#   make release   — runs cmake → builds TinyCC (ExternalProject) →
+#                    generates embedded_runtime.c → links libducktinycc.so →
+#                    appends DuckDB extension metadata
+RUN make configure && make release
+
+# Sanity-check: confirm the artifact exists and show its size.
+RUN ls -lh build/release/ducktinycc.duckdb_extension
+
+###############################################################################
+# Stage 2 — runtime-test
+###############################################################################
+FROM ubuntu:22.04 AS runtime-test
+
+# Minimal runtime deps only.
+# Deliberately NOT installing: build-essential, libc6-dev, gcc, or any C
+# development headers.  This is the exact condition that triggered the
+# E_COMPILE_FAILED bug: /usr/include/stdint.h does not exist.
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends wget unzip ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Confirm there are no C dev headers (this is the env that was broken before).
+RUN ! test -f /usr/include/stdint.h && \
+    echo "Confirmed: /usr/include/stdint.h absent — end-user environment."
+
+WORKDIR /home/runner
+
+# Download DuckDB v1.5.1 CLI (community extension target version).
+RUN wget -q "https://github.com/duckdb/duckdb/releases/download/v1.5.1/duckdb_cli-linux-amd64.zip" \
+         -O duckdb.zip && \
+    unzip -q duckdb.zip && \
+    mv duckdb /usr/local/bin/duckdb && \
+    chmod +x /usr/local/bin/duckdb && \
+    rm duckdb.zip && \
+    duckdb --version
+
+# Copy the built extension from the builder stage.
+COPY --from=builder \
+     /ducktinycc/build/release/ducktinycc.duckdb_extension \
+     /ext/ducktinycc.duckdb_extension
+
+# Write the test script.
+# All SQL runs in a single duckdb -c call so SET/LOAD/quick_compile/UDF-call
+# share one in-memory connection (functions registered by quick_compile persist
+# for the lifetime of that connection).
+RUN cat > /run_tests.sh << 'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+DUCKDB=/usr/local/bin/duckdb
+EXT=/ext/ducktinycc.duckdb_extension
+
+sep() { printf '\n%-60s\n' "--- $* ---"; }
+pass() { echo "PASS: $*"; }
+
+echo "================================================================"
+echo " ducktinycc — community extension simulation"
+echo " $(duckdb --version)"
+echo " Extension: $EXT  ($(du -sh "$EXT" | cut -f1))"
+echo " /usr/include/stdint.h present: $(test -f /usr/include/stdint.h && echo YES || echo NO)"
+echo "================================================================"
+
+sep "1/4  load extension"
+$DUCKDB -c "
+  SET allow_unsigned_extensions = true;
+  LOAD '$EXT';
+  SELECT 'loaded' AS status;
+"
+pass "extension loaded"
+
+sep "2/4  quick_compile integer UDF  (Fix 1 + Fix 2 smoke test)"
+# On an unfixed build this would fail with:
+#   E_COMPILE_FAILED / include file 'stdint.h' not found
+$DUCKDB -c "
+  SET allow_unsigned_extensions = true;
+  LOAD '$EXT';
+  SELECT ok, mode, code, detail
+  FROM   tcc_module(
+    mode        := 'quick_compile',
+    source      := 'int64_t double_it(int64_t x){ return x * 2; }',
+    symbol      := 'double_it',
+    sql_name    := 'double_it',
+    return_type := 'i64',
+    arg_types   := ['i64']
+  );
+  SELECT double_it(21) AS result;
+"
+pass "int64 UDF compiled and called"
+
+sep "3/4  quick_compile varchar UDF"
+$DUCKDB -c "
+  SET allow_unsigned_extensions = true;
+  LOAD '$EXT';
+  SELECT tcc_module(
+    mode        := 'quick_compile',
+    source      := 'const char *greet(const char *name){ return name; }',
+    symbol      := 'greet',
+    sql_name    := 'greet',
+    return_type := 'varchar',
+    arg_types   := ['varchar']
+  );
+  SELECT greet('community-sim') AS msg;
+"
+pass "varchar UDF compiled and called"
+
+sep "4/4  tcc_system_paths (runtime path sanity check)"
+# Verify the embedded extraction dir is found and listed as a sysinclude path.
+$DUCKDB -c "
+  SET allow_unsigned_extensions = true;
+  LOAD '$EXT';
+  SELECT kind, path FROM tcc_system_paths();
+"
+pass "tcc_system_paths returned"
+
+echo ""
+echo "================================================================"
+echo " ALL TESTS PASSED"
+echo "================================================================"
+SCRIPT
+RUN chmod +x /run_tests.sh
+
+CMD ["/run_tests.sh"]
