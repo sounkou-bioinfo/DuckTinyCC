@@ -38,11 +38,16 @@
 ###############################################################################
 FROM quay.io/pypa/manylinux_2_28_x86_64 AS builder
 
-# Install build tools not already present in the manylinux_2_28 image.
-# manylinux_2_28 (AlmaLinux 8) already supplies: gcc, make, git, python3.
-# We add cmake (AppStream 3.26+, sufficient for our CMakeLists.txt ≥3.5),
-# ninja-build, and wget (needed by the Python venv setup).
-RUN yum install -y --quiet cmake ninja-build wget python3 python3-pip && \
+# The pypa manylinux_2_28 image ships multiple CPython versions under
+# /opt/python/.  The default system `python3` on AlmaLinux 8 is 3.6, which is
+# too old for the pip packages required by the build system (duckdb >= 0.9,
+# packaging >= 22, etc.).  Put Python 3.11 (guaranteed present in manylinux_2_28)
+# first in PATH so that `python3` resolves to 3.11 throughout the build.
+ENV PATH="/opt/python/cp311-cp311/bin:${PATH}"
+
+# Install cmake (AppStream 3.26+ satisfies our ≥3.5 requirement), ninja-build,
+# and wget.  Python 3.11 is already in PATH above; no separate yum install needed.
+RUN yum install -y --quiet cmake ninja-build wget && \
     cmake --version && \
     ninja --version && \
     python3 --version
@@ -100,6 +105,7 @@ COPY --from=builder \
 # All SQL runs in a single duckdb -c call so SET/LOAD/quick_compile/UDF-call
 # share one in-memory connection (functions registered by quick_compile persist
 # for the lifetime of that connection).
+# -unsigned is required to load a locally-built (unsigned) extension in v1.5.1.
 RUN cat > /run_tests.sh << 'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -118,8 +124,7 @@ echo " /usr/include/stdint.h present: $(test -f /usr/include/stdint.h && echo YE
 echo "================================================================"
 
 sep "1/4  load extension"
-$DUCKDB -c "
-  SET allow_unsigned_extensions = true;
+$DUCKDB -unsigned -c "
   LOAD '$EXT';
   SELECT 'loaded' AS status;
 "
@@ -128,8 +133,7 @@ pass "extension loaded"
 sep "2/4  quick_compile integer UDF  (Fix 1 + Fix 2 smoke test)"
 # On an unfixed build this would fail with:
 #   E_COMPILE_FAILED / include file 'stdint.h' not found
-$DUCKDB -c "
-  SET allow_unsigned_extensions = true;
+$DUCKDB -unsigned -c "
   LOAD '$EXT';
   SELECT ok, mode, code, detail
   FROM   tcc_module(
@@ -145,10 +149,10 @@ $DUCKDB -c "
 pass "int64 UDF compiled and called"
 
 sep "3/4  quick_compile varchar UDF"
-$DUCKDB -c "
-  SET allow_unsigned_extensions = true;
+$DUCKDB -unsigned -c "
   LOAD '$EXT';
-  SELECT tcc_module(
+  SELECT ok, mode, code, detail
+  FROM   tcc_module(
     mode        := 'quick_compile',
     source      := 'const char *greet(const char *name){ return name; }',
     symbol      := 'greet',
@@ -162,10 +166,9 @@ pass "varchar UDF compiled and called"
 
 sep "4/4  tcc_system_paths (runtime path sanity check)"
 # Verify the embedded extraction dir is found and listed as a sysinclude path.
-$DUCKDB -c "
-  SET allow_unsigned_extensions = true;
+$DUCKDB -unsigned -c "
   LOAD '$EXT';
-  SELECT kind, path FROM tcc_system_paths();
+  SELECT kind, value FROM tcc_system_paths();
 "
 pass "tcc_system_paths returned"
 

@@ -900,7 +900,8 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
                                                  const char *sql_name, const char *return_type,
                                                  const char *arg_types_csv, const char *wrapper_mode_token,
                                                  tcc_wrapper_mode_t wrapper_mode, tcc_ffi_type_t ret_type,
-                                                 const tcc_ffi_type_t *arg_types, int arg_count);
+                                                 const tcc_ffi_type_t *arg_types, int arg_count,
+                                                 bool emit_extern_decl);
 static char *tcc_codegen_build_compilation_unit(const char *user_source, const char *wrapper_loader_source);
 
 /* RW-lock primitives used to guard shared module/session state during mode execution. */
@@ -3256,15 +3257,15 @@ static bool tcc_ffi_array_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_typ
 
 #define TCC_FFI_SCALAR_ROWS(X)                                                                                               \
 	X(TCC_FFI_BOOL, "bool", "_Bool", DUCKDB_TYPE_BOOLEAN, 1)                                                                \
-	X(TCC_FFI_I8, "i8", "signed char", DUCKDB_TYPE_TINYINT, 1)                                                              \
-	X(TCC_FFI_U8, "u8", "unsigned char", DUCKDB_TYPE_UTINYINT, 1)                                                           \
-	X(TCC_FFI_I16, "i16", "short", DUCKDB_TYPE_SMALLINT, 2)                                                                 \
-	X(TCC_FFI_U16, "u16", "unsigned short", DUCKDB_TYPE_USMALLINT, 2)                                                       \
-	X(TCC_FFI_I32, "i32", "int", DUCKDB_TYPE_INTEGER, 4)                                                                     \
-	X(TCC_FFI_U32, "u32", "unsigned int", DUCKDB_TYPE_UINTEGER, 4)                                                          \
-	X(TCC_FFI_I64, "i64", "long long", DUCKDB_TYPE_BIGINT, 8)                                                               \
-	X(TCC_FFI_U64, "u64", "unsigned long long", DUCKDB_TYPE_UBIGINT, 8)                                                     \
-	X(TCC_FFI_F32, "f32", "float", DUCKDB_TYPE_FLOAT, 4)                                                                     \
+	X(TCC_FFI_I8, "i8", "int8_t", DUCKDB_TYPE_TINYINT, 1)                                                                   \
+	X(TCC_FFI_U8, "u8", "uint8_t", DUCKDB_TYPE_UTINYINT, 1)                                                                 \
+	X(TCC_FFI_I16, "i16", "int16_t", DUCKDB_TYPE_SMALLINT, 2)                                                               \
+	X(TCC_FFI_U16, "u16", "uint16_t", DUCKDB_TYPE_USMALLINT, 2)                                                             \
+	X(TCC_FFI_I32, "i32", "int32_t", DUCKDB_TYPE_INTEGER, 4)                                                                \
+	X(TCC_FFI_U32, "u32", "uint32_t", DUCKDB_TYPE_UINTEGER, 4)                                                              \
+	X(TCC_FFI_I64, "i64", "int64_t", DUCKDB_TYPE_BIGINT, 8)                                                                 \
+	X(TCC_FFI_U64, "u64", "uint64_t", DUCKDB_TYPE_UBIGINT, 8)                                                               \
+	X(TCC_FFI_F32, "f32", "float", DUCKDB_TYPE_FLOAT, 4)                                                                    \
 	X(TCC_FFI_F64, "f64", "double", DUCKDB_TYPE_DOUBLE, 8)
 
 /* tcc_ffi_type_size: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
@@ -6275,6 +6276,14 @@ static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_
 		tcc_set_lib_path(s, runtime_path);
 	}
 	tcc_set_error_func(s, error_buf, tcc_append_error);
+	/* Use -nostdlib so TinyCC does not attempt to locate and link libc.so at
+	 * relocation time.  In TCC_OUTPUT_MEMORY mode all undefined symbols are
+	 * resolved from the host process via dlsym(RTLD_DEFAULT, ...), so the
+	 * shared-library file is never needed.  Without this flag, compiling on a
+	 * machine that has no C development files installed (e.g. a bare Ubuntu
+	 * runtime with no libc6-dev) would produce "library 'c' not found" even
+	 * for code that uses no libc functions at all. */
+	tcc_set_options(s, "-nostdlib");
 	if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) != 0) {
 		tcc_set_error(error_buf, "tcc_set_output_type failed");
 		tcc_delete(s);
@@ -8030,7 +8039,14 @@ static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_mod
 	                                        bind->arg_types ? bind->arg_types : "",
 	                                        ctx->signature.wrapper_mode_token, ctx->signature.wrapper_mode,
 	                                        ctx->signature.return_type, ctx->signature.arg_types,
-	                                        ctx->signature.arg_count);
+	                                        ctx->signature.arg_count,
+	                                        /* emit_extern_decl: only when user source is NOT bundled in the
+	                                         * compilation unit.  When user_source is present, the definition
+	                                         * already provides the prototype; emitting an extern with our
+	                                         * stdint.h-derived type (e.g. int64_t) would conflict with user
+	                                         * code that uses a raw primitive (e.g. long long) for the same
+	                                         * 64-bit type, because on LP64 Linux int64_t == long != long long. */
+	                                        !(bind->source && bind->source[0] != '\0'));
 	if (!ctx->wrapper_loader_source) {
 		tcc_set_error(error_buf, "failed to generate codegen wrapper");
 		return false;
@@ -8209,7 +8225,8 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
                                                  const char *sql_name, const char *return_type,
                                                  const char *arg_types_csv, const char *wrapper_mode_token,
                                                  tcc_wrapper_mode_t wrapper_mode, tcc_ffi_type_t ret_type,
-                                                 const tcc_ffi_type_t *arg_types, int arg_count) {
+                                                 const tcc_ffi_type_t *arg_types, int arg_count,
+                                                 bool emit_extern_decl) {
 	tcc_text_buf_t args_decl = {0};
 	tcc_text_buf_t row_unpack_lines = {0};
 	tcc_text_buf_t row_call_args = {0};
@@ -8285,11 +8302,25 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		    "#include <stdint.h>\n"
 		    "typedef struct _duckdb_connection *duckdb_connection;\n"
 		    "extern _Bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr, "
-		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n"
-		    "extern %s %s(%s);\n"
-		    "static _Bool %s(void **args, void *out_value, _Bool *out_is_null) {\n%s",
-		    ret_c_type, target_symbol, args_decl.data ? args_decl.data : "", wrapper_name,
-		    row_unpack_lines.data ? row_unpack_lines.data : "");
+		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n");
+		/* Emit an extern forward declaration of the user function only when the user source
+		 * is NOT bundled in the same compilation unit (i.e. the function is defined via a
+		 * separate session source or symbol injection).  When user source IS present in the
+		 * compilation unit it already provides the prototype; emitting an extern with our
+		 * stdint.h-derived type (e.g. int64_t) would conflict if the user wrote a raw
+		 * primitive (e.g. long long) — which on LP64 Linux resolves to a different type. */
+		if (ok && emit_extern_decl) {
+			ok = tcc_text_buf_appendf(&src, "extern %s %s(%s);\n",
+			                          ret_c_type, target_symbol,
+			                          args_decl.data ? args_decl.data : "");
+		}
+		if (ok) {
+			ok = tcc_text_buf_appendf(
+			    &src,
+			    "static _Bool %s(void **args, void *out_value, _Bool *out_is_null) {\n%s",
+			    wrapper_name,
+			    row_unpack_lines.data ? row_unpack_lines.data : "");
+		}
 		if (ok && ret_type == TCC_FFI_VOID) {
 			ok = tcc_text_buf_appendf(&src,
 			                          "  %s(%s);\n"
@@ -8336,12 +8367,20 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		    "#include <stdint.h>\n"
 		    "typedef struct _duckdb_connection *duckdb_connection;\n"
 		    "extern _Bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr, "
-		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n"
-		    "extern %s %s(%s);\n"
-		    "static _Bool %s(void **arg_data, uint64_t **arg_validity, uint64_t count, void *out_data, uint64_t "
-		    "*out_validity) {\n%s",
-		    ret_c_type, target_symbol, args_decl.data ? args_decl.data : "", wrapper_name,
-		    batch_col_decls.data ? batch_col_decls.data : "");
+		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n");
+		if (ok && emit_extern_decl) {
+			ok = tcc_text_buf_appendf(&src, "extern %s %s(%s);\n",
+			                          ret_c_type, target_symbol,
+			                          args_decl.data ? args_decl.data : "");
+		}
+		if (ok) {
+			ok = tcc_text_buf_appendf(
+			    &src,
+			    "static _Bool %s(void **arg_data, uint64_t **arg_validity, uint64_t count, void *out_data, uint64_t "
+			    "*out_validity) {\n%s",
+			    wrapper_name,
+			    batch_col_decls.data ? batch_col_decls.data : "");
+		}
 		if (ok && ret_type == TCC_FFI_VOID) {
 			ok = tcc_text_buf_appendf(&src, "  (void)out_data;\n");
 		} else if (ok && ret_type == TCC_FFI_PTR) {
