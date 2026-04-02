@@ -88,7 +88,7 @@ endfunction()
 # DEST_PREFIX: prepended to each relpath in the manifest (e.g. "include", "lib")
 # GLOB_PATTERN: e.g. "*.h" or "*.def"
 # RECURSIVE: TRUE or FALSE
-function(collect_assets BASE_DIR DEST_PREFIX GLOB_PATTERN RECURSIVE OUT_SYMS OUT_RELPATHS)
+function(collect_assets BASE_DIR DEST_PREFIX GLOB_PATTERN RECURSIVE SYM_PREFIX OUT_SYMS OUT_RELPATHS)
     if(NOT EXISTS "${BASE_DIR}")
         message(WARNING "gen_embedded_runtime.cmake: directory not found, skipping: ${BASE_DIR}")
         set(${OUT_SYMS} "" PARENT_SCOPE)
@@ -112,10 +112,10 @@ function(collect_assets BASE_DIR DEST_PREFIX GLOB_PATTERN RECURSIVE OUT_SYMS OUT
         set(manifest_relpath "${DEST_PREFIX}/${rel_to_base}")
 
         # Turn the relpath into a valid C identifier for the symbol name:
-        # "include/winapi/windows.h" -> "ducktinycc_asset_include_winapi_windows_h"
+        # "include/winapi/windows.h" -> "ducktinycc_asset_<prefix>_include_winapi_windows_h"
         string(REPLACE "/" "_" sym_suffix "${manifest_relpath}")
         string(REPLACE "." "_" sym_suffix "${sym_suffix}")
-        set(sym "ducktinycc_asset_${sym_suffix}")
+        set(sym "ducktinycc_asset_${SYM_PREFIX}_${sym_suffix}")
 
         list(APPEND syms "${sym}")
         list(APPEND relpaths "${manifest_relpath}")
@@ -148,21 +148,21 @@ set(all_relpaths "")
 
 # Non-Windows: flat TinyCC internal headers -> include/
 if(DEFINED HEADERS_DIR)
-    collect_assets("${HEADERS_DIR}" "include" "*.h" TRUE unix_syms unix_relpaths)
+    collect_assets("${HEADERS_DIR}" "include" "*.h" TRUE "core" unix_syms unix_relpaths)
     list(APPEND all_syms ${unix_syms})
     list(APPEND all_relpaths ${unix_relpaths})
 endif()
 
 # Windows: recursive CRT + winapi headers -> include/
 if(DEFINED WIN32_INCLUDE_DIR)
-    collect_assets("${WIN32_INCLUDE_DIR}" "include" "*.h" TRUE win_inc_syms win_inc_relpaths)
+    collect_assets("${WIN32_INCLUDE_DIR}" "include" "*.h" TRUE "wininc" win_inc_syms win_inc_relpaths)
     list(APPEND all_syms ${win_inc_syms})
     list(APPEND all_relpaths ${win_inc_relpaths})
 endif()
 
 # Windows: import library .def files -> lib/
 if(DEFINED WIN32_LIB_DIR)
-    collect_assets("${WIN32_LIB_DIR}" "lib" "*.def" FALSE win_lib_syms win_lib_relpaths)
+    collect_assets("${WIN32_LIB_DIR}" "lib" "*.def" FALSE "winlib" win_lib_syms win_lib_relpaths)
     list(APPEND all_syms ${win_lib_syms})
     list(APPEND all_relpaths ${win_lib_relpaths})
 endif()

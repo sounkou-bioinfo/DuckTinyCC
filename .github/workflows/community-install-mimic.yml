@@ -1,0 +1,105 @@
+name: Community Install Mimic
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  macos-community-mimic:
+    name: macOS community-like install check
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build extension (release, pruned runtime dir)
+        shell: bash
+        run: |
+          make TARGET_DUCKDB_VERSION=v1.5.1 DUCKDB_HEADER_VERSION=v1.5.1 release_pruned
+
+      - name: Download DuckDB CLI v1.5.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          if [ "$arch" = "arm64" ]; then
+            asset="duckdb_cli-osx-arm64.zip"
+          else
+            asset="duckdb_cli-osx-amd64.zip"
+          fi
+          curl -L "https://github.com/duckdb/duckdb/releases/download/v1.5.1/${asset}" -o duckdb.zip
+          unzip -j duckdb.zip
+          chmod +x duckdb
+
+      - name: Run community-like unsigned load + quick_compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext_path="$PWD/build/release/ducktinycc.duckdb_extension"
+          if [ ! -f "$ext_path" ]; then
+            echo "missing extension artifact: $ext_path" >&2
+            exit 1
+          fi
+
+          sql="LOAD '${ext_path}'; FROM tcc_module(mode='quick_compile', source='int64_t community_ci_double(int64_t x){ return x * 2; }', sql_name='community_ci_double', signature='i64(i64)', symbol='community_ci_double'); SELECT community_ci_double(21) AS got;"
+
+          ./duckdb -unsigned -c "$sql" | tee /tmp/macos_community_mimic.log
+          grep -q "42" /tmp/macos_community_mimic.log
+
+  windows-rtools-community-mimic:
+    name: Windows UCRT (Rtools-like) community check
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2 UCRT toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            make
+            curl
+            unzip
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+
+      - name: Build extension (release, pruned runtime dir)
+        run: |
+          make \
+            TARGET_DUCKDB_VERSION=v1.5.1 \
+            DUCKDB_HEADER_VERSION=v1.5.1 \
+            PYTHON_BIN=python \
+            PYTHON_VENV_BIN=./configure/venv/bin/python \
+            release_pruned
+
+      - name: Download DuckDB CLI v1.5.1 (windows-amd64)
+        run: |
+          set -euo pipefail
+          curl -L "https://github.com/duckdb/duckdb/releases/download/v1.5.1/duckdb_cli-windows-amd64.zip" -o duckdb.zip
+          unzip -j duckdb.zip
+
+      - name: Run community-like unsigned load + quick_compile
+        run: |
+          set -euo pipefail
+          ext_path="$(cygpath -m "$PWD/build/release/ducktinycc.duckdb_extension")"
+          if [ ! -f "$PWD/build/release/ducktinycc.duckdb_extension" ]; then
+            echo "missing extension artifact" >&2
+            exit 1
+          fi
+
+          sql="LOAD '${ext_path}'; FROM tcc_module(mode='quick_compile', source='int64_t community_ci_double(int64_t x){ return x * 2; }', sql_name='community_ci_double', signature='i64(i64)', symbol='community_ci_double'); SELECT community_ci_double(21) AS got;"
+
+          ./duckdb.exe -unsigned -c "$sql" | tee /tmp/windows_community_mimic.log
+          grep -q "42" /tmp/windows_community_mimic.log
