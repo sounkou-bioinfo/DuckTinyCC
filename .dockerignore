@@ -1,0 +1,25 @@
+# .dockerignore — keeps the build context lean for Dockerfile.community-sim
+
+# Build artifacts (stale binaries would shadow the freshly compiled ones)
+build/
+cmake_build/
+
+# Python venv (rebuilt inside Docker from scratch)
+configure/venv/
+configure/__pycache__/
+
+# Git history (not needed in the image)
+.git/
+
+# Editor / IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS metadata
+.DS_Store
+
+# Test results / logs
+*.log
+duckdb_unittest_tempdir/
