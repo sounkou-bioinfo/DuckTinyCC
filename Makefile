@@ -1,4 +1,5 @@
-.PHONY: clean clean_all rdm test_embedded_debug test_embedded_release
+.PHONY: clean clean_all rdm test_embedded_debug test_embedded_release \
+	community_sim_build community_sim_run community_sim
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -36,6 +37,28 @@ test_embedded_debug: debug
 test_embedded_release: release
 	bash $(PROJ_DIR)scripts/test_embedded_runtime.sh release
 
+debug_recover:
+	@if [ ! -f "$(PROJ_DIR)cmake_build/debug/tinycc_build/libtcc.a" ]; then \
+		echo "Recovering debug build tree (tinycc_build missing)"; \
+		rm -rf "$(PROJ_DIR)cmake_build/debug"; \
+	fi
+	$(MAKE) debug
+
+debug_pruned:
+	$(MAKE) EXTRA_CMAKE_FLAGS="$(EXTRA_CMAKE_FLAGS) -DDUCKTINYCC_PRUNE_TINYCC_BUILD_DIR=1" debug
+
+release_pruned:
+	$(MAKE) EXTRA_CMAKE_FLAGS="$(EXTRA_CMAKE_FLAGS) -DDUCKTINYCC_PRUNE_TINYCC_BUILD_DIR=1" release
+
+community_sim_build:
+	bash $(PROJ_DIR)scripts/community_sim_build.sh
+
+community_sim_run:
+	bash $(PROJ_DIR)scripts/community_sim_run.sh
+
+community_sim: community_sim_build
+	bash $(PROJ_DIR)scripts/community_sim_run.sh
+
 # Override header fetch to use the actual DuckDB release version, not the C API version
 update_duckdb_headers_custom:
 	$(PYTHON_VENV_BIN) -c "import urllib.request;urllib.request.urlretrieve('https://raw.githubusercontent.com/duckdb/duckdb/$(DUCKDB_HEADER_VERSION)/src/include/duckdb.h', 'duckdb_capi/duckdb.h')"
@@ -44,5 +67,5 @@ update_duckdb_headers_custom:
 clean: clean_build clean_cmake
 clean_all: clean clean_configure
 
-rdm: debug
+rdm: debug_recover
 	R -e "rmarkdown::render('README.Rmd')"

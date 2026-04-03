@@ -900,7 +900,8 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
                                                  const char *sql_name, const char *return_type,
                                                  const char *arg_types_csv, const char *wrapper_mode_token,
                                                  tcc_wrapper_mode_t wrapper_mode, tcc_ffi_type_t ret_type,
-                                                 const tcc_ffi_type_t *arg_types, int arg_count);
+                                                 const tcc_ffi_type_t *arg_types, int arg_count,
+                                                 bool emit_extern_decl);
 static char *tcc_codegen_build_compilation_unit(const char *user_source, const char *wrapper_loader_source);
 
 /* RW-lock primitives used to guard shared module/session state during mode execution. */
@@ -2106,7 +2107,7 @@ static bool tcc_path_exists(const char *path) {
  *
  * The extracted layout mirrors what tcc_configure_runtime_paths() expects:
  *   {dir}/libtcc1.a      -- the TinyCC relocatable helper archive
- *   {dir}/include/*.h    -- TinyCC's own stdarg.h, stddef.h, tccdefs.h, etc.
+ *   {dir}/include/       -- TinyCC's own headers (stdarg.h, stddef.h, tccdefs.h, etc.)
  *
  * TinyCC's {B}/include sysinclude expansion (CONFIG_TCC_SYSINCLUDEPATHS) is satisfied
  * when tcc_set_lib_path(s, dir) is called, because {B} expands to tcc_lib_path which
@@ -2154,15 +2155,113 @@ static bool tcc_write_file_bytes(const char *path, const unsigned char *data, si
 	return ok != 0;
 }
 
-/* tcc_ensure_embedded_runtime: Extracts the embedded libtcc1.a and TinyCC include headers
+/* tcc_mkdirs_for_relpath: Creates all intermediate directories under base_dir that are
+ * implied by the forward-slash relpath (e.g. relpath="include/winapi/windows.h" creates
+ * base_dir/include/ then base_dir/include/winapi/).  Individual mkdir failures are
+ * silently ignored (EEXIST is expected on the reuse path).  Win32 accepts forward
+ * slashes in path operations, so we use them uniformly here. */
+static void tcc_mkdirs_for_relpath(const char *base_dir, const char *relpath) {
+	char rel[512];
+	char path[1400];
+	char *p;
+	size_t base_len;
+	bool base_has_sep;
+	size_t prefix_len;
+	strncpy(rel, relpath, sizeof(rel) - 1);
+	rel[sizeof(rel) - 1] = '\0';
+	base_len = strlen(base_dir);
+	base_has_sep = base_len > 0 && (base_dir[base_len - 1] == '/' || base_dir[base_len - 1] == '\\');
+	prefix_len = base_len + (base_has_sep ? 0 : 1);
+	if (prefix_len + 1 >= sizeof(path)) {
+		return;
+	}
+	memcpy(path, base_dir, base_len);
+	if (!base_has_sep) {
+		path[base_len] = '/';
+	}
+	p = rel;
+	while ((p = strchr(p, '/')) != NULL) {
+		size_t rel_len;
+		*p = '\0'; /* temporarily null-terminate at this slash */
+		rel_len = strlen(rel);
+		if (prefix_len + rel_len + 1 < sizeof(path)) {
+			memcpy(path + prefix_len, rel, rel_len);
+			path[prefix_len + rel_len] = '\0';
+			(void)TCC_MKDIR(path); /* ignore result; EEXIST is normal on reuse */
+		}
+		*p = '/';              /* restore */
+		p++;
+	}
+}
+
+#ifdef _WIN32
+/* tcc_generate_ucrt_msvcrt_def: Best-effort generation of UCRT-correct msvcrt.def.
+ *
+ * Why: TinyCC on PE links against "c" by resolving msvcrt.def from {B}/lib first.
+ * The static msvcrt.def shipped in upstream TinyCC targets legacy MSVCRT and can
+ * cause allocator mismatch when the host process is UCRT (Rtools 4.2+ / UCRT64).
+ *
+ * Strategy: if a `tcc.exe` is available (next to runtime dir or on PATH), run:
+ *   tcc.exe -impdef <SystemRoot>\System32\ucrtbase.dll -o <runtime>/lib/msvcrt.def
+ *
+ * This mirrors the proven Rtinycc approach and avoids direct linkage to internal
+ * TinyCC tcctools symbols (which are not guaranteed to be exported in libtcc.a).
+ *
+ * Non-fatal: if generation fails we keep whatever msvcrt.def is present.
+ */
+static bool tcc_generate_ucrt_msvcrt_def(const char *runtime_dir) {
+	char tcc_exe[900];
+	char dll_path[768];
+	char out_def[900];
+	char cmd[2600];
+	const char *system_root;
+	int rc;
+
+	if (!runtime_dir || runtime_dir[0] == '\0') {
+		return false;
+	}
+
+	/* Prefer runtime-local tcc.exe, then PATH fallback. */
+	snprintf(tcc_exe, sizeof(tcc_exe), "%s/tcc.exe", runtime_dir);
+	if (!tcc_path_exists(tcc_exe)) {
+		snprintf(tcc_exe, sizeof(tcc_exe), "%s/bin/tcc.exe", runtime_dir);
+		if (!tcc_path_exists(tcc_exe)) {
+			snprintf(tcc_exe, sizeof(tcc_exe), "tcc.exe");
+		}
+	}
+
+	system_root = getenv("SystemRoot");
+	if (system_root && system_root[0] != '\0') {
+		snprintf(dll_path, sizeof(dll_path), "%s\\System32\\ucrtbase.dll", system_root);
+	} else {
+		snprintf(dll_path, sizeof(dll_path), "C:\\Windows\\System32\\ucrtbase.dll");
+	}
+	if (!tcc_path_exists(dll_path)) {
+		return false;
+	}
+
+	tcc_mkdirs_for_relpath(runtime_dir, "lib/msvcrt.def");
+	snprintf(out_def, sizeof(out_def), "%s/lib/msvcrt.def", runtime_dir);
+
+	snprintf(cmd, sizeof(cmd), "\"%s\" -impdef \"%s\" -o \"%s\"", tcc_exe, dll_path, out_def);
+	rc = system(cmd);
+
+	return rc == 0 && tcc_path_exists(out_def);
+}
+#endif
+
+/* tcc_ensure_embedded_runtime: Extracts the embedded libtcc1.a and TinyCC runtime assets
  * to a temp directory on first call.  Returns a stable pointer to the directory path string,
  * or NULL if extraction failed (extension will still attempt to use the compile-time path).
- * Thread-safe via atomic spinlock; content-hash-keyed directory allows cross-process reuse. */
+ * Thread-safe via atomic spinlock; content-hash-keyed directory allows cross-process reuse.
+ *
+ * Manifest entry name fields are forward-slash relpaths from the extraction root,
+ * e.g. "include/stdarg.h", "include/winapi/windows.h", "lib/kernel32.def".
+ * Intermediate directories are created on demand by tcc_mkdirs_for_relpath(). */
 static const char *tcc_ensure_embedded_runtime(void) {
 	char tmp_base[512];
 	char dir_path[768];
-	char include_dir[800]; /* dir_path + "/include" (8 chars) */
-	char libtcc1_path[800]; /* dir_path + "/libtcc1.a" (10 chars) */
+	char libtcc1_path[800]; /* dir_path + "/libtcc1.a" */
 	unsigned int hash;
 	size_t i;
 	const char *tmpdir;
@@ -2197,18 +2296,16 @@ static const char *tcc_ensure_embedded_runtime(void) {
 	hash = tcc_fnv1a_hash(ducktinycc_embedded_libtcc1, ducktinycc_embedded_libtcc1_size);
 #ifdef _WIN32
 	snprintf(dir_path, sizeof(dir_path), "%s\\ducktinycc_%08x", tmp_base, hash);
-	snprintf(include_dir, sizeof(include_dir), "%s\\include", dir_path);
 	snprintf(libtcc1_path, sizeof(libtcc1_path), "%s\\libtcc1.a", dir_path);
 #else
 	snprintf(dir_path, sizeof(dir_path), "%s/ducktinycc_%08x", tmp_base, hash);
-	snprintf(include_dir, sizeof(include_dir), "%s/include", dir_path);
 	snprintf(libtcc1_path, sizeof(libtcc1_path), "%s/libtcc1.a", dir_path);
 #endif
 
-	/* If libtcc1.a already present with correct size, the dir is valid; reuse it. */
+	/* If libtcc1.a already present, the dir is valid; reuse it. */
 	if (!tcc_path_exists(libtcc1_path)) {
-		/* Create extraction dir and include/ subdir. */
-		if (!TCC_MKDIR(dir_path) || !TCC_MKDIR(include_dir)) {
+		/* Create root extraction dir. */
+		if (!TCC_MKDIR(dir_path)) {
 			g_embedded_runtime_extracted = true;
 			atomic_flag_clear_explicit(&g_embedded_runtime_lock, memory_order_release);
 			return NULL;
@@ -2221,23 +2318,29 @@ static const char *tcc_ensure_embedded_runtime(void) {
 			atomic_flag_clear_explicit(&g_embedded_runtime_lock, memory_order_release);
 			return NULL;
 		}
-		/* Write each embedded TinyCC header into include/. */
+		/* Write each embedded asset.
+		 * entry.name is a forward-slash relpath from the extraction root, e.g.
+		 *   "include/stdarg.h"           (non-Windows TinyCC internal headers)
+		 *   "include/winapi/windows.h"   (Windows API headers)
+		 *   "lib/kernel32.def"           (Windows import library definitions)
+		 * tcc_mkdirs_for_relpath creates any needed intermediate directories. */
 		for (i = 0; i < ducktinycc_embedded_headers_count; i++) {
-			char hdr_path[900];
-#ifdef _WIN32
-			snprintf(hdr_path, sizeof(hdr_path), "%s\\%s",
-			         include_dir, ducktinycc_embedded_headers[i].name);
-#else
-			snprintf(hdr_path, sizeof(hdr_path), "%s/%s",
-			         include_dir, ducktinycc_embedded_headers[i].name);
-#endif
-			/* Non-fatal: if a header fails to write, continue; TinyCC may fall
+			char asset_path[900];
+			tcc_mkdirs_for_relpath(dir_path, ducktinycc_embedded_headers[i].name);
+			snprintf(asset_path, sizeof(asset_path), "%s/%s",
+			         dir_path, ducktinycc_embedded_headers[i].name);
+			/* Non-fatal: if an asset fails to write, continue; TinyCC may fall
 			 * back to a system copy.  libtcc1.a is the critical artifact. */
-			(void)tcc_write_file_bytes(hdr_path,
+			(void)tcc_write_file_bytes(asset_path,
 			                           ducktinycc_embedded_headers[i].data,
 			                           ducktinycc_embedded_headers[i].size);
 		}
 	}
+
+#ifdef _WIN32
+	/* Keep CRT import definition aligned with local UCRT runtime. */
+	(void)tcc_generate_ucrt_msvcrt_def(dir_path);
+#endif
 
 	strncpy(g_embedded_runtime_dir, dir_path, sizeof(g_embedded_runtime_dir) - 1);
 	g_embedded_runtime_dir[sizeof(g_embedded_runtime_dir) - 1] = '\0';
@@ -3256,15 +3359,15 @@ static bool tcc_ffi_array_type_from_child(tcc_ffi_type_t child_type, tcc_ffi_typ
 
 #define TCC_FFI_SCALAR_ROWS(X)                                                                                               \
 	X(TCC_FFI_BOOL, "bool", "_Bool", DUCKDB_TYPE_BOOLEAN, 1)                                                                \
-	X(TCC_FFI_I8, "i8", "signed char", DUCKDB_TYPE_TINYINT, 1)                                                              \
-	X(TCC_FFI_U8, "u8", "unsigned char", DUCKDB_TYPE_UTINYINT, 1)                                                           \
-	X(TCC_FFI_I16, "i16", "short", DUCKDB_TYPE_SMALLINT, 2)                                                                 \
-	X(TCC_FFI_U16, "u16", "unsigned short", DUCKDB_TYPE_USMALLINT, 2)                                                       \
-	X(TCC_FFI_I32, "i32", "int", DUCKDB_TYPE_INTEGER, 4)                                                                     \
-	X(TCC_FFI_U32, "u32", "unsigned int", DUCKDB_TYPE_UINTEGER, 4)                                                          \
-	X(TCC_FFI_I64, "i64", "long long", DUCKDB_TYPE_BIGINT, 8)                                                               \
-	X(TCC_FFI_U64, "u64", "unsigned long long", DUCKDB_TYPE_UBIGINT, 8)                                                     \
-	X(TCC_FFI_F32, "f32", "float", DUCKDB_TYPE_FLOAT, 4)                                                                     \
+	X(TCC_FFI_I8, "i8", "int8_t", DUCKDB_TYPE_TINYINT, 1)                                                                   \
+	X(TCC_FFI_U8, "u8", "uint8_t", DUCKDB_TYPE_UTINYINT, 1)                                                                 \
+	X(TCC_FFI_I16, "i16", "int16_t", DUCKDB_TYPE_SMALLINT, 2)                                                               \
+	X(TCC_FFI_U16, "u16", "uint16_t", DUCKDB_TYPE_USMALLINT, 2)                                                             \
+	X(TCC_FFI_I32, "i32", "int32_t", DUCKDB_TYPE_INTEGER, 4)                                                                \
+	X(TCC_FFI_U32, "u32", "uint32_t", DUCKDB_TYPE_UINTEGER, 4)                                                              \
+	X(TCC_FFI_I64, "i64", "int64_t", DUCKDB_TYPE_BIGINT, 8)                                                                 \
+	X(TCC_FFI_U64, "u64", "uint64_t", DUCKDB_TYPE_UBIGINT, 8)                                                               \
+	X(TCC_FFI_F32, "f32", "float", DUCKDB_TYPE_FLOAT, 4)                                                                    \
 	X(TCC_FFI_F64, "f64", "double", DUCKDB_TYPE_DOUBLE, 8)
 
 /* tcc_ffi_type_size: Type-system conversion/parsing helper. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
@@ -6265,7 +6368,24 @@ static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_
 		tcc_set_error(error_buf, "tcc_new failed");
 		return -1;
 	}
+	/* Set lib_path BEFORE tcc_set_output_type: tcc_set_output_type eagerly
+	 * expands {B} in CONFIG_TCC_SYSINCLUDEPATHS via tcc_split_path().  If we
+	 * wait until tcc_configure_runtime_paths (called after set_output_type),
+	 * {B} resolves to CONFIG_TCCDIR (the TinyCC install dir used at build
+	 * time, which does not exist on end-user machines) instead of our
+	 * embedded-runtime extraction directory. */
+	if (runtime_path && runtime_path[0] != '\0') {
+		tcc_set_lib_path(s, runtime_path);
+	}
 	tcc_set_error_func(s, error_buf, tcc_append_error);
+	/* Use -nostdlib so TinyCC does not attempt to locate and link libc.so at
+	 * relocation time.  In TCC_OUTPUT_MEMORY mode all undefined symbols are
+	 * resolved from the host process via dlsym(RTLD_DEFAULT, ...), so the
+	 * shared-library file is never needed.  Without this flag, compiling on a
+	 * machine that has no C development files installed (e.g. a bare Ubuntu
+	 * runtime with no libc6-dev) would produce "library 'c' not found" even
+	 * for code that uses no libc functions at all. */
+	tcc_set_options(s, "-nostdlib");
 	if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) != 0) {
 		tcc_set_error(error_buf, "tcc_set_output_type failed");
 		tcc_delete(s);
@@ -8021,7 +8141,14 @@ static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_mod
 	                                        bind->arg_types ? bind->arg_types : "",
 	                                        ctx->signature.wrapper_mode_token, ctx->signature.wrapper_mode,
 	                                        ctx->signature.return_type, ctx->signature.arg_types,
-	                                        ctx->signature.arg_count);
+	                                        ctx->signature.arg_count,
+	                                        /* emit_extern_decl: only when user source is NOT bundled in the
+	                                         * compilation unit.  When user_source is present, the definition
+	                                         * already provides the prototype; emitting an extern with our
+	                                         * stdint.h-derived type (e.g. int64_t) would conflict with user
+	                                         * code that uses a raw primitive (e.g. long long) for the same
+	                                         * 64-bit type, because on LP64 Linux int64_t == long != long long. */
+	                                        !(bind->source && bind->source[0] != '\0'));
 	if (!ctx->wrapper_loader_source) {
 		tcc_set_error(error_buf, "failed to generate codegen wrapper");
 		return false;
@@ -8200,7 +8327,8 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
                                                  const char *sql_name, const char *return_type,
                                                  const char *arg_types_csv, const char *wrapper_mode_token,
                                                  tcc_wrapper_mode_t wrapper_mode, tcc_ffi_type_t ret_type,
-                                                 const tcc_ffi_type_t *arg_types, int arg_count) {
+                                                 const tcc_ffi_type_t *arg_types, int arg_count,
+                                                 bool emit_extern_decl) {
 	tcc_text_buf_t args_decl = {0};
 	tcc_text_buf_t row_unpack_lines = {0};
 	tcc_text_buf_t row_call_args = {0};
@@ -8276,11 +8404,25 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		    "#include <stdint.h>\n"
 		    "typedef struct _duckdb_connection *duckdb_connection;\n"
 		    "extern _Bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr, "
-		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n"
-		    "extern %s %s(%s);\n"
-		    "static _Bool %s(void **args, void *out_value, _Bool *out_is_null) {\n%s",
-		    ret_c_type, target_symbol, args_decl.data ? args_decl.data : "", wrapper_name,
-		    row_unpack_lines.data ? row_unpack_lines.data : "");
+		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n");
+		/* Emit an extern forward declaration of the user function only when the user source
+		 * is NOT bundled in the same compilation unit (i.e. the function is defined via a
+		 * separate session source or symbol injection).  When user source IS present in the
+		 * compilation unit it already provides the prototype; emitting an extern with our
+		 * stdint.h-derived type (e.g. int64_t) would conflict if the user wrote a raw
+		 * primitive (e.g. long long) — which on LP64 Linux resolves to a different type. */
+		if (ok && emit_extern_decl) {
+			ok = tcc_text_buf_appendf(&src, "extern %s %s(%s);\n",
+			                          ret_c_type, target_symbol,
+			                          args_decl.data ? args_decl.data : "");
+		}
+		if (ok) {
+			ok = tcc_text_buf_appendf(
+			    &src,
+			    "static _Bool %s(void **args, void *out_value, _Bool *out_is_null) {\n%s",
+			    wrapper_name,
+			    row_unpack_lines.data ? row_unpack_lines.data : "");
+		}
 		if (ok && ret_type == TCC_FFI_VOID) {
 			ok = tcc_text_buf_appendf(&src,
 			                          "  %s(%s);\n"
@@ -8327,12 +8469,20 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		    "#include <stdint.h>\n"
 		    "typedef struct _duckdb_connection *duckdb_connection;\n"
 		    "extern _Bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr, "
-		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n"
-		    "extern %s %s(%s);\n"
-		    "static _Bool %s(void **arg_data, uint64_t **arg_validity, uint64_t count, void *out_data, uint64_t "
-		    "*out_validity) {\n%s",
-		    ret_c_type, target_symbol, args_decl.data ? args_decl.data : "", wrapper_name,
-		    batch_col_decls.data ? batch_col_decls.data : "");
+		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n");
+		if (ok && emit_extern_decl) {
+			ok = tcc_text_buf_appendf(&src, "extern %s %s(%s);\n",
+			                          ret_c_type, target_symbol,
+			                          args_decl.data ? args_decl.data : "");
+		}
+		if (ok) {
+			ok = tcc_text_buf_appendf(
+			    &src,
+			    "static _Bool %s(void **arg_data, uint64_t **arg_validity, uint64_t count, void *out_data, uint64_t "
+			    "*out_validity) {\n%s",
+			    wrapper_name,
+			    batch_col_decls.data ? batch_col_decls.data : "");
+		}
 		if (ok && ret_type == TCC_FFI_VOID) {
 			ok = tcc_text_buf_appendf(&src, "  (void)out_data;\n");
 		} else if (ok && ret_type == TCC_FFI_PTR) {
