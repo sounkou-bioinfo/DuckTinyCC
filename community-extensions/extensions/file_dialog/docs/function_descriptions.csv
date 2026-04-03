@@ -1,2 +1,0 @@
-function,description,comment,example
-"choose_file","Choose a file via native file dialog","","FROM read_csv(choose_file());"
