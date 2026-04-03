@@ -2162,15 +2162,33 @@ static bool tcc_write_file_bytes(const char *path, const unsigned char *data, si
  * slashes in path operations, so we use them uniformly here. */
 static void tcc_mkdirs_for_relpath(const char *base_dir, const char *relpath) {
 	char rel[512];
-	char path[1024];
+	char path[1400];
 	char *p;
+	size_t base_len;
+	bool base_has_sep;
+	size_t prefix_len;
 	strncpy(rel, relpath, sizeof(rel) - 1);
 	rel[sizeof(rel) - 1] = '\0';
+	base_len = strlen(base_dir);
+	base_has_sep = base_len > 0 && (base_dir[base_len - 1] == '/' || base_dir[base_len - 1] == '\\');
+	prefix_len = base_len + (base_has_sep ? 0 : 1);
+	if (prefix_len + 1 >= sizeof(path)) {
+		return;
+	}
+	memcpy(path, base_dir, base_len);
+	if (!base_has_sep) {
+		path[base_len] = '/';
+	}
 	p = rel;
 	while ((p = strchr(p, '/')) != NULL) {
+		size_t rel_len;
 		*p = '\0'; /* temporarily null-terminate at this slash */
-		snprintf(path, sizeof(path), "%s/%s", base_dir, rel);
-		(void)TCC_MKDIR(path); /* ignore result; EEXIST is normal on reuse */
+		rel_len = strlen(rel);
+		if (prefix_len + rel_len + 1 < sizeof(path)) {
+			memcpy(path + prefix_len, rel, rel_len);
+			path[prefix_len + rel_len] = '\0';
+			(void)TCC_MKDIR(path); /* ignore result; EEXIST is normal on reuse */
+		}
 		*p = '/';              /* restore */
 		p++;
 	}

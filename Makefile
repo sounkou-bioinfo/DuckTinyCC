@@ -37,6 +37,13 @@ test_embedded_debug: debug
 test_embedded_release: release
 	bash $(PROJ_DIR)scripts/test_embedded_runtime.sh release
 
+debug_recover:
+	@if [ ! -f "$(PROJ_DIR)cmake_build/debug/tinycc_build/libtcc.a" ]; then \
+		echo "Recovering debug build tree (tinycc_build missing)"; \
+		rm -rf "$(PROJ_DIR)cmake_build/debug"; \
+	fi
+	$(MAKE) debug
+
 debug_pruned:
 	$(MAKE) EXTRA_CMAKE_FLAGS="$(EXTRA_CMAKE_FLAGS) -DDUCKTINYCC_PRUNE_TINYCC_BUILD_DIR=1" debug
 
@@ -60,5 +67,5 @@ update_duckdb_headers_custom:
 clean: clean_build clean_cmake
 clean_all: clean clean_configure
 
-rdm: debug
+rdm: debug_recover
 	R -e "rmarkdown::render('README.Rmd')"
