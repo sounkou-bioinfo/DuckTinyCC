@@ -1,5 +1,9 @@
 # DuckTinyCC Extension News
 
+## ducktinycc 0.1.0.9000 (2026-04-06)
+
+- **bugfix (embedded runtime extraction)**: `tcc_ensure_embedded_runtime` now hashes both `libtcc1.a` and all embedded manifest files (names and contents) when generating the deterministic extraction directory name. Previously, only `libtcc1.a` was hashed, which caused the extension to incorrectly reuse an older, incomplete extraction directory (missing `stdint.h`) after a user upgraded the extension via the community repository.
+
 ## ducktinycc 0.1.0 (2026-04-02)
 
 - **bugfix (community extension / no system headers)**: `compile`/`quick_compile` now work correctly on systems without development headers (e.g. no `libc6-dev`/`glibc-devel`). Four compounding bugs caused `E_COMPILE_FAILED` for end-users who installed from the community extension repository:
