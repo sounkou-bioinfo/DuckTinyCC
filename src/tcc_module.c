@@ -2133,8 +2133,7 @@ static atomic_flag g_embedded_runtime_lock = ATOMIC_FLAG_INIT;
 static bool g_embedded_runtime_extracted = false;
 
 /* FNV-1a 32-bit hash for naming the extraction directory. */
-static unsigned int tcc_fnv1a_hash(const unsigned char *data, size_t len) {
-	unsigned int hash = 2166136261u;
+static unsigned int tcc_fnv1a_hash(unsigned int hash, const unsigned char *data, size_t len) {
 	size_t i;
 	for (i = 0; i < len; i++) {
 		hash ^= (unsigned int)data[i];
@@ -2292,8 +2291,12 @@ static const char *tcc_ensure_embedded_runtime(void) {
 	strncpy(tmp_base, tmpdir, sizeof(tmp_base) - 1);
 	tmp_base[sizeof(tmp_base) - 1] = '\0';
 
-	/* Hash libtcc1.a content to produce a stable, unique directory name. */
-	hash = tcc_fnv1a_hash(ducktinycc_embedded_libtcc1, ducktinycc_embedded_libtcc1_size);
+	/* Hash libtcc1.a and embedded assets to produce a stable, unique directory name. */
+	hash = tcc_fnv1a_hash(2166136261u, ducktinycc_embedded_libtcc1, ducktinycc_embedded_libtcc1_size);
+	for (i = 0; i < ducktinycc_embedded_headers_count; i++) {
+		hash = tcc_fnv1a_hash(hash, (const unsigned char *)ducktinycc_embedded_headers[i].name, strlen(ducktinycc_embedded_headers[i].name));
+		hash = tcc_fnv1a_hash(hash, ducktinycc_embedded_headers[i].data, ducktinycc_embedded_headers[i].size);
+	}
 #ifdef _WIN32
 	snprintf(dir_path, sizeof(dir_path), "%s\\ducktinycc_%08x", tmp_base, hash);
 	snprintf(libtcc1_path, sizeof(libtcc1_path), "%s\\libtcc1.a", dir_path);
