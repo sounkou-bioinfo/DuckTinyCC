@@ -347,7 +347,7 @@ To make the plot appear directly in the DuckDB CLI, run the embedded-R CLI varia
 ./demo/ggplot2_cli_demo.sh build/release/ducktinycc.duckdb_extension
 ```
 
-For a jgd JSON graphics device demo, install the `jgd` R package and run the capture-server variant. DuckDB calls a DuckTinyCC-compiled embedded-R UDF, that UDF opens `jgd::jgd(socket = ...)`, and the included Python server captures the streamed JSONL frame protocol.
+For a jgd JSON graphics device demo, install the `jgd` R package and run the terminal-server variant. DuckDB calls a DuckTinyCC-compiled embedded-R UDF, that UDF opens `jgd::jgd(socket = ...)`, and the included all-C demo server implements the minimal jgd JSONL handshake/metrics path and renders the streamed drawing operations back to an ANSI-colored terminal canvas.
 
 ```sh
 # one-time if needed, after cloning https://github.com/grantmcdermott/jgd

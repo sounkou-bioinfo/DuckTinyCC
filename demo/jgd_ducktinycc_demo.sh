@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 EXT_PATH="${1:-$ROOT_DIR/build/release/ducktinycc.duckdb_extension}"
 DUCKDB_BIN="${DUCKDB_BIN:-duckdb}"
 PORT="${JGD_PORT:-$((20000 + RANDOM % 20000))}"
-CAPTURE_JSON="${JGD_CAPTURE_JSON:-$(mktemp /tmp/ducktinycc_jgd_capture.XXXXXX.json)}"
 SERVER_LOG="${JGD_SERVER_LOG:-$(mktemp /tmp/ducktinycc_jgd_server.XXXXXX.log)}"
+SERVER_BIN="${JGD_SERVER_BIN:-$(mktemp /tmp/ducktinycc_jgd_terminal_server.XXXXXX)}"
 
 if ! command -v R >/dev/null 2>&1; then
   echo "R is required for this demo" >&2
@@ -22,11 +22,15 @@ if [[ ! -f "$EXT_PATH" ]]; then
   exit 2
 fi
 
-python3 "$ROOT_DIR/demo/jgd_capture_server.py" "$PORT" "$CAPTURE_JSON" >"$SERVER_LOG" 2>&1 &
+cc -std=c11 -O2 -Wall -Wextra -o "$SERVER_BIN" "$ROOT_DIR/demo/jgd_terminal_server.c" -lm
+"$SERVER_BIN" "$PORT" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 cleanup() {
   if kill -0 "$SERVER_PID" >/dev/null 2>&1; then
     kill "$SERVER_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ "${JGD_KEEP_SERVER_BIN:-0}" != "1" ]]; then
+    rm -f "$SERVER_BIN"
   fi
 }
 trap cleanup EXIT
@@ -38,7 +42,7 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 if ! grep -q '^ready ' "$SERVER_LOG"; then
-  echo "jgd capture server did not start" >&2
+  echo "jgd terminal server did not start" >&2
   cat "$SERVER_LOG" >&2 || true
   exit 1
 fi
@@ -50,7 +54,7 @@ SOURCE_SQL="$(sed "s/'/''/g" "$ROOT_DIR/demo/jgd_ducktinycc_udf.c")"
 SOCKET_URI="tcp://127.0.0.1:${PORT}"
 
 echo "DuckTinyCC + jgd demo"
-echo "capture server: ${SOCKET_URI}"
+echo "terminal server: ${SOCKET_URI}"
 echo
 
 "$DUCKDB_BIN" -unsigned <<SQL
@@ -75,30 +79,8 @@ wait "$SERVER_PID" || true
 trap - EXIT
 
 echo
-echo "captured jgd protocol: ${CAPTURE_JSON}"
-python3 - "$CAPTURE_JSON" <<'PY'
-import collections
-import json
-import sys
-path = sys.argv[1]
-with open(path, encoding='utf-8') as fp:
-    data = json.load(fp)
-messages = data.get('messages', [])
-frames = data.get('frames', [])
-print(f"messages: {len(messages)}")
-print(f"frames:   {len(frames)}")
-if frames:
-    frame_ops = [frame.get('plot', {}).get('ops', []) for frame in frames]
-    all_ops = [op for ops in frame_ops for op in ops]
-    counts = collections.Counter(op.get('op', '<missing>') for op in all_ops)
-    print(f"plotNumber(s): {sorted({frame.get('plotNumber') for frame in frames})}")
-    print(f"frame operations: {', '.join(str(len(ops)) for ops in frame_ops)}")
-    print(f"total operations: {len(all_ops)}")
-    print("operation histogram:")
-    for name, count in counts.most_common():
-        print(f"  {name:12s} {count}")
-    print("first drawing ops:")
-    for op in all_ops[:8]:
-        small = {k: op[k] for k in op if k in ('op', 'x', 'y', 'x0', 'y0', 'x1', 'y1', 'r', 'text')}
-        print("  " + json.dumps(small, ensure_ascii=False))
-PY
+cat "$SERVER_LOG"
+rm -f "$SERVER_LOG"
+if [[ "${JGD_KEEP_SERVER_BIN:-0}" != "1" ]]; then
+  rm -f "$SERVER_BIN"
+fi

@@ -9,7 +9,7 @@
  *
  * SQL calls this as r_jgd_plot('tcp://127.0.0.1:<port>'). The jgd R package
  * streams JSON graphics operations to the server at that socket. The demo
- * capture server in demo/jgd_capture_server.py records those messages.
+ * terminal server in demo/jgd_terminal_server.c records and renders them.
  */
 const char *r_jgd_plot(const char *socket_uri) {
     static int r_initialized = 0;
