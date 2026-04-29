@@ -347,6 +347,28 @@ To make the plot appear directly in the DuckDB CLI, run the embedded-R CLI varia
 ./demo/ggplot2_cli_demo.sh build/release/ducktinycc.duckdb_extension
 ```
 
+The README renders the demo output below. The R chunk runs the same shell command and converts ANSI SGR color escapes to HTML so the terminal plot remains colored in rendered documentation.
+
+```{r ggplot2-cli-demo, echo=FALSE, results='asis'}
+if (requireNamespace("fansi", quietly = TRUE) &&
+    requireNamespace("ggplot2", quietly = TRUE) &&
+    file.exists("build/release/ducktinycc.duckdb_extension")) {
+  out <- system2("bash", c("demo/ggplot2_cli_demo.sh", "build/release/ducktinycc.duckdb_extension"),
+                 stdout = TRUE, stderr = TRUE)
+  html <- fansi::sgr_to_html(out)
+  html <- sub("[[:space:]]+$", "", html)
+  # Drop blank terminal lines; Pandoc otherwise encodes them as visible &#10; in raw HTML blocks.
+  html <- html[nzchar(html)]
+  cat("<pre><code>")
+  cat(paste(html, collapse = "\n"))
+  cat("</code></pre>\n")
+} else {
+  cat("```\n")
+  cat("Skipping rendered ggplot2 CLI output: requires fansi, ggplot2, and build/release/ducktinycc.duckdb_extension.\n")
+  cat("```\n")
+}
+```
+
 ### Embedded R Demo (Unix-like)
 
 The embedded R demo is still part of the repository. We keep it as an advanced interop example rather than a default workflow. The full source is inlined below and compiled through `tcc_module(...)`.
@@ -406,6 +428,16 @@ PRAGMA threads=1;
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'tcc_new_state'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_include',
+  include_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_sysinclude',
+  sysinclude_path := 'third_party/tinycc/include'
 );
 SELECT ok, mode, code
 FROM tcc_module(
