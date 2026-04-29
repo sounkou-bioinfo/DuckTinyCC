@@ -347,24 +347,81 @@ To make the plot appear directly in the DuckDB CLI, run the embedded-R CLI varia
 ./demo/ggplot2_cli_demo.sh build/release/ducktinycc.duckdb_extension
 ```
 
-The README renders the demo output below. The R chunk runs the same shell command and converts ANSI SGR color escapes to HTML so the terminal plot remains colored in rendered documentation.
+The README renders the demo output below. GitHub strips inline HTML/CSS colors from README markdown, so the R chunk runs the same shell command and converts the ANSI SGR terminal output into an SVG image.
 
 ```{r ggplot2-cli-demo, echo=FALSE, results='asis'}
-if (requireNamespace("fansi", quietly = TRUE) &&
-    requireNamespace("ggplot2", quietly = TRUE) &&
+ansi_to_svg <- function(lines, path) {
+  esc <- intToUtf8(27L)
+  strip_ansi <- function(x) gsub(paste0(esc, "\\[[0-9;]*m"), "", x, perl = TRUE)
+  xml_escape <- function(x) {
+    x <- gsub("&", "&amp;", x, fixed = TRUE)
+    x <- gsub("<", "&lt;", x, fixed = TRUE)
+    x <- gsub(">", "&gt;", x, fixed = TRUE)
+    x <- gsub('"', "&quot;", x, fixed = TRUE)
+    x
+  }
+  span_line <- function(x) {
+    pattern <- paste0(esc, "\\[([0-9;]*)m")
+    m <- gregexpr(pattern, x, perl = TRUE)[[1]]
+    if (m[1] < 0) {
+      return(sprintf("<tspan fill='#f8f8f2'>%s</tspan>", xml_escape(x)))
+    }
+    starts <- as.integer(m)
+    lens <- attr(m, "match.length")
+    caps <- regmatches(x, gregexpr(pattern, x, perl = TRUE))[[1]]
+    color <- "#f8f8f2"
+    pos <- 1L
+    out <- character()
+    for (i in seq_along(starts)) {
+      if (starts[i] > pos) {
+        txt <- substr(x, pos, starts[i] - 1L)
+        if (nzchar(txt)) out <- c(out, sprintf("<tspan fill='%s'>%s</tspan>", color, xml_escape(txt)))
+      }
+      code <- sub(pattern, "\\1", caps[i], perl = TRUE)
+      nums <- strsplit(code, ";", fixed = TRUE)[[1]]
+      if (identical(code, "0") || code == "") {
+        color <- "#f8f8f2"
+      } else if (length(nums) >= 5 && nums[1] == "38" && nums[2] == "2") {
+        color <- sprintf("#%02X%02X%02X", as.integer(nums[3]), as.integer(nums[4]), as.integer(nums[5]))
+      }
+      pos <- starts[i] + lens[i]
+    }
+    if (pos <= nchar(x, type = "bytes")) {
+      txt <- substring(x, pos)
+      if (nzchar(txt)) out <- c(out, sprintf("<tspan fill='%s'>%s</tspan>", color, xml_escape(txt)))
+    }
+    paste(out, collapse = "")
+  }
+  visible <- strip_ansi(lines)
+  char_width <- 8.2
+  line_height <- 16
+  font_size <- 13
+  width <- max(760, ceiling(max(nchar(visible, type = "width"), 1) * char_width + 24))
+  height <- length(lines) * line_height + 24
+  y <- 22 + seq_along(lines) * line_height - line_height
+  svg <- c(
+    sprintf("<svg xmlns='http://www.w3.org/2000/svg' width='%d' height='%d' viewBox='0 0 %d %d'>", width, height, width, height),
+    "<rect width='100%' height='100%' rx='8' fill='#1e1e1e'/>",
+    sprintf("<style>text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:%dpx;white-space:pre;}</style>", font_size),
+    sprintf("<text x='12' y='%d'>%s</text>", y, vapply(lines, span_line, character(1))),
+    "</svg>"
+  )
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  writeLines(svg, path, useBytes = TRUE)
+}
+
+if (requireNamespace("ggplot2", quietly = TRUE) &&
     file.exists("build/release/ducktinycc.duckdb_extension")) {
   out <- system2("bash", c("demo/ggplot2_cli_demo.sh", "build/release/ducktinycc.duckdb_extension"),
                  stdout = TRUE, stderr = TRUE)
-  html <- fansi::sgr_to_html(out)
-  html <- sub("[[:space:]]+$", "", html)
-  # Drop blank terminal lines; Pandoc otherwise encodes them as visible &#10; in raw HTML blocks.
-  html <- html[nzchar(html)]
-  cat("<pre><code>")
-  cat(paste(html, collapse = "\n"))
-  cat("</code></pre>\n")
+  out <- sub("[[:space:]]+$", "", out)
+  out <- out[nzchar(out)]
+  svg_path <- "man/figures/README-ggplot2-cli.svg"
+  ansi_to_svg(out, svg_path)
+  cat(sprintf("![Colored DuckDB CLI ggplot2 demo](%s)\n", svg_path))
 } else {
   cat("```\n")
-  cat("Skipping rendered ggplot2 CLI output: requires fansi, ggplot2, and build/release/ducktinycc.duckdb_extension.\n")
+  cat("Skipping rendered ggplot2 CLI output: requires ggplot2 and build/release/ducktinycc.duckdb_extension.\n")
   cat("```\n")
 }
 ```

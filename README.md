@@ -618,45 +618,16 @@ SQL scalar UDF, and returns an ANSI-colored terminal canvas.
 ./demo/ggplot2_cli_demo.sh build/release/ducktinycc.duckdb_extension
 ```
 
-The README renders the demo output below. The R chunk runs the same
-shell command and converts ANSI SGR color escapes to HTML so the
-terminal plot remains colored in rendered documentation.
+The README renders the demo output below. GitHub strips inline HTML/CSS
+colors from README markdown, so the R chunk runs the same shell command
+and converts the ANSI SGR terminal output into an SVG image.
 
-<pre><code>DuckTinyCC ggplot2 CLI demo
-true tcc_new_state OK
-true add_include OK
-true add_sysinclude OK
-true add_define OK
-true add_option OK
-true add_library OK
-true add_source OK
-true tinycc_bind OK
-true compile OK
-ggplot2 in DuckDB CLI: mtcars mpg vs wt
-legend: <span style='color: #F8766D;'>● cyl=1</span>  <span style='color: #00BA38;'>● cyl=2</span>  <span style='color: #619CFF;'>● cyl=3</span> ; x = wt; y = mpg
-wt 1.51..5.42    mpg 10.4..33.9
-|     <span style='color: #F8766D;'>●</span>
-|           <span style='color: #F8766D;'>●</span>
-|
-<span style='color: #F8766D;'>●</span> <span style='color: #F8766D;'>●</span>
-|
-|
-|       <span style='color: #F8766D;'>●</span>
-|          <span style='color: #F8766D;'>●</span>
-|                             <span style='color: #F8766D;'>●</span>
-|
-|              <span style='color: #F8766D;'>●</span>              <span style='color: #F8766D;'>●</span>
-|                <span style='color: #F8766D;'>●</span>     <span style='color: #F8766D;'>●</span>       <span style='color: #00BA38;'>●</span>
-|                   <span style='color: #00BA38;'>●</span>    <span style='color: #00BA38;'>●</span>
-|                      <span style='color: #00BA38;'>●</span>           <span style='color: #00BA38;'>●</span>      <span style='color: #619CFF;'>●</span>
-|                                  <span style='color: #00BA38;'>●</span>
-|                                       <span style='color: #619CFF;'>●</span>
-|                             <span style='color: #619CFF;'>●</span>     <span style='color: #619CFF;'>●</span>         <span style='color: #619CFF;'>●</span>
-|                                  <span style='color: #619CFF;'>●</span> <span style='color: #619CFF;'>●</span>   <span style='color: #619CFF;'>●</span>                            <span style='color: #619CFF;'>●</span>
-|                                    <span style='color: #619CFF;'>●</span>    <span style='color: #619CFF;'>●</span>
-|
-|
-+-------------------------------------------------------------------<span style='color: #619CFF;'>●</span>--<span style='color: #619CFF;'>●</span></code></pre>
+<figure>
+<img src="man/figures/README-ggplot2-cli.svg"
+alt="Colored DuckDB CLI ggplot2 demo" />
+<figcaption aria-hidden="true">Colored DuckDB CLI ggplot2
+demo</figcaption>
+</figure>
 
 ### Embedded R Demo (Unix-like)
 
