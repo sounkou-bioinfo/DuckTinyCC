@@ -1,0 +1,39 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='760' height='584' viewBox='0 0 760 584'>
+<rect width='100%' height='100%' rx='8' fill='#1e1e1e'/>
+<style>text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;white-space:pre;}</style>
+<text x='12' y='22'><tspan fill='#f8f8f2'>DuckTinyCC ggplot2 CLI demo</tspan></text>
+<text x='12' y='38'><tspan fill='#f8f8f2'>true tcc_new_state OK</tspan></text>
+<text x='12' y='54'><tspan fill='#f8f8f2'>true add_include OK</tspan></text>
+<text x='12' y='70'><tspan fill='#f8f8f2'>true add_sysinclude OK</tspan></text>
+<text x='12' y='86'><tspan fill='#f8f8f2'>true add_define OK</tspan></text>
+<text x='12' y='102'><tspan fill='#f8f8f2'>true add_option OK</tspan></text>
+<text x='12' y='118'><tspan fill='#f8f8f2'>true add_library OK</tspan></text>
+<text x='12' y='134'><tspan fill='#f8f8f2'>true add_source OK</tspan></text>
+<text x='12' y='150'><tspan fill='#f8f8f2'>true tinycc_bind OK</tspan></text>
+<text x='12' y='166'><tspan fill='#f8f8f2'>true compile OK</tspan></text>
+<text x='12' y='182'><tspan fill='#f8f8f2'>ggplot2 in DuckDB CLI: mtcars mpg vs wt</tspan></text>
+<text x='12' y='198'><tspan fill='#f8f8f2'>legend: </tspan><tspan fill='#F8766D'>● cyl=1</tspan><tspan fill='#f8f8f2'>  </tspan><tspan fill='#00BA38'>● cyl=2</tspan><tspan fill='#f8f8f2'>  </tspan><tspan fill='#619CFF'>● cyl=3</tspan><tspan fill='#f8f8f2'> ; x = wt; y = mpg</tspan></text>
+<text x='12' y='214'><tspan fill='#f8f8f2'>wt 1.51..5.42    mpg 10.4..33.9</tspan></text>
+<text x='12' y='230'><tspan fill='#f8f8f2'>|     </tspan><tspan fill='#F8766D'>●</tspan></text>
+<text x='12' y='246'><tspan fill='#f8f8f2'>|           </tspan><tspan fill='#F8766D'>●</tspan></text>
+<text x='12' y='262'><tspan fill='#f8f8f2'>|</tspan></text>
+<text x='12' y='278'><tspan fill='#F8766D'>●</tspan><tspan fill='#f8f8f2'> </tspan><tspan fill='#F8766D'>●</tspan></text>
+<text x='12' y='294'><tspan fill='#f8f8f2'>|</tspan></text>
+<text x='12' y='310'><tspan fill='#f8f8f2'>|</tspan></text>
+<text x='12' y='326'><tspan fill='#f8f8f2'>|       </tspan><tspan fill='#F8766D'>●</tspan></text>
+<text x='12' y='342'><tspan fill='#f8f8f2'>|          </tspan><tspan fill='#F8766D'>●</tspan></text>
+<text x='12' y='358'><tspan fill='#f8f8f2'>|                             </tspan><tspan fill='#F8766D'>●</tspan></text>
+<text x='12' y='374'><tspan fill='#f8f8f2'>|</tspan></text>
+<text x='12' y='390'><tspan fill='#f8f8f2'>|              </tspan><tspan fill='#F8766D'>●</tspan><tspan fill='#f8f8f2'>              </tspan><tspan fill='#F8766D'>●</tspan></text>
+<text x='12' y='406'><tspan fill='#f8f8f2'>|                </tspan><tspan fill='#F8766D'>●</tspan><tspan fill='#f8f8f2'>     </tspan><tspan fill='#F8766D'>●</tspan><tspan fill='#f8f8f2'>       </tspan><tspan fill='#00BA38'>●</tspan></text>
+<text x='12' y='422'><tspan fill='#f8f8f2'>|                   </tspan><tspan fill='#00BA38'>●</tspan><tspan fill='#f8f8f2'>    </tspan><tspan fill='#00BA38'>●</tspan></text>
+<text x='12' y='438'><tspan fill='#f8f8f2'>|                      </tspan><tspan fill='#00BA38'>●</tspan><tspan fill='#f8f8f2'>           </tspan><tspan fill='#00BA38'>●</tspan><tspan fill='#f8f8f2'>      </tspan><tspan fill='#619CFF'>●</tspan></text>
+<text x='12' y='454'><tspan fill='#f8f8f2'>|                                  </tspan><tspan fill='#00BA38'>●</tspan></text>
+<text x='12' y='470'><tspan fill='#f8f8f2'>|                                       </tspan><tspan fill='#619CFF'>●</tspan></text>
+<text x='12' y='486'><tspan fill='#f8f8f2'>|                             </tspan><tspan fill='#619CFF'>●</tspan><tspan fill='#f8f8f2'>     </tspan><tspan fill='#619CFF'>●</tspan><tspan fill='#f8f8f2'>         </tspan><tspan fill='#619CFF'>●</tspan></text>
+<text x='12' y='502'><tspan fill='#f8f8f2'>|                                  </tspan><tspan fill='#619CFF'>●</tspan><tspan fill='#f8f8f2'> </tspan><tspan fill='#619CFF'>●</tspan><tspan fill='#f8f8f2'>   </tspan><tspan fill='#619CFF'>●</tspan><tspan fill='#f8f8f2'>                            </tspan><tspan fill='#619CFF'>●</tspan></text>
+<text x='12' y='518'><tspan fill='#f8f8f2'>|                                    </tspan><tspan fill='#619CFF'>●</tspan><tspan fill='#f8f8f2'>    </tspan><tspan fill='#619CFF'>●</tspan></text>
+<text x='12' y='534'><tspan fill='#f8f8f2'>|</tspan></text>
+<text x='12' y='550'><tspan fill='#f8f8f2'>|</tspan></text>
+<text x='12' y='566'><tspan fill='#f8f8f2'>+-------------------------------------------------------------------</tspan><tspan fill='#619CFF'>●</tspan><tspan fill='#f8f8f2'>--</tspan><tspan fill='#619CFF'>●</tspan></text>
+</svg>

@@ -74,7 +74,24 @@ scalar tokens (`void`, `bool`, `i8..u64`, `f32/f64`, `ptr`, `varchar`,
 nested forms (`list<type>`, `type[]`, `type[N]`,
 `struct<name:type;...>`, `map<key_type;value_type>`,
 `union<name:type;...>`). Nested signatures are recursive. `wrapper_mode`
-can be `row` (default) or `batch`.
+can be `row` (default) or `chunk_scalar_loop`.
+
+`chunk_scalar_loop` is intentionally named for what it is: DuckDB
+invokes the extension on a data chunk, DuckTinyCC exposes chunk-local
+column arrays to the generated wrapper, and that wrapper loops over rows
+calling the target C scalar function. It is not an Arrow or whole-table
+batch ABI.
+
+Scalar UDF stability defaults to `stability := 'consistent'`. Use
+`stability := 'volatile'` for functions that must be re-run for every
+row (e.g. RNGs, counters, clocks, allocation, I/O, callbacks, or reads
+from mutable external memory). `tinycc_bind` can stage stability for a
+later `compile`; an explicit `stability` on `compile`, `quick_compile`,
+or `codegen_preview` overrides the staged value. Generated C helper
+modes use explicit per-helper stability: pure metadata helpers
+(`sizeof`, `alignof`, field offsets, enum constants) are consistent;
+allocation, free, setter, and mutable-memory getter helpers are
+volatile.
 
 `decimal` maps to `ducktinycc_decimal_t`, a 128-bit scaled integer
 carrying `width` and `scale` metadata. SQL `DECIMAL(18,3)` values are
@@ -116,6 +133,45 @@ process reuse that directory without re-extracting. This means the
 extension is fully self-contained: no separate TinyCC installation or
 runtime path configuration is needed after deployment. The
 `tcc_system_paths()` table function shows where the runtime was placed.
+
+### Default libc linking policy
+
+DuckTinyCC compiles generated modules with TinyCC’s `-nostdlib` option
+by default. This keeps common UDFs self-contained and avoids requiring
+system C development files just to compile pure arithmetic or
+DuckTinyCC-wrapper code. As a result, ordinary libc symbols are **not**
+linked implicitly.
+
+If your C code calls libc functions that DuckTinyCC has not injected as
+host symbols, explicitly link libc with `library := 'c'` on
+`compile`/`quick_compile`, or stage the same setting with
+`mode := 'add_library', library := 'c'`. Including a header or writing
+an `extern` declaration only declares the function for C type checking;
+it does not resolve the symbol at TinyCC relocation time. Use
+`tcc_library_probe(library := 'c')` to check whether the platform libc
+import/library is discoverable in your environment.
+
+``` sql
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'extern int puts(const char *); int hello(void){ return puts("hello"); }',
+  symbol := 'hello',
+  sql_name := 'hello_from_libc',
+  return_type := 'i32',
+  arg_types := [],
+  library := 'c'
+);
+```
+
+Be careful with process-control APIs such as `exit`, `_Exit`, `abort`,
+`setjmp`, and `longjmp`: when explicitly resolved, they execute inside
+the DuckDB process. DuckTinyCC does not currently sandbox or catch
+native control-flow escapes from generated UDFs. Generated UDFs are
+trusted in-process native code; if you explicitly link libc, inject
+process-control symbols, or use inline assembly/syscalls, you are
+responsible for keeping that code inside the normal function-return
+contract.
 
 ## Build and Test during development
 
@@ -224,17 +280,17 @@ SELECT times2(21) AS value;
     ├─────────┼────────────┼─────────┼─────────┼─────────────────┼────────────────────────────────────────────┼──────────┼─────────┼─────────────┼──────────────────┤
     │ true    │ add_source │ state   │ OK      │ source appended │ long long times2(long long x){return x*2;} │ NULL     │ NULL    │ NULL        │ database         │
     └─────────┴────────────┴─────────┴─────────┴─────────────────┴────────────────────────────────────────────┴──────────┴─────────┴─────────────┴──────────────────┘
-    ┌─────────┬─────────────┬─────────┬─────────┬────────────────────────┬─────────┬──────────┬─────────┬─────────────┬──────────────────┐
-    │   ok    │    mode     │  phase  │  code   │        message         │ detail  │ sql_name │ symbol  │ artifact_id │ connection_scope │
-    │ boolean │   varchar   │ varchar │ varchar │        varchar         │ varchar │ varchar  │ varchar │   varchar   │     varchar      │
-    ├─────────┼─────────────┼─────────┼─────────┼────────────────────────┼─────────┼──────────┼─────────┼─────────────┼──────────────────┤
-    │ true    │ tinycc_bind │ bind    │ OK      │ symbol binding updated │ times2  │ times2   │ times2  │ NULL        │ connection       │
-    └─────────┴─────────────┴─────────┴─────────┴────────────────────────┴─────────┴──────────┴─────────┴─────────────┴──────────────────┘
+    ┌─────────┬─────────────┬─────────┬─────────┬────────────────────────┬────────────┬──────────┬─────────┬─────────────┬──────────────────┐
+    │   ok    │    mode     │  phase  │  code   │        message         │   detail   │ sql_name │ symbol  │ artifact_id │ connection_scope │
+    │ boolean │   varchar   │ varchar │ varchar │        varchar         │  varchar   │ varchar  │ varchar │   varchar   │     varchar      │
+    ├─────────┼─────────────┼─────────┼─────────┼────────────────────────┼────────────┼──────────┼─────────┼─────────────┼──────────────────┤
+    │ true    │ tinycc_bind │ bind    │ OK      │ symbol binding updated │ consistent │ times2   │ times2  │ NULL        │ connection       │
+    └─────────┴─────────────┴─────────┴─────────┴────────────────────────┴────────────┴──────────┴─────────┴─────────────┴──────────────────┘
     ┌─────────┬─────────┬─────────┬─────────┬──────────────────────────────────────────────────┬──────────────────────────┬──────────┬─────────┬────────────────────┬──────────────────┐
     │   ok    │  mode   │  phase  │  code   │                     message                      │          detail          │ sql_name │ symbol  │    artifact_id     │ connection_scope │
     │ boolean │ varchar │ varchar │ varchar │                     varchar                      │         varchar          │ varchar  │ varchar │      varchar       │     varchar      │
     ├─────────┼─────────┼─────────┼─────────┼──────────────────────────────────────────────────┼──────────────────────────┼──────────┼─────────┼────────────────────┼──────────────────┤
-    │ true    │ compile │ load    │ OK      │ compiled and registered SQL function via codegen │ /tmp/ducktinycc_f4441fa0 │ times2   │ times2  │ times2@ffi_state_1 │ database         │
+    │ true    │ compile │ load    │ OK      │ compiled and registered SQL function via codegen │ /tmp/ducktinycc_c28a9bb2 │ times2   │ times2  │ times2@ffi_state_1 │ database         │
     └─────────┴─────────┴─────────┴─────────┴──────────────────────────────────────────────────┴──────────────────────────┴──────────┴─────────┴────────────────────┴──────────────────┘
     ┌───────┐
     │ value │
@@ -423,12 +479,12 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     │     kind     │     key      │                  value                   │ exists  │
     │   varchar    │   varchar    │                 varchar                  │ boolean │
     ├──────────────┼──────────────┼──────────────────────────────────────────┼─────────┤
-    │ runtime      │ runtime_path │ /tmp/ducktinycc_f4441fa0                 │ true    │
-    │ include_path │ path         │ /tmp/ducktinycc_f4441fa0/include         │ true    │
-    │ include_path │ path         │ /tmp/ducktinycc_f4441fa0/lib/tcc/include │ false   │
-    │ library_path │ path         │ /tmp/ducktinycc_f4441fa0                 │ true    │
-    │ library_path │ path         │ /tmp/ducktinycc_f4441fa0/lib             │ false   │
-    │ library_path │ path         │ /tmp/ducktinycc_f4441fa0/lib/tcc         │ false   │
+    │ runtime      │ runtime_path │ /tmp/ducktinycc_c28a9bb2                 │ true    │
+    │ include_path │ path         │ /tmp/ducktinycc_c28a9bb2/include         │ false   │
+    │ include_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib/tcc/include │ false   │
+    │ library_path │ path         │ /tmp/ducktinycc_c28a9bb2                 │ true    │
+    │ library_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib             │ false   │
+    │ library_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib/tcc         │ false   │
     │ library_path │ path         │ /usr/lib                                 │ true    │
     │ library_path │ path         │ /usr/lib64                               │ true    │
     │ library_path │ path         │ /usr/local/lib                           │ true    │
@@ -437,7 +493,7 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     │ library_path │ path         │ /lib32                                   │ true    │
     │ library_path │ path         │ /usr/local/lib64                         │ false   │
     │ library_path │ path         │ /usr/lib/x86_64-linux-gnu                │ true    │
-    │ library_path │ path         │ /usr/lib/i386-linux-gnu                  │ false   │
+    │ library_path │ path         │ /usr/lib/i386-linux-gnu                  │ true    │
     │ library_path │ path         │ /lib/x86_64-linux-gnu                    │ true    │
     │ library_path │ path         │ /lib32/x86_64-linux-gnu                  │ false   │
     │ library_path │ path         │ /usr/lib/x86_64-linux-musl               │ false   │
@@ -455,10 +511,10 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     │   varchar   │   varchar    │               varchar                │ boolean │             varchar              │
     ├─────────────┼──────────────┼──────────────────────────────────────┼─────────┼──────────────────────────────────┤
     │ input       │ library      │ libtcc1.a                            │ false   │ library probe request            │
-    │ runtime     │ runtime_path │ /tmp/ducktinycc_f4441fa0             │ true    │ effective runtime path           │
-    │ search_path │ path         │ /tmp/ducktinycc_f4441fa0             │ true    │ searched path                    │
-    │ search_path │ path         │ /tmp/ducktinycc_f4441fa0/lib         │ false   │ searched path                    │
-    │ search_path │ path         │ /tmp/ducktinycc_f4441fa0/lib/tcc     │ false   │ searched path                    │
+    │ runtime     │ runtime_path │ /tmp/ducktinycc_c28a9bb2             │ true    │ effective runtime path           │
+    │ search_path │ path         │ /tmp/ducktinycc_c28a9bb2             │ true    │ searched path                    │
+    │ search_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib         │ false   │ searched path                    │
+    │ search_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib/tcc     │ false   │ searched path                    │
     │ search_path │ path         │ /usr/lib                             │ true    │ searched path                    │
     │ search_path │ path         │ /usr/lib64                           │ true    │ searched path                    │
     │ search_path │ path         │ /usr/local/lib                       │ true    │ searched path                    │
@@ -467,7 +523,7 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     │ search_path │ path         │ /lib32                               │ true    │ searched path                    │
     │ search_path │ path         │ /usr/local/lib64                     │ false   │ searched path                    │
     │ search_path │ path         │ /usr/lib/x86_64-linux-gnu            │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/lib/i386-linux-gnu              │ false   │ searched path                    │
+    │ search_path │ path         │ /usr/lib/i386-linux-gnu              │ true    │ searched path                    │
     │ search_path │ path         │ /lib/x86_64-linux-gnu                │ true    │ searched path                    │
     │ search_path │ path         │ /lib32/x86_64-linux-gnu              │ false   │ searched path                    │
     │ search_path │ path         │ /usr/lib/x86_64-linux-musl           │ false   │ searched path                    │
@@ -478,8 +534,8 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     │ search_path │ path         │ /usr/lib/aarch64-linux-gnu           │ false   │ searched path                    │
     │ search_path │ path         │ /usr/lib/R/lib                       │ true    │ searched path                    │
     │ search_path │ path         │ /usr/lib/jvm/default-java/lib/server │ true    │ searched path                    │
-    │ candidate   │ libtcc1.a    │ /tmp/ducktinycc_f4441fa0/libtcc1.a   │ true    │ resolved                         │
-    │ resolved    │ path         │ /tmp/ducktinycc_f4441fa0/libtcc1.a   │ true    │ resolved library path            │
+    │ candidate   │ libtcc1.a    │ /tmp/ducktinycc_c28a9bb2/libtcc1.a   │ true    │ resolved                         │
+    │ resolved    │ path         │ /tmp/ducktinycc_c28a9bb2/libtcc1.a   │ true    │ resolved library path            │
     │ resolved    │ link_name    │ tcc1                                 │ true    │ normalized tcc_add_library value │
     └─────────────┴──────────────┴──────────────────────────────────────┴─────────┴──────────────────────────────────┘
       27 rows                                                                                              5 columns
@@ -546,6 +602,46 @@ For a real-world use of `add_symbol` to pass function pointers, see
 `demo/r_udf_via_ducktinycc.R`, which injects R C API addresses and
 compiles a trampoline that calls back into R from a DuckDB scalar UDF.
 
+For a visual callback demo, `demo/ggplot2_via_ducktinycc.R` registers a
+volatile SQL UDF whose TinyCC-compiled C trampoline calls a pinned R
+function via `R_tryEval`; the SQL call writes a ggplot2 PNG.
+
+``` sh
+Rscript demo/ggplot2_via_ducktinycc.R /tmp/ducktinycc_ggplot2_demo.png
+```
+
+To make the plot appear directly in the DuckDB CLI, run the embedded-R
+CLI variant. It compiles `demo/ggplot2_cli_udf.c`, calls ggplot2 from a
+SQL scalar UDF, and returns an ANSI-colored terminal canvas.
+
+``` sh
+./demo/ggplot2_cli_demo.sh build/release/ducktinycc.duckdb_extension
+```
+
+For a jgd JSON graphics device demo, install the `jgd` R package and run
+the terminal-server variant. DuckDB calls a DuckTinyCC-compiled embedded-R
+UDF, that UDF opens `jgd::jgd(socket = ...)`, and the included all-C demo
+server implements the minimal jgd JSONL handshake/metrics path and renders
+the streamed drawing operations back to an ANSI-colored terminal canvas.
+
+``` sh
+# one-time if needed, after cloning https://github.com/grantmcdermott/jgd
+R CMD INSTALL /tmp/jgd/r-pkg
+
+./demo/jgd_ducktinycc_demo.sh build/release/ducktinycc.duckdb_extension
+```
+
+The README renders the demo output below. GitHub strips inline HTML/CSS
+colors from README markdown, so the R chunk runs the same shell command
+and converts the ANSI SGR terminal output into an SVG image.
+
+<figure>
+<img src="man/figures/README-ggplot2-cli.svg"
+alt="Colored DuckDB CLI ggplot2 demo" />
+<figcaption aria-hidden="true">Colored DuckDB CLI ggplot2
+demo</figcaption>
+</figure>
+
 ### Embedded R Demo (Unix-like)
 
 The embedded R demo is still part of the repository. We keep it as an
@@ -610,6 +706,16 @@ FROM tcc_module(
 );
 SELECT ok, mode, code
 FROM tcc_module(
+  mode := 'add_include',
+  include_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_sysinclude',
+  sysinclude_path := 'third_party/tinycc/include'
+);
+SELECT ok, mode, code
+FROM tcc_module(
   mode := 'add_define',
   define_name := 'R_LEGACY_RCOMPLEX',
   define_value := '1'
@@ -651,6 +757,18 @@ SQL
     ├─────────┼───────────────┼─────────┤
     │ true    │ tcc_new_state │ OK      │
     └─────────┴───────────────┴─────────┘
+    ┌─────────┬─────────────┬─────────┐
+    │   ok    │    mode     │  code   │
+    │ boolean │   varchar   │ varchar │
+    ├─────────┼─────────────┼─────────┤
+    │ true    │ add_include │ OK      │
+    └─────────┴─────────────┴─────────┘
+    ┌─────────┬────────────────┬─────────┐
+    │   ok    │      mode      │  code   │
+    │ boolean │    varchar     │ varchar │
+    ├─────────┼────────────────┼─────────┤
+    │ true    │ add_sysinclude │ OK      │
+    └─────────┴────────────────┴─────────┘
     ┌─────────┬────────────┬─────────┐
     │   ok    │    mode    │  code   │
     │ boolean │  varchar   │ varchar │
@@ -723,6 +841,8 @@ The infrastructure to support this is already in place:
 Generated and helper functions are SQL scalar UDFs; only
 `tcc_module(...)`, `tcc_system_paths(...)`, and `tcc_library_probe(...)`
 are table functions. For library linking, we can pass short names (`m`,
-`z`), explicit filenames (`libfoo.so`, `foo.dll`, `.a`, `.lib`), or
-path-like values. Pointer helpers are low-level interop tools; for most
-workflows, handle-based access is safer than raw `tcc_dataptr`.
+`z`, `c`), explicit filenames (`libfoo.so`, `foo.dll`, `.a`, `.lib`), or
+path-like values. Because DuckTinyCC uses `-nostdlib` by default, use
+`library := 'c'` when generated code needs libc symbols that are not
+otherwise injected. Pointer helpers are low-level interop tools; for
+most workflows, handle-based access is safer than raw `tcc_dataptr`.

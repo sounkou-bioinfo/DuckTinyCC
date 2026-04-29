@@ -15,7 +15,7 @@
  *   through host C-API callbacks with a stable connection handle.
  * - Resulting UDF entries are extension/C-API registered catalog entries, which explains current lifecycle behavior
  *   (e.g., SQL `DROP FUNCTION` does not remove these internal entries).
- * - Runtime execution (`tcc_execute_compiled_scalar_udf`) bridges DuckDB vectors to C descriptors for row/batch
+ * - Runtime execution (`tcc_execute_compiled_scalar_udf`) bridges DuckDB vectors to C descriptors for row/chunk-scalar-loop
  *   wrappers, including recursive LIST/ARRAY/STRUCT/MAP/UNION marshalling and write-back.
  * - Link configuration supports both search-path + bare names and explicit full library paths.
  * - This file intentionally centralizes SQL surface, compile/load, and runtime bridge logic to keep behavior
@@ -187,7 +187,7 @@ DUCKDB_EXTENSION_EXTERN
 /* - tcc_effective_sql_name: Resolves effective symbol/SQL name from bind args and session defaults. */
 /* - tcc_effective_symbol: Resolves effective symbol/SQL name from bind args and session defaults. */
 /* - tcc_equals_ci: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
-/* - tcc_execute_compiled_scalar_udf: Main runtime bridge for executing compiled row/batch wrappers and marshaling values. */
+/* - tcc_execute_compiled_scalar_udf: Main runtime bridge for executing compiled row/chunk-scalar-loop wrappers and marshaling values. */
 /* - tcc_ffi_array_child_type: Internal helper in the TinyCC module/runtime pipeline. */
 /* - tcc_ffi_array_type_from_child: Internal helper in the TinyCC module/runtime pipeline. */
 /* - tcc_ffi_list_child_type: Internal helper in the TinyCC module/runtime pipeline. */
@@ -368,6 +368,7 @@ typedef struct {
 	char *runtime_path;
 	char *bound_symbol;
 	char *bound_sql_name;
+	char *bound_stability;
 	tcc_string_list_t include_paths;
 	tcc_string_list_t sysinclude_paths;
 	tcc_string_list_t library_paths;
@@ -532,6 +533,11 @@ typedef enum {
 	TCC_WRAPPER_MODE_BATCH = 1
 } tcc_wrapper_mode_t;
 
+typedef enum {
+	TCC_FUNCTION_STABILITY_CONSISTENT = 0,
+	TCC_FUNCTION_STABILITY_VOLATILE = 1
+} tcc_function_stability_t;
+
 /* Function pointer shapes exported by generated modules. */
 typedef bool (*tcc_dynamic_init_fn_t)(duckdb_connection connection);
 typedef bool (*tcc_host_row_wrapper_fn_t)(void **args, void *out_value, bool *out_is_null);
@@ -582,6 +588,7 @@ typedef struct {
 	char *arg_types;
 	char *return_type;
 	char *wrapper_mode;
+	char *stability;
 	char *include_path;
 	char *sysinclude_path;
 	char *library_path;
@@ -738,12 +745,13 @@ typedef struct {
 	idx_t capacity;
 } tcc_c_field_list_t;
 
-/* One generated helper binding description (symbol + SQL signature). */
+/* One generated helper binding description (symbol + SQL signature + stability). */
 typedef struct {
 	char *symbol;
 	char *sql_name;
 	char *return_type;
 	char *arg_types_csv;
+	char *stability;
 } tcc_helper_binding_t;
 
 /* Growable generated helper binding list. */
@@ -808,6 +816,8 @@ typedef struct {
 	tcc_ffi_union_meta_t *arg_union_metas;
 	tcc_wrapper_mode_t wrapper_mode;
 	const char *wrapper_mode_token;
+	tcc_function_stability_t stability;
+	const char *stability_token;
 	int arg_count;
 } tcc_codegen_signature_ctx_t;
 
@@ -832,6 +842,9 @@ static bool tcc_parse_signature(const char *return_type, const char *arg_types_c
 static bool tcc_equals_ci(const char *a, const char *b);
 static bool tcc_parse_wrapper_mode(const char *wrapper_mode, tcc_wrapper_mode_t *out_mode,
                                    tcc_error_buffer_t *error_buf);
+static const char *tcc_function_stability_token(tcc_function_stability_t stability);
+static bool tcc_parse_function_stability(const char *stability, tcc_function_stability_t *out_stability,
+                                         tcc_error_buffer_t *error_buf);
 static bool tcc_parse_type_token(const char *token, bool allow_void, tcc_ffi_type_t *out_type, size_t *out_array_size);
 static bool tcc_split_csv_tokens(const char *csv, tcc_string_list_t *out_tokens, tcc_error_buffer_t *error_buf);
 static duckdb_logical_type tcc_ffi_type_create_logical_type(tcc_ffi_type_t type, size_t array_size,
@@ -891,6 +904,7 @@ static void tcc_codegen_source_ctx_destroy(tcc_codegen_source_ctx_t *ctx);
 static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
                                         const char *sql_name, const char *target_symbol,
                                         tcc_codegen_source_ctx_t *ctx, tcc_error_buffer_t *error_buf);
+static const char *tcc_effective_stability(tcc_module_state_t *state, const tcc_module_bind_data_t *bind);
 static void tcc_codegen_classify_error_message(const char *error_message, const char **phase, const char **code,
                                                const char **message);
 static void tcc_typedesc_destroy(tcc_typedesc_t *desc);
@@ -899,9 +913,9 @@ static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typ
 static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, const char *target_symbol,
                                                  const char *sql_name, const char *return_type,
                                                  const char *arg_types_csv, const char *wrapper_mode_token,
-                                                 tcc_wrapper_mode_t wrapper_mode, tcc_ffi_type_t ret_type,
-                                                 const tcc_ffi_type_t *arg_types, int arg_count,
-                                                 bool emit_extern_decl);
+                                                 tcc_wrapper_mode_t wrapper_mode, const char *stability_token,
+                                                 tcc_ffi_type_t ret_type, const tcc_ffi_type_t *arg_types,
+                                                 int arg_count, bool emit_extern_decl);
 static char *tcc_codegen_build_compilation_unit(const char *user_source, const char *wrapper_loader_source);
 
 /* RW-lock primitives used to guard shared module/session state during mode execution. */
@@ -1990,6 +2004,9 @@ static void tcc_helper_binding_list_destroy(tcc_helper_binding_list_t *bindings)
 		if (bindings->items[i].arg_types_csv) {
 			duckdb_free(bindings->items[i].arg_types_csv);
 		}
+		if (bindings->items[i].stability) {
+			duckdb_free(bindings->items[i].stability);
+		}
 	}
 	if (bindings->items) {
 		duckdb_free(bindings->items);
@@ -2032,9 +2049,10 @@ static bool tcc_helper_binding_list_reserve(tcc_helper_binding_list_t *bindings,
 
 /* tcc_helper_binding_list_add: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_helper_binding_list_add(tcc_helper_binding_list_t *bindings, const char *symbol, const char *sql_name,
-                                        const char *return_type, const char *arg_types_csv) {
+                                        const char *return_type, const char *arg_types_csv,
+                                        const char *stability) {
 	tcc_helper_binding_t entry;
-	if (!bindings || !symbol || !sql_name || !return_type || !arg_types_csv) {
+	if (!bindings || !symbol || !sql_name || !return_type || !arg_types_csv || !stability) {
 		return false;
 	}
 	if (!tcc_helper_binding_list_reserve(bindings, bindings->count + 1)) {
@@ -2045,7 +2063,8 @@ static bool tcc_helper_binding_list_add(tcc_helper_binding_list_t *bindings, con
 	entry.sql_name = tcc_strdup(sql_name);
 	entry.return_type = tcc_strdup(return_type);
 	entry.arg_types_csv = tcc_strdup(arg_types_csv);
-	if (!entry.symbol || !entry.sql_name || !entry.return_type || !entry.arg_types_csv) {
+	entry.stability = tcc_strdup(stability);
+	if (!entry.symbol || !entry.sql_name || !entry.return_type || !entry.arg_types_csv || !entry.stability) {
 		if (entry.symbol) {
 			duckdb_free(entry.symbol);
 		}
@@ -2057,6 +2076,9 @@ static bool tcc_helper_binding_list_add(tcc_helper_binding_list_t *bindings, con
 		}
 		if (entry.arg_types_csv) {
 			duckdb_free(entry.arg_types_csv);
+		}
+		if (entry.stability) {
+			duckdb_free(entry.stability);
 		}
 		return false;
 	}
@@ -2988,6 +3010,10 @@ static void tcc_session_clear_bind(tcc_session_t *session) {
 	if (session->bound_sql_name) {
 		duckdb_free(session->bound_sql_name);
 		session->bound_sql_name = NULL;
+	}
+	if (session->bound_stability) {
+		duckdb_free(session->bound_stability);
+		session->bound_stability = NULL;
 	}
 }
 
@@ -5133,7 +5159,7 @@ static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t
 
 /**
  * @function tcc_execute_compiled_scalar_udf
- * @brief Execute generated row/batch wrappers and marshal DuckDB vectors to/from C bridge descriptors.
+ * @brief Execute generated row/chunk-scalar-loop wrappers and marshal DuckDB vectors to/from C bridge descriptors.
  * @param[in] info DuckDB function invocation info.
  * @param[in] input Borrowed input chunk.
  * @param[out] output Borrowed output vector to fill.
@@ -5696,7 +5722,7 @@ cleanup:
  * @param[in] fn_ptr Wrapper function pointer.
  * @param[in] return_type Canonical return token string.
  * @param[in] arg_types_csv Canonical argument token CSV.
- * @param[in] wrapper_mode "row" or "batch".
+ * @param[in] wrapper_mode "row" or "chunk_scalar_loop".
  * @return true on successful registration.
  * @ownership borrows(con,name,fn_ptr,return_type,arg_types_csv,wrapper_mode)
  * @heap allocates parsed signature/type metadata and function objects; ownership moves to ctx on success
@@ -5707,7 +5733,7 @@ cleanup:
  */
 static bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr,
                                           const char *return_type, const char *arg_types_csv,
-                                          const char *wrapper_mode) {
+                                          const char *wrapper_mode, const char *stability) {
 	duckdb_scalar_function fn = NULL;
 	tcc_host_sig_ctx_t *ctx = NULL;
 	duckdb_state rc;
@@ -5722,6 +5748,7 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	tcc_ffi_map_meta_t *arg_map_metas = NULL;
 	tcc_ffi_union_meta_t *arg_union_metas = NULL;
 	tcc_wrapper_mode_t mode = TCC_WRAPPER_MODE_ROW;
+	tcc_function_stability_t function_stability = TCC_FUNCTION_STABILITY_CONSISTENT;
 	int arg_count = 0;
 	tcc_error_buffer_t err;
 	tcc_typedesc_t *return_desc = NULL;
@@ -5742,6 +5769,9 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		return false;
 	}
 	if (!tcc_parse_wrapper_mode(wrapper_mode, &mode, &err)) {
+		goto fail;
+	}
+	if (!tcc_parse_function_stability(stability, &function_stability, &err)) {
 		goto fail;
 	}
 	if (!tcc_typedesc_parse_token(return_type, true, &return_desc, &err)) {
@@ -5842,6 +5872,9 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 		}
 		duckdb_scalar_function_set_return_type(fn, ret_type_obj);
 		duckdb_destroy_logical_type(&ret_type_obj);
+	}
+	if (function_stability == TCC_FUNCTION_STABILITY_VOLATILE) {
+		duckdb_scalar_function_set_volatile(fn);
 	}
 	duckdb_scalar_function_set_function(fn, tcc_execute_compiled_scalar_udf);
 	duckdb_scalar_function_set_extra_info(fn, ctx, tcc_host_sig_ctx_destroy);
@@ -6595,6 +6628,9 @@ static void destroy_tcc_module_bind_data(void *ptr) {
 	if (bind->wrapper_mode) {
 		duckdb_free(bind->wrapper_mode);
 	}
+	if (bind->stability) {
+		duckdb_free(bind->stability);
+	}
 	if (bind->include_path) {
 		duckdb_free(bind->include_path);
 	}
@@ -6728,6 +6764,7 @@ static void tcc_module_bind(duckdb_bind_info info) {
 		}
 		bind->wrapper_mode = tcc_strdup("row");
 	}
+	tcc_bind_read_named_varchar(info, "stability", &bind->stability);
 	tcc_bind_read_named_varchar(info, "include_path", &bind->include_path);
 	tcc_bind_read_named_varchar(info, "sysinclude_path", &bind->sysinclude_path);
 	tcc_bind_read_named_varchar(info, "library_path", &bind->library_path);
@@ -6845,10 +6882,58 @@ static const char *tcc_wrapper_mode_token(tcc_wrapper_mode_t mode) {
 	case TCC_WRAPPER_MODE_ROW:
 		return "row";
 	case TCC_WRAPPER_MODE_BATCH:
-		return "batch";
+		return "chunk_scalar_loop";
 	default:
 		return NULL;
 	}
+}
+
+static const char *tcc_function_stability_token(tcc_function_stability_t stability) {
+	switch (stability) {
+	case TCC_FUNCTION_STABILITY_CONSISTENT:
+		return "consistent";
+	case TCC_FUNCTION_STABILITY_VOLATILE:
+		return "volatile";
+	default:
+		return NULL;
+	}
+}
+
+/* tcc_parse_function_stability: Parser helper for DuckDB scalar-function stability. */
+static bool tcc_parse_function_stability(const char *stability, tcc_function_stability_t *out_stability,
+                                         tcc_error_buffer_t *error_buf) {
+	const char *value = stability;
+	char token[32];
+	size_t len;
+	if (!out_stability) {
+		tcc_set_error(error_buf, "stability output is required");
+		return false;
+	}
+	if (!value || value[0] == '\0') {
+		*out_stability = TCC_FUNCTION_STABILITY_CONSISTENT;
+		return true;
+	}
+	value = tcc_skip_space(value);
+	len = strlen(value);
+	while (len > 0 && isspace((unsigned char)value[len - 1])) {
+		len--;
+	}
+	if (len == 0 || len >= sizeof(token)) {
+		tcc_set_error(error_buf, "stability contains unsupported token");
+		return false;
+	}
+	memcpy(token, value, len);
+	token[len] = '\0';
+	if (tcc_equals_ci(token, "consistent")) {
+		*out_stability = TCC_FUNCTION_STABILITY_CONSISTENT;
+		return true;
+	}
+	if (tcc_equals_ci(token, "volatile")) {
+		*out_stability = TCC_FUNCTION_STABILITY_VOLATILE;
+		return true;
+	}
+	tcc_set_error(error_buf, "stability contains unsupported token");
+	return false;
 }
 
 /* tcc_parse_wrapper_mode: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
@@ -6880,7 +6965,7 @@ static bool tcc_parse_wrapper_mode(const char *wrapper_mode, tcc_wrapper_mode_t 
 		*out_mode = TCC_WRAPPER_MODE_ROW;
 		return true;
 	}
-	if (tcc_equals_ci(token, "batch")) {
+	if (tcc_equals_ci(token, "chunk_scalar_loop")) {
 		*out_mode = TCC_WRAPPER_MODE_BATCH;
 		return true;
 	}
@@ -8027,6 +8112,7 @@ static void tcc_codegen_signature_ctx_init(tcc_codegen_signature_ctx_t *ctx) {
 	memset(ctx, 0, sizeof(*ctx));
 	ctx->return_type = TCC_FFI_I64;
 	ctx->wrapper_mode = TCC_WRAPPER_MODE_ROW;
+	ctx->stability = TCC_FUNCTION_STABILITY_CONSISTENT;
 }
 
 /* tcc_codegen_signature_ctx_destroy: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: releases owned allocations (duckdb_malloc/duckdb_free and/or libc malloc/free per member contract). */
@@ -8062,6 +8148,8 @@ static void tcc_codegen_signature_ctx_destroy(tcc_codegen_signature_ctx_t *ctx) 
 	ctx->return_array_size = 0;
 	ctx->wrapper_mode = TCC_WRAPPER_MODE_ROW;
 	ctx->wrapper_mode_token = NULL;
+	ctx->stability = TCC_FUNCTION_STABILITY_CONSISTENT;
+	ctx->stability_token = NULL;
 }
 
 /* tcc_codegen_signature_parse_types: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
@@ -8136,6 +8224,14 @@ static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_mod
 	if (!tcc_codegen_signature_parse_wrapper_mode(bind, &ctx->signature, error_buf)) {
 		return false;
 	}
+	if (!tcc_parse_function_stability(tcc_effective_stability(state, bind), &ctx->signature.stability, error_buf)) {
+		return false;
+	}
+	ctx->signature.stability_token = tcc_function_stability_token(ctx->signature.stability);
+	if (!ctx->signature.stability_token) {
+		tcc_set_error(error_buf, "stability contains unsupported token");
+		return false;
+	}
 	snprintf(ctx->module_symbol, sizeof(ctx->module_symbol), "__ducktinycc_ffi_init_%llu_%llu",
 	         (unsigned long long)state->session.state_id, (unsigned long long)state->session.config_version);
 	ctx->wrapper_loader_source =
@@ -8143,8 +8239,8 @@ static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_mod
 	                                        bind->return_type ? bind->return_type : "i64",
 	                                        bind->arg_types ? bind->arg_types : "",
 	                                        ctx->signature.wrapper_mode_token, ctx->signature.wrapper_mode,
-	                                        ctx->signature.return_type, ctx->signature.arg_types,
-	                                        ctx->signature.arg_count,
+	                                        ctx->signature.stability_token, ctx->signature.return_type,
+	                                        ctx->signature.arg_types, ctx->signature.arg_count,
 	                                        /* emit_extern_decl: only when user source is NOT bundled in the
 	                                         * compilation unit.  When user_source is present, the definition
 	                                         * already provides the prototype; emitting an extern with our
@@ -8174,6 +8270,10 @@ static void tcc_codegen_classify_error_message(const char *error_message, const 
 		*phase = "bind";
 		*code = "E_BAD_WRAPPER_MODE";
 		*message = "invalid wrapper_mode";
+	} else if (strstr(error_message, "stability")) {
+		*phase = "bind";
+		*code = "E_BAD_STABILITY";
+		*message = "invalid stability";
 	} else if (strstr(error_message, "return_type") || strstr(error_message, "arg_types") ||
 	           strstr(error_message, "struct token") || strstr(error_message, "map token") ||
 	           strstr(error_message, "fixed-width scalar tokens only")) {
@@ -8216,6 +8316,17 @@ static const char *tcc_effective_sql_name(tcc_module_state_t *state, const tcc_m
 		return state->session.bound_sql_name;
 	}
 	return effective_symbol;
+}
+
+/* Resolves function stability from explicit args, session-level binding, or default. */
+static const char *tcc_effective_stability(tcc_module_state_t *state, const tcc_module_bind_data_t *bind) {
+	if (bind && bind->stability && bind->stability[0] != '\0') {
+		return bind->stability;
+	}
+	if (state && state->session.bound_stability && state->session.bound_stability[0] != '\0') {
+		return state->session.bound_stability;
+	}
+	return "consistent";
 }
 
 static const char *tcc_ffi_type_to_token(tcc_ffi_type_t type) {
@@ -8329,9 +8440,9 @@ static const char *tcc_codegen_ret_null_check(tcc_ffi_type_t ret_type) {
 static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, const char *target_symbol,
                                                  const char *sql_name, const char *return_type,
                                                  const char *arg_types_csv, const char *wrapper_mode_token,
-                                                 tcc_wrapper_mode_t wrapper_mode, tcc_ffi_type_t ret_type,
-                                                 const tcc_ffi_type_t *arg_types, int arg_count,
-                                                 bool emit_extern_decl) {
+                                                 tcc_wrapper_mode_t wrapper_mode, const char *stability_token,
+                                                 tcc_ffi_type_t ret_type, const tcc_ffi_type_t *arg_types,
+                                                 int arg_count, bool emit_extern_decl) {
 	tcc_text_buf_t args_decl = {0};
 	tcc_text_buf_t row_unpack_lines = {0};
 	tcc_text_buf_t row_call_args = {0};
@@ -8350,7 +8461,7 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		return NULL;
 	}
 	if (!module_symbol || !target_symbol || !sql_name || !return_type || !arg_types_csv || !resolved_wrapper_mode ||
-	    arg_count < 0) {
+	    !stability_token || arg_count < 0) {
 		return NULL;
 	}
 	wrapper_len = strlen("__ducktinycc_wrapper_") + strlen(module_symbol) + 1;
@@ -8407,7 +8518,7 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		    "#include <stdint.h>\n"
 		    "typedef struct _duckdb_connection *duckdb_connection;\n"
 		    "extern _Bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr, "
-		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n");
+		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode, const char *stability);\n");
 		/* Emit an extern forward declaration of the user function only when the user source
 		 * is NOT bundled in the same compilation unit (i.e. the function is defined via a
 		 * separate session source or symbol injection).  When user source IS present in the
@@ -8472,7 +8583,7 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		    "#include <stdint.h>\n"
 		    "typedef struct _duckdb_connection *duckdb_connection;\n"
 		    "extern _Bool ducktinycc_register_signature(duckdb_connection con, const char *name, void *fn_ptr, "
-		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode);\n");
+		    "const char *return_type, const char *arg_types_csv, const char *wrapper_mode, const char *stability);\n");
 		if (ok && emit_extern_decl) {
 			ok = tcc_text_buf_appendf(&src, "extern %s %s(%s);\n",
 			                          ret_c_type, target_symbol,
@@ -8549,10 +8660,10 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		ok = tcc_text_buf_appendf(&src,
 		                          "_Bool %s(duckdb_connection con) {\n"
 		                          "  return ducktinycc_register_signature(con, \"%s\", (void *)%s, \"%s\", \"%s\", "
-		                          "\"%s\");\n"
+		                          "\"%s\", \"%s\");\n"
 		                          "}\n",
 		                          module_symbol, sql_name, wrapper_name, return_type, arg_types_csv,
-		                          resolved_wrapper_mode);
+		                          resolved_wrapper_mode, stability_token);
 	}
 	if (ok && src.data) {
 		out_src = tcc_strdup(src.data);
@@ -8718,12 +8829,12 @@ static char *tcc_codegen_build_compilation_unit(const char *user_source, const c
 /* tcc_helper_binding_list_add_prefixed: Growable container utility used by parsing/codegen flows. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_helper_binding_list_add_prefixed(tcc_helper_binding_list_t *bindings, const char *prefix,
                                                  const char *suffix, const char *return_type,
-                                                 const char *arg_types_csv) {
+                                                 const char *arg_types_csv, const char *stability) {
 	char symbol[512];
 	char sql_name[512];
 	int n_symbol;
 	int n_sql;
-	if (!bindings || !prefix || !suffix || !return_type || !arg_types_csv) {
+	if (!bindings || !prefix || !suffix || !return_type || !arg_types_csv || !stability) {
 		return false;
 	}
 	n_symbol = snprintf(symbol, sizeof(symbol), "%s_%s", prefix, suffix);
@@ -8731,7 +8842,7 @@ static bool tcc_helper_binding_list_add_prefixed(tcc_helper_binding_list_t *bind
 	if (n_symbol < 0 || n_sql < 0 || (size_t)n_symbol >= sizeof(symbol) || (size_t)n_sql >= sizeof(sql_name)) {
 		return false;
 	}
-	return tcc_helper_binding_list_add(bindings, symbol, sql_name, return_type, arg_types_csv);
+	return tcc_helper_binding_list_add(bindings, symbol, sql_name, return_type, arg_types_csv, stability);
 }
 
 /* tcc_format_cstr: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
@@ -8879,19 +8990,19 @@ static bool tcc_build_c_composite_bindings(const char *prefix, const tcc_c_field
 		tcc_set_error(error_buf, "invalid helper binding arguments");
 		return false;
 	}
-#define TCC_ADD_BINDING_FORMAT(RET_TOKEN, ARG_CSV, SUFFIX_FMT, ...)                                                      \
+#define TCC_ADD_BINDING_FORMAT(RET_TOKEN, ARG_CSV, STABILITY, SUFFIX_FMT, ...)                                           \
 	do {                                                                                                                  \
 		if (!tcc_format_cstr(suffix, sizeof(suffix), SUFFIX_FMT, __VA_ARGS__) ||                                         \
-		    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, RET_TOKEN, ARG_CSV)) {                  \
+		    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, RET_TOKEN, ARG_CSV, STABILITY)) {       \
 			tcc_set_error(error_buf, "out of memory");                                                                    \
 			return false;                                                                                                 \
 		}                                                                                                                 \
 	} while (0)
 	char suffix[512];
-	if (!tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "sizeof", "u64", "") ||
-	    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "alignof", "u64", "") ||
-	    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "new", "ptr", "") ||
-	    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "free", "void", "ptr")) {
+	if (!tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "sizeof", "u64", "", "consistent") ||
+	    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "alignof", "u64", "", "consistent") ||
+	    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "new", "ptr", "", "volatile") ||
+	    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "free", "void", "ptr", "volatile")) {
 		tcc_set_error(error_buf, "out of memory");
 		return false;
 	}
@@ -8908,24 +9019,24 @@ static bool tcc_build_c_composite_bindings(const char *prefix, const tcc_c_field
 				tcc_set_error(error_buf, "out of memory");
 				return false;
 			}
-			TCC_ADD_BINDING_FORMAT(token, arg_csv, "get_%s_elt", field->name);
+			TCC_ADD_BINDING_FORMAT(token, arg_csv, "volatile", "get_%s_elt", field->name);
 			if (!tcc_format_cstr(arg_csv, sizeof(arg_csv), "ptr,u64,%s", token)) {
 				tcc_set_error(error_buf, "out of memory");
 				return false;
 			}
-			TCC_ADD_BINDING_FORMAT("ptr", arg_csv, "set_%s_elt", field->name);
-			TCC_ADD_BINDING_FORMAT("u64", "", "off_%s", field->name);
-			TCC_ADD_BINDING_FORMAT("ptr", "ptr", "%s_addr", field->name);
+			TCC_ADD_BINDING_FORMAT("ptr", arg_csv, "volatile", "set_%s_elt", field->name);
+			TCC_ADD_BINDING_FORMAT("u64", "", "consistent", "off_%s", field->name);
+			TCC_ADD_BINDING_FORMAT("ptr", "ptr", "consistent", "%s_addr", field->name);
 		} else {
-			TCC_ADD_BINDING_FORMAT(token, "ptr", "get_%s", field->name);
+			TCC_ADD_BINDING_FORMAT(token, "ptr", "volatile", "get_%s", field->name);
 			if (!tcc_format_cstr(arg_csv, sizeof(arg_csv), "ptr,%s", token)) {
 				tcc_set_error(error_buf, "out of memory");
 				return false;
 			}
-			TCC_ADD_BINDING_FORMAT("ptr", arg_csv, "set_%s", field->name);
+			TCC_ADD_BINDING_FORMAT("ptr", arg_csv, "volatile", "set_%s", field->name);
 			if (!field->is_bitfield) {
-				TCC_ADD_BINDING_FORMAT("u64", "", "off_%s", field->name);
-				TCC_ADD_BINDING_FORMAT("ptr", "ptr", "%s_addr", field->name);
+				TCC_ADD_BINDING_FORMAT("u64", "", "consistent", "off_%s", field->name);
+				TCC_ADD_BINDING_FORMAT("ptr", "ptr", "consistent", "%s_addr", field->name);
 			}
 		}
 	}
@@ -8942,13 +9053,13 @@ static bool tcc_build_c_enum_bindings(const char *prefix, const tcc_string_list_
 		tcc_set_error(error_buf, "invalid enum binding arguments");
 		return false;
 	}
-	if (!tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "sizeof", "u64", "")) {
+	if (!tcc_helper_binding_list_add_prefixed(out_bindings, prefix, "sizeof", "u64", "", "consistent")) {
 		tcc_set_error(error_buf, "out of memory");
 		return false;
 	}
 	for (i = 0; i < constants->count; i++) {
 		if (!tcc_format_cstr(suffix, sizeof(suffix), "%s", constants->items[i]) ||
-		    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "i64", "")) {
+		    !tcc_helper_binding_list_add_prefixed(out_bindings, prefix, suffix, "i64", "", "consistent")) {
 			tcc_set_error(error_buf, "out of memory");
 			return false;
 		}
@@ -9021,6 +9132,7 @@ static bool tcc_compile_generated_binding(const char *runtime_path, tcc_module_s
 	generated_bind.arg_types = binding->arg_types_csv;
 	generated_bind.return_type = binding->return_type;
 	generated_bind.wrapper_mode = "row";
+	generated_bind.stability = binding->stability;
 	if (tcc_codegen_compile_and_load_module(runtime_path, state, &generated_bind, binding->sql_name, binding->symbol,
 	                                        &artifact, error_buf, module_symbol, sizeof(module_symbol)) != 0) {
 		return false;
@@ -9479,14 +9591,30 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 		} else {
 			char *bound_symbol = NULL;
 			char *bound_sql_name = NULL;
+			char *bound_stability = NULL;
+			tcc_function_stability_t parsed_stability = TCC_FUNCTION_STABILITY_CONSISTENT;
+			tcc_error_buffer_t err;
+			memset(&err, 0, sizeof(err));
+			if (bind->stability && bind->stability[0] != '\0' &&
+			    !tcc_parse_function_stability(bind->stability, &parsed_stability, &err)) {
+				tcc_write_row(output, false, bind->mode, "bind", "E_BAD_STABILITY", "invalid stability",
+				              err.message[0] ? err.message : NULL, bind->sql_name, bind->symbol, NULL, "database");
+				goto tcc_module_done;
+			}
 			bound_symbol = tcc_strdup(bind->symbol);
 			bound_sql_name = tcc_strdup(bind->sql_name && bind->sql_name[0] != '\0' ? bind->sql_name : bind->symbol);
-			if (!bound_symbol || !bound_sql_name) {
+			if (bind->stability && bind->stability[0] != '\0') {
+				bound_stability = tcc_strdup(tcc_function_stability_token(parsed_stability));
+			}
+			if (!bound_symbol || !bound_sql_name || (bind->stability && bind->stability[0] != '\0' && !bound_stability)) {
 				if (bound_symbol) {
 					duckdb_free(bound_symbol);
 				}
 				if (bound_sql_name) {
 					duckdb_free(bound_sql_name);
+				}
+				if (bound_stability) {
+					duckdb_free(bound_stability);
 				}
 				tcc_write_row(output, false, bind->mode, "state", "E_STORE_FAILED", "failed to store symbol binding",
 				              NULL, bind->sql_name, bind->symbol, NULL, "database");
@@ -9495,10 +9623,11 @@ static void tcc_module_function(duckdb_function_info info, duckdb_data_chunk out
 			tcc_session_clear_bind(&state->session);
 			state->session.bound_symbol = bound_symbol;
 			state->session.bound_sql_name = bound_sql_name;
+			state->session.bound_stability = bound_stability;
 			state->session.config_version++;
 			tcc_write_row(output, true, bind->mode, "bind", "OK", "symbol binding updated",
-			              state->session.bound_sql_name, state->session.bound_sql_name, state->session.bound_symbol, NULL,
-			              "connection");
+			              state->session.bound_stability ? state->session.bound_stability : "consistent",
+			              state->session.bound_sql_name, state->session.bound_symbol, NULL, "connection");
 		}
 	} else if (strcmp(bind->mode, "list") == 0) {
 		char detail[256];
@@ -9862,6 +9991,7 @@ bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 	duckdb_table_function_add_named_parameter(tf, "arg_types", list_varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "return_type", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "wrapper_mode", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "stability", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "include_path", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "sysinclude_path", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "library_path", varchar_type);
