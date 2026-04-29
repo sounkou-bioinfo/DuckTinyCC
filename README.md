@@ -74,7 +74,22 @@ scalar tokens (`void`, `bool`, `i8..u64`, `f32/f64`, `ptr`, `varchar`,
 nested forms (`list<type>`, `type[]`, `type[N]`,
 `struct<name:type;...>`, `map<key_type;value_type>`,
 `union<name:type;...>`). Nested signatures are recursive. `wrapper_mode`
-can be `row` (default) or `batch`.
+can be `row` (default) or `chunk_scalar_loop`.
+
+`chunk_scalar_loop` is intentionally named for what it is: DuckDB invokes the
+extension on a data chunk, DuckTinyCC exposes chunk-local column arrays to the
+generated wrapper, and that wrapper loops over rows calling the target C scalar
+function. It is not an Arrow or whole-table batch ABI.
+
+Scalar UDF stability defaults to `stability := 'consistent'`. Use
+`stability := 'volatile'` for functions that must be re-run for every row
+(e.g. RNGs, counters, clocks, allocation, I/O, callbacks, or reads from
+mutable external memory). `tinycc_bind` can stage stability for a later
+`compile`; an explicit `stability` on `compile`, `quick_compile`, or
+`codegen_preview` overrides the staged value. Generated C helper modes use
+explicit per-helper stability: pure metadata helpers (`sizeof`, `alignof`,
+field offsets, enum constants) are consistent; allocation, free, setter,
+and mutable-memory getter helpers are volatile.
 
 `decimal` maps to `ducktinycc_decimal_t`, a 128-bit scaled integer
 carrying `width` and `scale` metadata. SQL `DECIMAL(18,3)` values are
@@ -116,6 +131,44 @@ process reuse that directory without re-extracting. This means the
 extension is fully self-contained: no separate TinyCC installation or
 runtime path configuration is needed after deployment. The
 `tcc_system_paths()` table function shows where the runtime was placed.
+
+### Default libc linking policy
+
+DuckTinyCC compiles generated modules with TinyCC’s `-nostdlib` option by
+default. This keeps common UDFs self-contained and avoids requiring
+system C development files just to compile pure arithmetic or
+DuckTinyCC-wrapper code. As a result, ordinary libc symbols are **not**
+linked implicitly.
+
+If your C code calls libc functions that DuckTinyCC has not injected as
+host symbols, explicitly link libc with `library := 'c'` on `compile` or
+`quick_compile`, or stage the same setting with `mode := 'add_library',
+library := 'c'`. Including a header or writing an `extern` declaration
+only declares the function for C type checking; it does not resolve the
+symbol at TinyCC relocation time. Use `tcc_library_probe(library := 'c')`
+to check whether the platform libc import/library is discoverable in your
+environment.
+
+``` sql
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'extern int puts(const char *); int hello(void){ return puts("hello"); }',
+  symbol := 'hello',
+  sql_name := 'hello_from_libc',
+  return_type := 'i32',
+  arg_types := [],
+  library := 'c'
+);
+```
+
+Be careful with process-control APIs such as `exit`, `_Exit`, `abort`,
+`setjmp`, and `longjmp`: when explicitly resolved, they execute inside
+the DuckDB process. DuckTinyCC does not currently sandbox or catch native
+control-flow escapes from generated UDFs. Generated UDFs are trusted
+in-process native code; if you explicitly link libc, inject process-control
+symbols, or use inline assembly/syscalls, you are responsible for keeping
+that code inside the normal function-return contract.
 
 ## Build and Test during development
 
@@ -224,12 +277,12 @@ SELECT times2(21) AS value;
     ├─────────┼────────────┼─────────┼─────────┼─────────────────┼────────────────────────────────────────────┼──────────┼─────────┼─────────────┼──────────────────┤
     │ true    │ add_source │ state   │ OK      │ source appended │ long long times2(long long x){return x*2;} │ NULL     │ NULL    │ NULL        │ database         │
     └─────────┴────────────┴─────────┴─────────┴─────────────────┴────────────────────────────────────────────┴──────────┴─────────┴─────────────┴──────────────────┘
-    ┌─────────┬─────────────┬─────────┬─────────┬────────────────────────┬─────────┬──────────┬─────────┬─────────────┬──────────────────┐
-    │   ok    │    mode     │  phase  │  code   │        message         │ detail  │ sql_name │ symbol  │ artifact_id │ connection_scope │
-    │ boolean │   varchar   │ varchar │ varchar │        varchar         │ varchar │ varchar  │ varchar │   varchar   │     varchar      │
-    ├─────────┼─────────────┼─────────┼─────────┼────────────────────────┼─────────┼──────────┼─────────┼─────────────┼──────────────────┤
-    │ true    │ tinycc_bind │ bind    │ OK      │ symbol binding updated │ times2  │ times2   │ times2  │ NULL        │ connection       │
-    └─────────┴─────────────┴─────────┴─────────┴────────────────────────┴─────────┴──────────┴─────────┴─────────────┴──────────────────┘
+    ┌─────────┬─────────────┬─────────┬─────────┬────────────────────────┬────────────┬──────────┬─────────┬─────────────┬──────────────────┐
+    │   ok    │    mode     │  phase  │  code   │        message         │   detail   │ sql_name │ symbol  │ artifact_id │ connection_scope │
+    │ boolean │   varchar   │ varchar │ varchar │        varchar         │  varchar   │ varchar  │ varchar │   varchar   │     varchar      │
+    ├─────────┼─────────────┼─────────┼─────────┼────────────────────────┼────────────┼──────────┼─────────┼─────────────┼──────────────────┤
+    │ true    │ tinycc_bind │ bind    │ OK      │ symbol binding updated │ consistent │ times2   │ times2  │ NULL        │ connection       │
+    └─────────┴─────────────┴─────────┴─────────┴────────────────────────┴────────────┴──────────┴─────────┴─────────────┴──────────────────┘
     ┌─────────┬─────────┬─────────┬─────────┬──────────────────────────────────────────────────┬──────────────────────────┬──────────┬─────────┬────────────────────┬──────────────────┐
     │   ok    │  mode   │  phase  │  code   │                     message                      │          detail          │ sql_name │ symbol  │    artifact_id     │ connection_scope │
     │ boolean │ varchar │ varchar │ varchar │                     varchar                      │         varchar          │ varchar  │ varchar │      varchar       │     varchar      │
@@ -723,6 +776,8 @@ The infrastructure to support this is already in place:
 Generated and helper functions are SQL scalar UDFs; only
 `tcc_module(...)`, `tcc_system_paths(...)`, and `tcc_library_probe(...)`
 are table functions. For library linking, we can pass short names (`m`,
-`z`), explicit filenames (`libfoo.so`, `foo.dll`, `.a`, `.lib`), or
-path-like values. Pointer helpers are low-level interop tools; for most
+`z`, `c`), explicit filenames (`libfoo.so`, `foo.dll`, `.a`, `.lib`), or
+path-like values. Because DuckTinyCC uses `-nostdlib` by default, use
+`library := 'c'` when generated code needs libc symbols that are not
+otherwise injected. Pointer helpers are low-level interop tools; for most
 workflows, handle-based access is safer than raw `tcc_dataptr`.

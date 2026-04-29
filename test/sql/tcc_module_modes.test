@@ -214,6 +214,45 @@ false	codegen_preview	E_BAD_WRAPPER_MODE
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(
+  mode := 'codegen_preview',
+  symbol := 'add2',
+  sql_name := 'add2_preview_old_batch_mode',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  wrapper_mode := 'batch'
+);
+----
+false	codegen_preview	E_BAD_WRAPPER_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'codegen_preview',
+  symbol := 'add2',
+  sql_name := 'add2_preview_bad_stability',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  stability := 'weird'
+);
+----
+false	codegen_preview	E_BAD_STABILITY
+
+query I
+SELECT CASE WHEN detail LIKE '%"volatile"%' THEN 1 ELSE 0 END
+FROM tcc_module(
+  mode := 'codegen_preview',
+  symbol := 'vol_preview',
+  sql_name := 'vol_preview',
+  return_type := 'i64',
+  arg_types := [],
+  stability := 'volatile'
+);
+----
+1
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
   mode := 'quick_compile',
   source := 'int add_i32(int a, int b){ return a + b; }',
   symbol := 'add_i32',
@@ -246,6 +285,45 @@ query I
 SELECT add_i32(20, 22);
 ----
 42
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long vol_counter(void){ static long long x=0; return ++x; }',
+  symbol := 'vol_counter',
+  sql_name := 'vol_counter',
+  return_type := 'i64',
+  arg_types := [],
+  stability := 'volatile'
+);
+----
+true	quick_compile	OK
+
+query T
+WITH vals AS (SELECT i, vol_counter() AS v FROM range(3) t(i))
+SELECT string_agg(v::VARCHAR, ',' ORDER BY i) FROM vals;
+----
+1,2,3
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long consistent_counter(void){ static long long x=0; return ++x; }',
+  symbol := 'consistent_counter',
+  sql_name := 'consistent_counter',
+  return_type := 'i64',
+  arg_types := []
+);
+----
+true	quick_compile	OK
+
+query T
+WITH vals AS (SELECT i, consistent_counter() AS v FROM range(3) t(i))
+SELECT string_agg(v::VARCHAR, ',' ORDER BY i) FROM vals;
+----
+1,1,1
 
 query TTT
 SELECT ok, mode, code
@@ -322,6 +400,44 @@ query T
 SELECT touch(5);
 ----
 NULL
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tcc_new_state');
+----
+true	tcc_new_state	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_source',
+  source := 'long long bound_vol_counter(void){ static long long x=0; return ++x; }'
+);
+----
+true	add_source	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'tinycc_bind',
+  symbol := 'bound_vol_counter',
+  sql_name := 'bound_vol_counter',
+  stability := 'volatile'
+);
+----
+true	tinycc_bind	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'compile', return_type := 'i64', arg_types := []);
+----
+true	compile	OK
+
+query T
+WITH vals AS (SELECT i, bound_vol_counter() AS v FROM range(3) t(i))
+SELECT string_agg(v::VARCHAR, ',' ORDER BY i) FROM vals;
+----
+1,2,3
 
 query TTT
 SELECT ok, mode, code
@@ -593,7 +709,7 @@ FROM tcc_module(
   sql_name := 'batch_echo',
   return_type := 'varchar',
   arg_types := ['varchar'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -687,7 +803,7 @@ FROM tcc_module(
   sql_name := 'batch_blob_echo',
   return_type := 'blob',
   arg_types := ['blob'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -917,7 +1033,7 @@ FROM tcc_module(
   sql_name := 'batch_id_ptr',
   return_type := 'ptr',
   arg_types := ['ptr'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -1097,7 +1213,7 @@ FROM tcc_module(
   sql_name := 'sum_i64_batch',
   return_type := 'i64',
   arg_types := ['list<i64>'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -1179,7 +1295,7 @@ FROM tcc_module(
   sql_name := 'batch_echo_list',
   return_type := 'i64[]',
   arg_types := ['i64[]'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -1274,7 +1390,7 @@ FROM tcc_module(
   sql_name := 'batch_echo_array3',
   return_type := 'i64[3]',
   arg_types := ['i64[3]'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -1378,7 +1494,7 @@ FROM tcc_module(
   sql_name := 'batch_echo_struct',
   return_type := 'struct<a:i64;b:i64>',
   arg_types := ['struct<a:i64;b:i64>'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -1515,7 +1631,7 @@ FROM tcc_module(
   sql_name := 'batch_echo_map',
   return_type := 'map<i64;i64>',
   arg_types := ['map<i64;i64>'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -1670,7 +1786,7 @@ FROM tcc_module(
   sql_name := 'batch_add',
   return_type := 'i64',
   arg_types := ['i64','i64'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -1690,7 +1806,7 @@ FROM tcc_module(
   sql_name := 'batch_double',
   return_type := 'i64',
   arg_types := ['i64'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK
@@ -1709,7 +1825,7 @@ FROM tcc_module(
   sql_name := 'batch_touch',
   return_type := 'void',
   arg_types := ['i64'],
-  wrapper_mode := 'batch'
+  wrapper_mode := 'chunk_scalar_loop'
 );
 ----
 true	quick_compile	OK

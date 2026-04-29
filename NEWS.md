@@ -1,8 +1,12 @@
 # DuckTinyCC Extension News
 
-## ducktinycc 0.1.0.9000 (2026-04-06)
+## ducktinycc 0.1.0.9000 (2026-04-29)
 
+- **breaking change (wrapper mode naming)**: renamed public `wrapper_mode := 'batch'` to `wrapper_mode := 'chunk_scalar_loop'` to make clear that this mode is a chunk-local scalar loop, not an Arrow or whole-table batch ABI.
+- **feature (UDF stability)**: `tcc_module(...)` now accepts `stability := 'consistent' | 'volatile'` for `compile`, `quick_compile`, and `codegen_preview`; `tinycc_bind` can stage the same setting for later compilation. Volatile generated UDFs call DuckDB's `duckdb_scalar_function_set_volatile`, forcing re-execution for every row and preventing constant-folding of side-effectful C functions. Generated C helper modes now assign explicit helper stability internally: pure metadata/enum helpers are consistent, while allocation/free/setter/mutable-memory getter helpers are volatile.
 - **bugfix (embedded runtime extraction)**: `tcc_ensure_embedded_runtime` now hashes both `libtcc1.a` and all embedded manifest files (names and contents) when generating the deterministic extraction directory name. Previously, only `libtcc1.a` was hashed, which caused the extension to incorrectly reuse an older, incomplete extraction directory (missing `stdint.h`) after a user upgraded the extension via the community repository.
+- **documentation (libc linking / trusted native-code boundary)**: clarified that DuckTinyCC compiles generated modules with `-nostdlib` by default so ordinary libc symbols are not linked implicitly; C code that calls libc functions not injected by DuckTinyCC must explicitly request them with `library := 'c'` or staged `add_library`. Including a header or writing an `extern` declaration is not enough to resolve the symbol. Generated UDFs are trusted in-process native code; DuckTinyCC does not sandbox or muffle `exit`, `abort`, `setjmp`/`longjmp`, inline syscalls, or other native control-flow escapes once users explicitly make them available.
+- **test coverage (unsafe UDF control flow)**: added `scripts/test_unsafe_udf_control_flow.sh`, an opt-in subprocess-based probe documenting current behavior for `exit`, `setjmp`/`longjmp`, direct process-termination syscalls from generated UDFs, and the difference between unresolved `exit` by default versus process termination after explicit `library := 'c'`. DuckTinyCC does not currently sandbox or catch native control-flow escapes.
 
 ## ducktinycc 0.1.0 (2026-04-02)
 
