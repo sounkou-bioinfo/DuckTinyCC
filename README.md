@@ -618,6 +618,18 @@ SQL scalar UDF, and returns an ANSI-colored terminal canvas.
 ./demo/ggplot2_cli_demo.sh build/release/ducktinycc.duckdb_extension
 ```
 
+For a jgd JSON graphics device demo, install the `jgd` R package and run
+the capture-server variant. DuckDB calls a DuckTinyCC-compiled embedded-R
+UDF, that UDF opens `jgd::jgd(socket = ...)`, and the included Python
+server captures the streamed JSONL frame protocol.
+
+``` sh
+# one-time if needed, after cloning https://github.com/grantmcdermott/jgd
+R CMD INSTALL /tmp/jgd/r-pkg
+
+./demo/jgd_ducktinycc_demo.sh build/release/ducktinycc.duckdb_extension
+```
+
 The README renders the demo output below. GitHub strips inline HTML/CSS
 colors from README markdown, so the R chunk runs the same shell command
 and converts the ANSI SGR terminal output into an SVG image.
