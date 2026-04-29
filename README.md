@@ -607,6 +607,14 @@ function via `R_tryEval`; the SQL call writes a ggplot2 PNG.
 Rscript demo/ggplot2_via_ducktinycc.R /tmp/ducktinycc_ggplot2_demo.png
 ```
 
+To make the plot appear directly in the DuckDB CLI, run the embedded-R
+CLI variant. It compiles `demo/ggplot2_cli_udf.c`, calls ggplot2 from a
+SQL scalar UDF, and returns an ANSI-colored terminal canvas.
+
+``` sh
+./demo/ggplot2_cli_demo.sh build/release/ducktinycc.duckdb_extension
+```
+
 ### Embedded R Demo (Unix-like)
 
 The embedded R demo is still part of the repository. We keep it as an
