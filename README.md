@@ -599,6 +599,14 @@ For a real-world use of `add_symbol` to pass function pointers, see
 `demo/r_udf_via_ducktinycc.R`, which injects R C API addresses and
 compiles a trampoline that calls back into R from a DuckDB scalar UDF.
 
+For a visual callback demo, `demo/ggplot2_via_ducktinycc.R` registers a
+volatile SQL UDF whose TinyCC-compiled C trampoline calls a pinned R
+function via `R_tryEval`; the SQL call writes a ggplot2 PNG.
+
+``` sh
+Rscript demo/ggplot2_via_ducktinycc.R /tmp/ducktinycc_ggplot2_demo.png
+```
+
 ### Embedded R Demo (Unix-like)
 
 The embedded R demo is still part of the repository. We keep it as an
