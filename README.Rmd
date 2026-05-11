@@ -362,44 +362,12 @@ The README renders the demo output below. GitHub strips inline HTML/CSS colors f
 ansi_to_svg <- function(lines, path) {
   esc <- intToUtf8(27L)
   strip_ansi <- function(x) gsub(paste0(esc, "\\[[0-9;]*m"), "", x, perl = TRUE)
-  xml_escape <- function(x) {
-    x <- gsub("&", "&amp;", x, fixed = TRUE)
-    x <- gsub("<", "&lt;", x, fixed = TRUE)
-    x <- gsub(">", "&gt;", x, fixed = TRUE)
-    x <- gsub('"', "&quot;", x, fixed = TRUE)
+  process_line <- function(x) {
+    x <- fansi::html_esc(x)
+    x <- fansi::sgr_to_html(x, warn = FALSE)
+    x <- gsub("<span style='color: (#[0-9A-Fa-f]+);'>", "<tspan fill='\\1'>", x)
+    x <- gsub("</span>", "</tspan>", x)
     x
-  }
-  span_line <- function(x) {
-    pattern <- paste0(esc, "\\[([0-9;]*)m")
-    m <- gregexpr(pattern, x, perl = TRUE)[[1]]
-    if (m[1] < 0) {
-      return(sprintf("<tspan fill='#f8f8f2'>%s</tspan>", xml_escape(x)))
-    }
-    starts <- as.integer(m)
-    lens <- attr(m, "match.length")
-    caps <- regmatches(x, gregexpr(pattern, x, perl = TRUE))[[1]]
-    color <- "#f8f8f2"
-    pos <- 1L
-    out <- character()
-    for (i in seq_along(starts)) {
-      if (starts[i] > pos) {
-        txt <- substr(x, pos, starts[i] - 1L)
-        if (nzchar(txt)) out <- c(out, sprintf("<tspan fill='%s'>%s</tspan>", color, xml_escape(txt)))
-      }
-      code <- sub(pattern, "\\1", caps[i], perl = TRUE)
-      nums <- strsplit(code, ";", fixed = TRUE)[[1]]
-      if (identical(code, "0") || code == "") {
-        color <- "#f8f8f2"
-      } else if (length(nums) >= 5 && nums[1] == "38" && nums[2] == "2") {
-        color <- sprintf("#%02X%02X%02X", as.integer(nums[3]), as.integer(nums[4]), as.integer(nums[5]))
-      }
-      pos <- starts[i] + lens[i]
-    }
-    if (pos <= nchar(x, type = "bytes")) {
-      txt <- substring(x, pos)
-      if (nzchar(txt)) out <- c(out, sprintf("<tspan fill='%s'>%s</tspan>", color, xml_escape(txt)))
-    }
-    paste(out, collapse = "")
   }
   visible <- strip_ansi(lines)
   char_width <- 8.2
@@ -412,7 +380,7 @@ ansi_to_svg <- function(lines, path) {
     sprintf("<svg xmlns='http://www.w3.org/2000/svg' width='%d' height='%d' viewBox='0 0 %d %d'>", width, height, width, height),
     "<rect width='100%' height='100%' rx='8' fill='#1e1e1e'/>",
     sprintf("<style>text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:%dpx;white-space:pre;}</style>", font_size),
-    sprintf("<text x='12' y='%d'>%s</text>", y, vapply(lines, span_line, character(1))),
+    sprintf("<text x='12' y='%d' fill='#f8f8f2'>%s</text>", y, vapply(lines, process_line, character(1))),
     "</svg>"
   )
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)

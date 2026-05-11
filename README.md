@@ -619,10 +619,11 @@ SQL scalar UDF, and returns an ANSI-colored terminal canvas.
 ```
 
 For a jgd JSON graphics device demo, install the `jgd` R package and run
-the terminal-server variant. DuckDB calls a DuckTinyCC-compiled embedded-R
-UDF, that UDF opens `jgd::jgd(socket = ...)`, and the included all-C demo
-server implements the minimal jgd JSONL handshake/metrics path and renders
-the streamed drawing operations back to an ANSI-colored terminal canvas.
+the terminal-server variant. DuckDB calls a DuckTinyCC-compiled
+embedded-R UDF, that UDF opens `jgd::jgd(socket = ...)`, and the
+included all-C demo server implements the minimal jgd JSONL
+handshake/metrics path and renders the streamed drawing operations back
+to an ANSI-colored terminal canvas.
 
 ``` sh
 # one-time if needed, after cloning https://github.com/grantmcdermott/jgd
@@ -809,7 +810,7 @@ SQL
     │             msg             │
     │           varchar           │
     ├─────────────────────────────┤
-    │ hello from embedded R 4.5.2 │
+    │ hello from embedded R 4.6.0 │
     └─────────────────────────────┘
 
 ## What Remains Before 1.0.0
