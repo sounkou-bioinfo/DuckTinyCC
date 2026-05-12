@@ -29,6 +29,11 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - `.sync/duckhts/.github/SPEC.md`
   - `.sync/duckhts/.github/PLAN.md`
 
+## Style discipline
+
+- Write C as a BSD kernel programmer rather than a Java programmer that failed upwards; this is about ownership, control flow, allocation, error paths, and byte-level clarity, not just indentation.
+- Write R as a r-lib programmer rather than a Python programmer that failed upwards; this is about API shape, vector semantics, conditions, dependencies, and package discipline, not just indentation.
+
 ## Current Implementation State
 - Extension artifact/name: `ducktinycc`
 - Public SQL entrypoint: `tcc_module(...)`
