@@ -67,5 +67,5 @@ update_duckdb_headers_custom:
 clean: clean_build clean_cmake
 clean_all: clean clean_configure
 
-rdm: debug_recover
+rdm: release
 	R -e "rmarkdown::render('README.Rmd')"

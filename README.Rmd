@@ -2,7 +2,7 @@
 output: github_document
 ---
 
-<!-- README.md is generated from README.Rmd. Please edit that file -->
+<!-- README.md is generated from README.Rmd using [duckknit](https://github.com/rundel/duckknit). Please edit that file -->
 
 ```{r, include = FALSE}
 knitr::opts_chunk$set(
@@ -11,17 +11,71 @@ knitr::opts_chunk$set(
   fig.path = "man/figures/README-",
   out.width = "100%"
 )
+library(duckknit)
+knitr::opts_chunk$set(mode = "table", comment = "")
 
-knitr::knit_engines$set(sql = function(options) {
-  code <- paste(options$code, collapse = "\n")
-  if (isTRUE(options$eval)) {
-    out <- system2("duckdb", "-unsigned", input = code,
-                   stdout = TRUE, stderr = TRUE)
-    knitr::engine_output(options, code, out)
-  } else {
-    knitr::engine_output(options, code, NULL)
-  }
+# Rewrite duckknit's ``` duckdb fences to ``` sql so GitHub applies
+# SQL syntax highlighting in the rendered README.
+knitr::knit_hooks$set(document = function(x) {
+  gsub("(?m)^``` duckdb", "``` sql", x, perl = TRUE)
 })
+
+# Pre-start the default duckknit session with -unsigned so unsigned local
+# extension builds can be loaded. duckknit_start_session() only accepts a db
+# path, not extra CLI flags, so we launch the process directly and register it
+# in duckknit's internal session table.
+duckdb_bin <- Sys.which("duckdb")
+if (nzchar(duckdb_bin)) {
+  options(duckknit.duckdb = unname(duckdb_bin))
+}
+local({
+  ns <- asNamespace("duckknit")
+  cmd <- duckknit:::find_duckdb()
+  proc <- processx::process$new(
+    command = cmd,
+    args = c("-unsigned", ":memory:"),
+    stdin = "|", stdout = "|", stderr = "|",
+    cleanup = TRUE, cleanup_tree = TRUE
+  )
+  unlockBinding(".sessions", ns)
+  ns$.sessions[["readme"]] <- proc
+  lockBinding(".sessions", ns)
+  unlockBinding(".state", ns)
+  ns$.state$last_session <- "readme"
+  lockBinding(".state", ns)
+})
+
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
+}
+
+# DuckTinyCC examples embed C source in SQL string literals. Those strings often
+# have lines ending in semicolons, which duckknit's simple line splitter would
+# mistake for SQL statement boundaries. Keep duckknit's persistent CLI session,
+# but submit each chunk as one unit.
+knitr::knit_engines$set(duckdb = function(options) {
+  if (identical(options$eval, FALSE)) {
+    return(knitr::engine_output(options, code = options$code, out = ""))
+  }
+  timeout <- options$timeout %||% 30000L
+  session <- duckknit::duckknit_get_session(options$session %||% "readme", options$db %||% ":memory:")
+  if (!is.null(options$mode)) {
+    duckknit::duckknit_exec(session, paste0(".mode ", options$mode), timeout = timeout)
+  }
+  result <- duckknit::duckknit_exec(session, paste(options$code, collapse = "\n"), timeout = timeout)
+  if (nzchar(result$stderr) && !isTRUE(options$error)) {
+    stop(result$stderr, call. = FALSE)
+  }
+  out <- result$stdout
+  if (nzchar(result$stderr)) {
+    out <- paste(out, result$stderr, sep = "\n")
+  }
+  knitr::engine_output(options, code = options$code, out = out)
+})
+```
+
+```{duckdb, include = FALSE}
+PRAGMA threads=1;
 ```
 
 # DuckTinyCC
@@ -32,7 +86,7 @@ knitr::knit_engines$set(sql = function(options) {
 
 The fastest path is `quick_compile`: one call compiles C source, generates a wrapper, relocates in memory, and registers a SQL function.
 
-```{sql eval=TRUE, collapse=FALSE, comment=""}
+```{duckdb eval=TRUE, collapse=FALSE, comment=""}
 LOAD 'build/release/ducktinycc.duckdb_extension';
 
 SELECT ok, mode, code
@@ -105,6 +159,8 @@ Be careful with process-control APIs such as `exit`, `_Exit`, `abort`, `setjmp`,
 
 ## Build and Test during development
 
+README rendering uses `rmarkdown` and [`duckknit`](https://github.com/rundel/duckknit) so SQL examples share one DuckDB CLI session during `make rdm`.
+
 ```sh
 make configure
 make debug
@@ -125,9 +181,7 @@ make test_embedded_release
 
 This example uses one-shot compile with `libm`, then calls the generated function.
 
-```{sql eval=TRUE, collapse=FALSE, comment=""}
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
+```{duckdb eval=TRUE, collapse=FALSE, comment=""}
 -- Compile and register qpow.
 SELECT ok, mode, code
 FROM tcc_module(
@@ -149,9 +203,7 @@ SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
 
 This example stages source and binding first, then compiles in a separate call.
 
-```{sql eval=TRUE, collapse=FALSE, comment=""}
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
+```{duckdb eval=TRUE, collapse=FALSE, comment=""}
 -- Reset staged state.
 SELECT *
 FROM tcc_module(
@@ -184,13 +236,18 @@ FROM tcc_module(
 SELECT times2(21) AS value;
 ```
 
+```{duckdb, include = FALSE}
+SELECT *
+FROM tcc_module(
+  mode := 'tcc_new_state'
+);
+```
+
 ### Simple STRUCT Argument
 
 This example takes one `STRUCT(a BIGINT, b BIGINT)` argument and sums valid fields.
 
-```{sql eval=TRUE, collapse=FALSE, comment=""}
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
+```{duckdb eval=TRUE, collapse=FALSE, comment=""}
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -219,9 +276,7 @@ SELECT struct_sum_demo({'a': 2::BIGINT, 'b': NULL::BIGINT}::STRUCT(a BIGINT, b B
 
 This example compiles one function for `BIGINT[]` (`i64[]`) and one for fixed-size `BIGINT[3]` (`i64[3]`).
 
-```{sql eval=TRUE, collapse=FALSE, comment=""}
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
+```{duckdb eval=TRUE, collapse=FALSE, comment=""}
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -268,9 +323,7 @@ SELECT array_sum3_demo([1, NULL, 3]::BIGINT[3]) AS array_sum;
 
 This example echoes a `DECIMAL(18,3)` value through a C function. The bridge represents decimals as a `ducktinycc_decimal_t` struct (a 128-bit scaled integer with width and scale metadata).
 
-```{sql eval=TRUE, collapse=FALSE, comment=""}
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
+```{duckdb eval=TRUE, collapse=FALSE, comment=""}
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -288,9 +341,7 @@ SELECT decimal_echo(12.345::DECIMAL(18,3)) AS value;
 
 This example shows where TinyCC looks for assets and how a library probe resolves candidates.
 
-```{sql eval=TRUE, collapse=FALSE, comment=""}
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
+```{duckdb eval=TRUE, collapse=FALSE, comment=""}
 SELECT kind, key, value, exists
 FROM tcc_system_paths();
 
@@ -304,9 +355,7 @@ FROM tcc_library_probe(library := 'libtcc1.a');
 
 The simplest pattern uses the address itself as the value (no dereference):
 
-```{sql eval=TRUE, collapse=FALSE, comment=""}
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
+```{duckdb eval=TRUE, collapse=FALSE, comment=""}
 -- Stage a symbol: the literal 42 becomes the symbol's address
 SELECT ok, mode, code
 FROM tcc_module(

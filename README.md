@@ -1,5 +1,5 @@
 
-<!-- README.md is generated from README.Rmd. Please edit that file -->
+<!-- README.md is generated from README.Rmd using [duckknit](https://github.com/rundel/duckknit). Please edit that file -->
 
 # DuckTinyCC
 
@@ -32,18 +32,16 @@ FROM tcc_module(
 SELECT hello_from_c() AS msg;
 ```
 
-    ┌─────────┬───────────────┬─────────┐
-    │   ok    │     mode      │  code   │
-    │ boolean │    varchar    │ varchar │
-    ├─────────┼───────────────┼─────────┤
-    │ true    │ quick_compile │ OK      │
-    └─────────┴───────────────┴─────────┘
-    ┌──────────────┐
-    │     msg      │
-    │   varchar    │
-    ├──────────────┤
-    │ hello from C │
-    └──────────────┘
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +--------------+
+    |     msg      |
+    +--------------+
+    | hello from C |
+    +--------------+
 
 ## API Overview
 
@@ -175,6 +173,10 @@ contract.
 
 ## Build and Test during development
 
+README rendering uses `rmarkdown` and
+[`duckknit`](https://github.com/rundel/duckknit) so SQL examples share
+one DuckDB CLI session during `make rdm`.
+
 ``` sh
 make configure
 make debug
@@ -196,8 +198,6 @@ This example uses one-shot compile with `libm`, then calls the generated
 function.
 
 ``` sql
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
 -- Compile and register qpow.
 SELECT ok, mode, code
 FROM tcc_module(
@@ -215,18 +215,16 @@ double qpow(double x, double y){ return pow(x, y); }',
 SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
 ```
 
-    ┌─────────┬───────────────┬─────────┐
-    │   ok    │     mode      │  code   │
-    │ boolean │    varchar    │ varchar │
-    ├─────────┼───────────────┼─────────┤
-    │ true    │ quick_compile │ OK      │
-    └─────────┴───────────────┴─────────┘
-    ┌───────┐
-    │ value │
-    │ int64 │
-    ├───────┤
-    │    32 │
-    └───────┘
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +-------+
+    | value |
+    +-------+
+    | 32    |
+    +-------+
 
 ### Stage Then Compile
 
@@ -234,8 +232,6 @@ This example stages source and binding first, then compiles in a
 separate call.
 
 ``` sql
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
 -- Reset staged state.
 SELECT *
 FROM tcc_module(
@@ -268,36 +264,31 @@ FROM tcc_module(
 SELECT times2(21) AS value;
 ```
 
-    ┌─────────┬───────────────┬─────────┬─────────┬─────────────────────────────────┬────────────┬──────────┬─────────┬─────────────┬──────────────────┐
-    │   ok    │     mode      │  phase  │  code   │             message             │   detail   │ sql_name │ symbol  │ artifact_id │ connection_scope │
-    │ boolean │    varchar    │ varchar │ varchar │             varchar             │  varchar   │ varchar  │ varchar │   varchar   │     varchar      │
-    ├─────────┼───────────────┼─────────┼─────────┼─────────────────────────────────┼────────────┼──────────┼─────────┼─────────────┼──────────────────┤
-    │ true    │ tcc_new_state │ state   │ OK      │ new TinyCC build state prepared │ state_id=1 │ NULL     │ NULL    │ NULL        │ database         │
-    └─────────┴───────────────┴─────────┴─────────┴─────────────────────────────────┴────────────┴──────────┴─────────┴─────────────┴──────────────────┘
-    ┌─────────┬────────────┬─────────┬─────────┬─────────────────┬────────────────────────────────────────────┬──────────┬─────────┬─────────────┬──────────────────┐
-    │   ok    │    mode    │  phase  │  code   │     message     │                   detail                   │ sql_name │ symbol  │ artifact_id │ connection_scope │
-    │ boolean │  varchar   │ varchar │ varchar │     varchar     │                  varchar                   │ varchar  │ varchar │   varchar   │     varchar      │
-    ├─────────┼────────────┼─────────┼─────────┼─────────────────┼────────────────────────────────────────────┼──────────┼─────────┼─────────────┼──────────────────┤
-    │ true    │ add_source │ state   │ OK      │ source appended │ long long times2(long long x){return x*2;} │ NULL     │ NULL    │ NULL        │ database         │
-    └─────────┴────────────┴─────────┴─────────┴─────────────────┴────────────────────────────────────────────┴──────────┴─────────┴─────────────┴──────────────────┘
-    ┌─────────┬─────────────┬─────────┬─────────┬────────────────────────┬────────────┬──────────┬─────────┬─────────────┬──────────────────┐
-    │   ok    │    mode     │  phase  │  code   │        message         │   detail   │ sql_name │ symbol  │ artifact_id │ connection_scope │
-    │ boolean │   varchar   │ varchar │ varchar │        varchar         │  varchar   │ varchar  │ varchar │   varchar   │     varchar      │
-    ├─────────┼─────────────┼─────────┼─────────┼────────────────────────┼────────────┼──────────┼─────────┼─────────────┼──────────────────┤
-    │ true    │ tinycc_bind │ bind    │ OK      │ symbol binding updated │ consistent │ times2   │ times2  │ NULL        │ connection       │
-    └─────────┴─────────────┴─────────┴─────────┴────────────────────────┴────────────┴──────────┴─────────┴─────────────┴──────────────────┘
-    ┌─────────┬─────────┬─────────┬─────────┬──────────────────────────────────────────────────┬──────────────────────────┬──────────┬─────────┬────────────────────┬──────────────────┐
-    │   ok    │  mode   │  phase  │  code   │                     message                      │          detail          │ sql_name │ symbol  │    artifact_id     │ connection_scope │
-    │ boolean │ varchar │ varchar │ varchar │                     varchar                      │         varchar          │ varchar  │ varchar │      varchar       │     varchar      │
-    ├─────────┼─────────┼─────────┼─────────┼──────────────────────────────────────────────────┼──────────────────────────┼──────────┼─────────┼────────────────────┼──────────────────┤
-    │ true    │ compile │ load    │ OK      │ compiled and registered SQL function via codegen │ /tmp/ducktinycc_c28a9bb2 │ times2   │ times2  │ times2@ffi_state_1 │ database         │
-    └─────────┴─────────┴─────────┴─────────┴──────────────────────────────────────────────────┴──────────────────────────┴──────────┴─────────┴────────────────────┴──────────────────┘
-    ┌───────┐
-    │ value │
-    │ int64 │
-    ├───────┤
-    │    42 │
-    └───────┘
+    +------+---------------+-------+------+---------------------------------+------------+----------+--------+-------------+------------------+
+    |  ok  |     mode      | phase | code |             message             |   detail   | sql_name | symbol | artifact_id | connection_scope |
+    +------+---------------+-------+------+---------------------------------+------------+----------+--------+-------------+------------------+
+    | true | tcc_new_state | state | OK   | new TinyCC build state prepared | state_id=1 | NULL     | NULL   | NULL        | database         |
+    +------+---------------+-------+------+---------------------------------+------------+----------+--------+-------------+------------------+
+    +------+------------+-------+------+-----------------+--------------------------------------------+----------+--------+-------------+------------------+
+    |  ok  |    mode    | phase | code |     message     |                   detail                   | sql_name | symbol | artifact_id | connection_scope |
+    +------+------------+-------+------+-----------------+--------------------------------------------+----------+--------+-------------+------------------+
+    | true | add_source | state | OK   | source appended | long long times2(long long x){return x*2;} | NULL     | NULL   | NULL        | database         |
+    +------+------------+-------+------+-----------------+--------------------------------------------+----------+--------+-------------+------------------+
+    +------+-------------+-------+------+------------------------+------------+----------+--------+-------------+------------------+
+    |  ok  |    mode     | phase | code |        message         |   detail   | sql_name | symbol | artifact_id | connection_scope |
+    +------+-------------+-------+------+------------------------+------------+----------+--------+-------------+------------------+
+    | true | tinycc_bind | bind  | OK   | symbol binding updated | consistent | times2   | times2 | NULL        | connection       |
+    +------+-------------+-------+------+------------------------+------------+----------+--------+-------------+------------------+
+    +------+---------+-------+------+--------------------------------------------------+--------------------------+----------+--------+--------------------+------------------+
+    |  ok  |  mode   | phase | code |                     message                      |          detail          | sql_name | symbol |    artifact_id     | connection_scope |
+    +------+---------+-------+------+--------------------------------------------------+--------------------------+----------+--------+--------------------+------------------+
+    | true | compile | load  | OK   | compiled and registered SQL function via codegen | /tmp/ducktinycc_c28a9bb2 | times2   | times2 | times2@ffi_state_1 | database         |
+    +------+---------+-------+------+--------------------------------------------------+--------------------------+----------+--------+--------------------+------------------+
+    +-------+
+    | value |
+    +-------+
+    | 42    |
+    +-------+
 
 ### Simple STRUCT Argument
 
@@ -305,8 +296,6 @@ This example takes one `STRUCT(a BIGINT, b BIGINT)` argument and sums
 valid fields.
 
 ``` sql
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -331,24 +320,21 @@ SELECT struct_sum_demo({'a': 2::BIGINT, 'b': 5::BIGINT}::STRUCT(a BIGINT, b BIGI
 SELECT struct_sum_demo({'a': 2::BIGINT, 'b': NULL::BIGINT}::STRUCT(a BIGINT, b BIGINT)) AS one_null;
 ```
 
-    ┌─────────┬───────────────┬─────────┐
-    │   ok    │     mode      │  code   │
-    │ boolean │    varchar    │ varchar │
-    ├─────────┼───────────────┼─────────┤
-    │ true    │ quick_compile │ OK      │
-    └─────────┴───────────────┴─────────┘
-    ┌──────────┐
-    │ both_set │
-    │  int64   │
-    ├──────────┤
-    │        7 │
-    └──────────┘
-    ┌──────────┐
-    │ one_null │
-    │  int64   │
-    ├──────────┤
-    │        2 │
-    └──────────┘
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +----------+
+    | both_set |
+    +----------+
+    | 7        |
+    +----------+
+    +----------+
+    | one_null |
+    +----------+
+    | 2        |
+    +----------+
 
 ### Simple LIST and ARRAY Arguments
 
@@ -356,8 +342,6 @@ This example compiles one function for `BIGINT[]` (`i64[]`) and one for
 fixed-size `BIGINT[3]` (`i64[3]`).
 
 ``` sql
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -400,30 +384,26 @@ SELECT list_sum_demo([1, NULL, 3]::BIGINT[]) AS list_sum;
 SELECT array_sum3_demo([1, NULL, 3]::BIGINT[3]) AS array_sum;
 ```
 
-    ┌─────────┬───────────────┬─────────┐
-    │   ok    │     mode      │  code   │
-    │ boolean │    varchar    │ varchar │
-    ├─────────┼───────────────┼─────────┤
-    │ true    │ quick_compile │ OK      │
-    └─────────┴───────────────┴─────────┘
-    ┌─────────┬───────────────┬─────────┐
-    │   ok    │     mode      │  code   │
-    │ boolean │    varchar    │ varchar │
-    ├─────────┼───────────────┼─────────┤
-    │ true    │ quick_compile │ OK      │
-    └─────────┴───────────────┴─────────┘
-    ┌──────────┐
-    │ list_sum │
-    │  int64   │
-    ├──────────┤
-    │        4 │
-    └──────────┘
-    ┌───────────┐
-    │ array_sum │
-    │   int64   │
-    ├───────────┤
-    │         4 │
-    └───────────┘
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +----------+
+    | list_sum |
+    +----------+
+    | 4        |
+    +----------+
+    +-----------+
+    | array_sum |
+    +-----------+
+    | 4         |
+    +-----------+
 
 ### DECIMAL Round-Trip
 
@@ -432,8 +412,6 @@ bridge represents decimals as a `ducktinycc_decimal_t` struct (a 128-bit
 scaled integer with width and scale metadata).
 
 ``` sql
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
 SELECT ok, mode, code
 FROM tcc_module(
   mode := 'quick_compile',
@@ -447,18 +425,16 @@ FROM tcc_module(
 SELECT decimal_echo(12.345::DECIMAL(18,3)) AS value;
 ```
 
-    ┌─────────┬───────────────┬─────────┐
-    │   ok    │     mode      │  code   │
-    │ boolean │    varchar    │ varchar │
-    ├─────────┼───────────────┼─────────┤
-    │ true    │ quick_compile │ OK      │
-    └─────────┴───────────────┴─────────┘
-    ┌───────────────┐
-    │     value     │
-    │ decimal(18,3) │
-    ├───────────────┤
-    │        12.345 │
-    └───────────────┘
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +--------+
+    | value  |
+    +--------+
+    | 12.345 |
+    +--------+
 
 ### Inspect Runtime Paths and Library Resolution
 
@@ -466,8 +442,6 @@ This example shows where TinyCC looks for assets and how a library probe
 resolves candidates.
 
 ``` sql
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
 SELECT kind, key, value, exists
 FROM tcc_system_paths();
 
@@ -475,70 +449,66 @@ SELECT kind, key, value, exists, detail
 FROM tcc_library_probe(library := 'libtcc1.a');
 ```
 
-    ┌──────────────┬──────────────┬──────────────────────────────────────────┬─────────┐
-    │     kind     │     key      │                  value                   │ exists  │
-    │   varchar    │   varchar    │                 varchar                  │ boolean │
-    ├──────────────┼──────────────┼──────────────────────────────────────────┼─────────┤
-    │ runtime      │ runtime_path │ /tmp/ducktinycc_c28a9bb2                 │ true    │
-    │ include_path │ path         │ /tmp/ducktinycc_c28a9bb2/include         │ false   │
-    │ include_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib/tcc/include │ false   │
-    │ library_path │ path         │ /tmp/ducktinycc_c28a9bb2                 │ true    │
-    │ library_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib             │ false   │
-    │ library_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib/tcc         │ false   │
-    │ library_path │ path         │ /usr/lib                                 │ true    │
-    │ library_path │ path         │ /usr/lib64                               │ true    │
-    │ library_path │ path         │ /usr/local/lib                           │ true    │
-    │ library_path │ path         │ /lib                                     │ true    │
-    │ library_path │ path         │ /lib64                                   │ true    │
-    │ library_path │ path         │ /lib32                                   │ true    │
-    │ library_path │ path         │ /usr/local/lib64                         │ false   │
-    │ library_path │ path         │ /usr/lib/x86_64-linux-gnu                │ true    │
-    │ library_path │ path         │ /usr/lib/i386-linux-gnu                  │ true    │
-    │ library_path │ path         │ /lib/x86_64-linux-gnu                    │ true    │
-    │ library_path │ path         │ /lib32/x86_64-linux-gnu                  │ false   │
-    │ library_path │ path         │ /usr/lib/x86_64-linux-musl               │ false   │
-    │ library_path │ path         │ /usr/lib/i386-linux-musl                 │ false   │
-    │ library_path │ path         │ /lib/x86_64-linux-musl                   │ false   │
-    │ library_path │ path         │ /lib32/x86_64-linux-musl                 │ false   │
-    │ library_path │ path         │ /usr/lib/amd64-linux-gnu                 │ false   │
-    │ library_path │ path         │ /usr/lib/aarch64-linux-gnu               │ false   │
-    │ library_path │ path         │ /usr/lib/R/lib                           │ true    │
-    │ library_path │ path         │ /usr/lib/jvm/default-java/lib/server     │ true    │
-    └──────────────┴──────────────┴──────────────────────────────────────────┴─────────┘
-      25 rows                                                                4 columns
-    ┌─────────────┬──────────────┬──────────────────────────────────────┬─────────┬──────────────────────────────────┐
-    │    kind     │     key      │                value                 │ exists  │              detail              │
-    │   varchar   │   varchar    │               varchar                │ boolean │             varchar              │
-    ├─────────────┼──────────────┼──────────────────────────────────────┼─────────┼──────────────────────────────────┤
-    │ input       │ library      │ libtcc1.a                            │ false   │ library probe request            │
-    │ runtime     │ runtime_path │ /tmp/ducktinycc_c28a9bb2             │ true    │ effective runtime path           │
-    │ search_path │ path         │ /tmp/ducktinycc_c28a9bb2             │ true    │ searched path                    │
-    │ search_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib         │ false   │ searched path                    │
-    │ search_path │ path         │ /tmp/ducktinycc_c28a9bb2/lib/tcc     │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib                             │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/lib64                           │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/local/lib                       │ true    │ searched path                    │
-    │ search_path │ path         │ /lib                                 │ true    │ searched path                    │
-    │ search_path │ path         │ /lib64                               │ true    │ searched path                    │
-    │ search_path │ path         │ /lib32                               │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/local/lib64                     │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/x86_64-linux-gnu            │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/lib/i386-linux-gnu              │ true    │ searched path                    │
-    │ search_path │ path         │ /lib/x86_64-linux-gnu                │ true    │ searched path                    │
-    │ search_path │ path         │ /lib32/x86_64-linux-gnu              │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/x86_64-linux-musl           │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/i386-linux-musl             │ false   │ searched path                    │
-    │ search_path │ path         │ /lib/x86_64-linux-musl               │ false   │ searched path                    │
-    │ search_path │ path         │ /lib32/x86_64-linux-musl             │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/amd64-linux-gnu             │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/aarch64-linux-gnu           │ false   │ searched path                    │
-    │ search_path │ path         │ /usr/lib/R/lib                       │ true    │ searched path                    │
-    │ search_path │ path         │ /usr/lib/jvm/default-java/lib/server │ true    │ searched path                    │
-    │ candidate   │ libtcc1.a    │ /tmp/ducktinycc_c28a9bb2/libtcc1.a   │ true    │ resolved                         │
-    │ resolved    │ path         │ /tmp/ducktinycc_c28a9bb2/libtcc1.a   │ true    │ resolved library path            │
-    │ resolved    │ link_name    │ tcc1                                 │ true    │ normalized tcc_add_library value │
-    └─────────────┴──────────────┴──────────────────────────────────────┴─────────┴──────────────────────────────────┘
-      27 rows                                                                                              5 columns
+    +--------------+--------------+------------------------------------------+--------+
+    |     kind     |     key      |                  value                   | exists |
+    +--------------+--------------+------------------------------------------+--------+
+    | runtime      | runtime_path | /tmp/ducktinycc_c28a9bb2                 | true   |
+    | include_path | path         | /tmp/ducktinycc_c28a9bb2/include         | false  |
+    | include_path | path         | /tmp/ducktinycc_c28a9bb2/lib/tcc/include | false  |
+    | library_path | path         | /tmp/ducktinycc_c28a9bb2                 | true   |
+    | library_path | path         | /tmp/ducktinycc_c28a9bb2/lib             | false  |
+    | library_path | path         | /tmp/ducktinycc_c28a9bb2/lib/tcc         | false  |
+    | library_path | path         | /usr/lib                                 | true   |
+    | library_path | path         | /usr/lib64                               | true   |
+    | library_path | path         | /usr/local/lib                           | true   |
+    | library_path | path         | /lib                                     | true   |
+    | library_path | path         | /lib64                                   | true   |
+    | library_path | path         | /lib32                                   | true   |
+    | library_path | path         | /usr/local/lib64                         | false  |
+    | library_path | path         | /usr/lib/x86_64-linux-gnu                | true   |
+    | library_path | path         | /usr/lib/i386-linux-gnu                  | true   |
+    | library_path | path         | /lib/x86_64-linux-gnu                    | true   |
+    | library_path | path         | /lib32/x86_64-linux-gnu                  | false  |
+    | library_path | path         | /usr/lib/x86_64-linux-musl               | false  |
+    | library_path | path         | /usr/lib/i386-linux-musl                 | false  |
+    | library_path | path         | /lib/x86_64-linux-musl                   | false  |
+    | library_path | path         | /lib32/x86_64-linux-musl                 | false  |
+    | library_path | path         | /usr/lib/amd64-linux-gnu                 | false  |
+    | library_path | path         | /usr/lib/aarch64-linux-gnu               | false  |
+    | library_path | path         | /usr/lib/R/lib                           | true   |
+    | library_path | path         | /usr/lib/jvm/default-java/lib/server     | true   |
+    +--------------+--------------+------------------------------------------+--------+
+    +-------------+--------------+--------------------------------------+--------+----------------------------------+
+    |    kind     |     key      |                value                 | exists |              detail              |
+    +-------------+--------------+--------------------------------------+--------+----------------------------------+
+    | input       | library      | libtcc1.a                            | false  | library probe request            |
+    | runtime     | runtime_path | /tmp/ducktinycc_c28a9bb2             | true   | effective runtime path           |
+    | search_path | path         | /tmp/ducktinycc_c28a9bb2             | true   | searched path                    |
+    | search_path | path         | /tmp/ducktinycc_c28a9bb2/lib         | false  | searched path                    |
+    | search_path | path         | /tmp/ducktinycc_c28a9bb2/lib/tcc     | false  | searched path                    |
+    | search_path | path         | /usr/lib                             | true   | searched path                    |
+    | search_path | path         | /usr/lib64                           | true   | searched path                    |
+    | search_path | path         | /usr/local/lib                       | true   | searched path                    |
+    | search_path | path         | /lib                                 | true   | searched path                    |
+    | search_path | path         | /lib64                               | true   | searched path                    |
+    | search_path | path         | /lib32                               | true   | searched path                    |
+    | search_path | path         | /usr/local/lib64                     | false  | searched path                    |
+    | search_path | path         | /usr/lib/x86_64-linux-gnu            | true   | searched path                    |
+    | search_path | path         | /usr/lib/i386-linux-gnu              | true   | searched path                    |
+    | search_path | path         | /lib/x86_64-linux-gnu                | true   | searched path                    |
+    | search_path | path         | /lib32/x86_64-linux-gnu              | false  | searched path                    |
+    | search_path | path         | /usr/lib/x86_64-linux-musl           | false  | searched path                    |
+    | search_path | path         | /usr/lib/i386-linux-musl             | false  | searched path                    |
+    | search_path | path         | /lib/x86_64-linux-musl               | false  | searched path                    |
+    | search_path | path         | /lib32/x86_64-linux-musl             | false  | searched path                    |
+    | search_path | path         | /usr/lib/amd64-linux-gnu             | false  | searched path                    |
+    | search_path | path         | /usr/lib/aarch64-linux-gnu           | false  | searched path                    |
+    | search_path | path         | /usr/lib/R/lib                       | true   | searched path                    |
+    | search_path | path         | /usr/lib/jvm/default-java/lib/server | true   | searched path                    |
+    | candidate   | libtcc1.a    | /tmp/ducktinycc_c28a9bb2/libtcc1.a   | true   | resolved                         |
+    | resolved    | path         | /tmp/ducktinycc_c28a9bb2/libtcc1.a   | true   | resolved library path            |
+    | resolved    | link_name    | tcc1                                 | true   | normalized tcc_add_library value |
+    +-------------+--------------+--------------------------------------+--------+----------------------------------+
 
 ### Inject Symbols and Pass Pointers
 
@@ -551,8 +521,6 @@ The simplest pattern uses the address itself as the value (no
 dereference):
 
 ``` sql
-LOAD 'build/release/ducktinycc.duckdb_extension';
-
 -- Stage a symbol: the literal 42 becomes the symbol's address
 SELECT ok, mode, code
 FROM tcc_module(
@@ -579,24 +547,21 @@ long long get_magic(void) {
 SELECT get_magic() AS magic;
 ```
 
-    ┌─────────┬────────────┬─────────┐
-    │   ok    │    mode    │  code   │
-    │ boolean │  varchar   │ varchar │
-    ├─────────┼────────────┼─────────┤
-    │ true    │ add_symbol │ OK      │
-    └─────────┴────────────┴─────────┘
-    ┌─────────┬───────────────┬─────────┐
-    │   ok    │     mode      │  code   │
-    │ boolean │    varchar    │ varchar │
-    ├─────────┼───────────────┼─────────┤
-    │ true    │ quick_compile │ OK      │
-    └─────────┴───────────────┴─────────┘
-    ┌───────┐
-    │ magic │
-    │ int64 │
-    ├───────┤
-    │    42 │
-    └───────┘
+    +------+------------+------+
+    |  ok  |    mode    | code |
+    +------+------------+------+
+    | true | add_symbol | OK   |
+    +------+------------+------+
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +-------+
+    | magic |
+    +-------+
+    | 42    |
+    +-------+
 
 For a real-world use of `add_symbol` to pass function pointers, see
 `demo/r_udf_via_ducktinycc.R`, which injects R C API addresses and
