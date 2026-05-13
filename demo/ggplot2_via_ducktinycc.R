@@ -132,7 +132,7 @@ plot_fun <- function(path) {
       color = "cyl"
     ) +
     theme_minimal(base_size = 13)
-  ggsave(path, p, width = 7, height = 4.5, dpi = 140)
+  #ggsave(path, p, width = 7, height = 4.5, dpi = 140)
   invisible(path)
 }
 preserve(plot_fun)
