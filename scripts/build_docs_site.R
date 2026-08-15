@@ -5,7 +5,7 @@ if (!requireNamespace("litedown", quietly = TRUE)) {
 }
 
 pages <- c(
-  index = "docs/index.md",
+  index = "README.md",
   reference = "docs/reference.md",
   internals = "docs/internals.md",
   development = "docs/development.md"
@@ -18,11 +18,11 @@ titles <- c(
 )
 
 actual <- sort(list.files("docs", pattern = "[.]md$", full.names = TRUE))
-expected <- sort(unname(pages))
+expected <- sort(unname(pages[names(pages) != "index"]))
 if (!identical(actual, expected)) {
   stop(
     paste0(
-      "Documentation sources must remain the four-page curated set.\nExpected: ",
+      "Documentation sources must remain the three-page curated reference set.\nExpected: ",
       paste(expected, collapse = ", "),
       "\nActual: ",
       paste(actual, collapse = ", ")
@@ -54,6 +54,16 @@ metadata <- c(
   "---"
 )
 
+asset_source <- "man/figures/README-ggplot2-cli.svg"
+asset_dir <- file.path(site_dir, "man", "figures")
+if (!file.exists(asset_source)) {
+  stop("Rendered README asset is missing: ", asset_source, call. = FALSE)
+}
+dir.create(asset_dir, recursive = TRUE, showWarnings = FALSE)
+if (!file.copy(asset_source, asset_dir, overwrite = TRUE)) {
+  stop("Could not copy rendered README asset: ", asset_source, call. = FALSE)
+}
+
 for (name in names(pages)) {
   source <- pages[[name]]
   markdown <- readLines(source, warn = FALSE, encoding = "UTF-8")
@@ -64,9 +74,22 @@ for (name in names(pages)) {
     output = destination,
     meta = list("plain-title" = titles[[name]])
   )
+
+  # litedown has already emitted highlighted token spans. Loading Prism again
+  # can reprocess large C/SQL examples and has crashed headless Chromium.
+  html <- readLines(destination, warn = FALSE, encoding = "UTF-8")
+  prism_script <- grepl(
+    "<script src=\"https://cdn.jsdelivr.net/npm/prismjs@",
+    html,
+    fixed = TRUE
+  )
+  writeLines(html[!prism_script], destination, useBytes = TRUE)
 }
 
-required <- file.path(site_dir, paste0(names(pages), ".html"))
+required <- c(
+  file.path(site_dir, paste0(names(pages), ".html")),
+  file.path(asset_dir, basename(asset_source))
+)
 missing <- required[!file.exists(required) | file.info(required)$size == 0]
 if (length(missing) > 0L) {
   stop("Site build did not produce: ", paste(missing, collapse = ", "), call. = FALSE)

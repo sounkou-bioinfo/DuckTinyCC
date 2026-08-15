@@ -1,8 +1,8 @@
 # Development
 
-DuckTinyCC treats native compiler input, recursive bridge metadata, and artifact
-lifetime as trust boundaries. Changes are accepted with focused evidence, not a
-claim that one broad build happened to pass.
+DuckTinyCC tests native compiler input, recursive bridge metadata, and artifact
+lifetime separately. Changes are accepted with focused evidence, not a claim
+that one broad build happened to pass.
 
 ## Build and test
 
@@ -71,29 +71,37 @@ make site      # docs/*.md → _site/*.html
 make site-clean
 ```
 
-The site builder accepts exactly four source pages: `index`, `reference`,
-`internals`, and `development`. Add information to the page that owns it rather
-than creating another status, roadmap, or implementation-note document.
+The rendered `README.md` is the landing page; its executable examples remain
+part of documentation QC. The site builder also accepts exactly three curated
+reference pages: `reference`, `internals`, and `development`. Add information
+to the page that owns it rather than creating another status, roadmap, or
+implementation-note document.
 
-## Release boundary
+## Target for 0.3.0
 
-Before 1.0, correctness and a small coherent API take priority over compatibility
-shims. A 1.0 release requires:
+Version `0.3.0` is the callbacks and Rtinycc-parity release. "Parity" means
+every transferable Rtinycc capability has a tested DuckTinyCC equivalent;
+R-only facilities receive an explicit not-applicable decision.
 
-- documented and versioned SQL/helper ABI;
-- explicit duplicate, replacement, DROP, unload, and multi-connection lifetime
-  behavior;
-- deterministic embedded assets and allocator-domain evidence;
-- debug/release, embedded, community, fuzz, ASan, UBSan, subprocess-safety, and
-  supported-platform CI gates green;
-- no unresolved descriptor offset, NULL, ownership, or artifact-lifetime
-  ambiguity.
+| Rtinycc capability group | DuckTinyCC 0.3.0 gate |
+|---|---|
+| State creation; include, library, option, source, header, and symbol inputs | Existing staged SQL API retained and covered independently. |
+| Memory compilation, relocation, symbol lifetime, and typed calls | Existing generated-UDF path plus direct symbol/introspection parity where missing. |
+| Scalar, pointer, string, aggregate, and recursive FFI types | Existing bridge retained; parity gaps become named regressions. |
+| Managed allocation, byte/typed access, STRUCT/UNION/ENUM helpers | Existing SQL helpers plus any missing ownership operations. |
+| Synchronous callbacks | Managed DuckDB-scalar callback handle, exact C pointer/signature, validity query, and deterministic close. |
+| Worker-thread/async callbacks | Defined scheduling, result, cancellation, and connection-thread rules matching Rtinycc's capability. |
+| Symbol listing, direct calls, recompilation, output modes, and CLI workflows | SQL equivalents or an explicit host-specific not-applicable decision. |
+| Header introspection and generated bindings | Equivalent parser/code-generation workflow with tracked fixtures. |
+| R `SEXP`, R event loop, BLAS discovery, and knitr integration | Not applicable; DuckDB logical types, execution, and documentation QC are the host equivalents. |
 
-Windows community targets and true DuckDB-Wasm runtime compilation remain
-excluded until they compile **and call** generated SQL UDFs under equivalent
-gates. Stub/static builds are useful portability checks, not support claims.
+Callback tests must cover overload binding, exact signatures, SQL NULLs, errors,
+close/invalidation, artifact ownership, recursive invocation, connection use,
+and concurrent calls. A raw address without a retained callback owner does not
+satisfy the gate.
 
-Generic DuckDB-to-C callbacks are not a 1.0 promise. DuckDB's stable C API does
-not expose arbitrary SQL scalars as context-free C pointers; such a feature
-needs a separate contract for binding, context, NULL/errors, reentrancy,
-threading, and lifetime.
+The release also requires deterministic embedded assets and green debug,
+release, embedded, community, fuzz, ASan, UBSan, subprocess-control-flow, and
+supported-platform CI. Windows community targets and true DuckDB-Wasm runtime
+compilation remain excluded until they compile **and call** generated SQL UDFs;
+stub or static builds are portability checks, not support claims.

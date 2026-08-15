@@ -85,7 +85,7 @@ assert_eq "$got" "E_COMPILE_FAILED" "setjmp/longjmp are rejected as unresolved s
 
 # A malicious/native UDF can still bypass symbols entirely. On Linux x86_64,
 # invoking exit_group via inline syscall terminates the DuckDB subprocess. This is
-# the key safety boundary: DuckTinyCC does not currently sandbox or catch this.
+# the observed behavior: DuckTinyCC does not intercept native non-local control flow.
 if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
   tmp_sql=$(mktemp)
   cat > "$tmp_sql" <<SQL

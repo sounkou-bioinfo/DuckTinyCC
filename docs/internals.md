@@ -92,12 +92,15 @@ reused only after its expected files are verified.
 The runtime path is set before `TCC_OUTPUT_MEMORY`, because TinyCC expands `{B}`
 while configuring system include paths.
 
-## Trusted native-code boundary
+## Execution model
 
-Generated C runs inside DuckDB with the process's authority. DuckTinyCC checks
-SQL metadata and bridge bounds, but cannot contain arbitrary native behavior.
-Explicit libc links, foreign callbacks, process-control APIs, assembly, syscalls,
-and invalid pointers can terminate or corrupt the process.
+`tcc_module(...)` assumes its callers are allowed to run native code. A caller
+allowed to submit arbitrary SQL to it can compile and execute C in the DuckDB
+process. Bridge bounds checks catch ordinary integration mistakes; they do not
+change what deliberately invalid C can do.
 
-Unsafe control-flow probes therefore run in subprocesses. Hostile or crash-prone
-C requires process isolation outside DuckTinyCC.
+`-nostdlib` makes linking and deployment deterministic; it does not isolate
+generated code. Explicit libraries, foreign callbacks, process APIs, assembly,
+syscalls, and invalid pointers behave as they do in any in-process C program.
+Control-flow probes run in subprocesses so an expected `exit` or crash does not
+kill the test runner.

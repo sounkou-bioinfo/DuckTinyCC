@@ -137,7 +137,7 @@ update_duckdb_headers_custom:
 clean: clean_build clean_cmake
 clean_all: clean clean_configure
 
-rdm:
+rdm: release
 	Rscript -e "rmarkdown::render('README.Rmd', quiet = TRUE)"
 
 site:
