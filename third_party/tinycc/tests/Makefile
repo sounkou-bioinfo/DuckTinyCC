@@ -72,9 +72,9 @@ endif
 RUN_TCC = -run $(TOPSRC)/tcc.c $(TCCFLAGS)
 DISAS = objdump -d
 ifdef CONFIG_OSX
-DUMPTCC = (set -x; $(TOP)/tcc -vv; otool -L $(TOP)/tcc; exit 1)
+DUMPTCC = (set -x; $(TCC_LOCAL) -vv; otool -L $(TCC_LOCAL); exit 1)
 else
-DUMPTCC = (set -x; $(TOP)/tcc -vv; ldd $(TOP)/tcc; exit 1)
+DUMPTCC = (set -x; $(TCC_LOCAL) -vv; ldd $(TCC_LOCAL); exit 1)
 endif
 
 all test :
@@ -82,6 +82,7 @@ all test :
 	@$(TCC_LOCAL) -v
 	@$(MAKE) --no-print-directory -s clean
 	@$(MAKE) --no-print-directory -s -r _all
+	@echo ------- ALL TESTS PASSED --------
 
 _all : $(TESTS)
 
@@ -109,8 +110,8 @@ libtcc_test_mt$(EXESUF): libtcc_test_mt.c
 
 # test.ref - generate using cc
 test.ref: tcctest.c
-	$(CC) -o tcctest.gcc $< $(CFLAGS) -w -O0 -std=gnu99 -fno-omit-frame-pointer
-	./tcctest.gcc > $@
+	$(CC) -o tcctest.gcc$(EXESUF) $< $(CFLAGS) -w -O0 -std=gnu99 -fno-omit-frame-pointer
+	./tcctest.gcc$(EXESUF) > $@
 
 # auto test
 test1 test1b: tcctest.c test.ref
@@ -309,6 +310,7 @@ CROSS-TGTS = \
  arm-NetBSD \
  arm-wince \
  arm64 \
+ arm64-win32 \
  arm64-osx \
  arm64-FreeBSD \
  arm64-NetBSD \

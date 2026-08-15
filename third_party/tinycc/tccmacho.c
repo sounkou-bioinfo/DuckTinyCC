@@ -702,7 +702,7 @@ static void check_relocs(TCCState *s1, struct macho *mo)
 	 	    goti = tcc_realloc(goti, (mo->n_got + 1) * sizeof(*goti));
                     if (ELFW(ST_BIND)(sym->st_info) == STB_LOCAL) {
                         if (sym->st_shndx == SHN_UNDEF)
-                          tcc_error("undefined local symbo: '%s'",
+                          tcc_error("unresolved local reference to '%s'",
 				    (char *) symtab_section->link->data + sym->st_name);
 			goti[mo->n_got++] = INDIRECT_SYMBOL_LOCAL;
                     } else {
@@ -859,7 +859,7 @@ static void check_relocs(TCCState *s1, struct macho *mo)
 		    goti = tcc_realloc(goti, (mo->n_got + 1) * sizeof(*goti));
                     if (ELFW(ST_BIND)(sym->st_info) == STB_LOCAL) {
                         if (sym->st_shndx == SHN_UNDEF)
-                          tcc_error("undefined local symbo: '%s'",
+                          tcc_error("unresolved local reference to '%s'",
 				    (char *) symtab_section->link->data + sym->st_name);
 			goti[mo->n_got++] = INDIRECT_SYMBOL_LOCAL;
                     } else {
@@ -1042,7 +1042,7 @@ static int check_symbols(TCCState *s1, struct macho *mo)
                 sym->st_shndx = SHN_FROMDLL;
                 continue;
             }
-            tcc_error_noabort("undefined symbol '%s'", name);
+            tcc_error_noabort("unresolved reference to '%s'", name);
             ret = -1;
         }
     }
@@ -1058,6 +1058,7 @@ static void convert_symbol(TCCState *s1, struct macho *mo, struct nlist_64 *pn)
     case STT_NOTYPE:
     case STT_OBJECT:
     case STT_FUNC:
+    case STT_TLS:
     case STT_SECTION:
         n.n_type = N_SECT;
         break;

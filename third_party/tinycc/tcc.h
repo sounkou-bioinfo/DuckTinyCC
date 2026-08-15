@@ -52,6 +52,9 @@ extern long double strtold (const char *__nptr, char **__endptr);
 
 #ifdef _WIN32
 # define WIN32_LEAN_AND_MEAN 1
+# ifndef _WIN32_WINNT
+#  define _WIN32_WINNT 0x502 /* AddVectoredExceptionHandler */
+# endif
 # include <windows.h>
 # include <io.h> /* open, close etc. */
 # include <direct.h> /* getcwd */
@@ -68,6 +71,9 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define strtoll _strtoi64
 #  define strtoull _strtoui64
 # endif
+  /* some compilers don't know ldexpl and windows doesn't have long doubles anyway */
+# undef ldexpl
+# define ldexpl ldexp
 # ifdef LIBTCC_AS_DLL
 #  define LIBTCCAPI __declspec(dllexport)
 #  define PUB_FUNC LIBTCCAPI
@@ -85,6 +91,9 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  ifdef _AMD64_
 #   define __x86_64__ 1
 #  endif
+# endif
+# if defined(_M_ARM64) && !defined(__aarch64__)
+#  define __aarch64__ 1
 # endif
 # ifndef va_copy
 #  define va_copy(a,b) a = b
@@ -149,11 +158,13 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* #define TCC_TARGET_ARM64  *//* ARMv8 code generator */
 /* #define TCC_TARGET_C67    *//* TMS320C67xx code generator */
 /* #define TCC_TARGET_RISCV64 *//* risc-v code generator */
+/* #define TCC_TARGET_WASM32 *//* wasm32 / Emscripten side-module generator */
 
 /* default target is I386 */
 #if !defined(TCC_TARGET_I386) && !defined(TCC_TARGET_ARM) && \
     !defined(TCC_TARGET_ARM64) && !defined(TCC_TARGET_C67) && \
-    !defined(TCC_TARGET_X86_64) && !defined(TCC_TARGET_RISCV64)
+    !defined(TCC_TARGET_X86_64) && !defined(TCC_TARGET_RISCV64) && \
+    !defined(TCC_TARGET_WASM32)
 # if defined __x86_64__
 #  define TCC_TARGET_X86_64
 # elif defined __arm__
@@ -165,6 +176,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define TCC_TARGET_ARM64
 # elif defined __riscv
 #  define TCC_TARGET_RISCV64
+# elif defined __wasm32__
+#  define TCC_TARGET_WASM32
 # else
 #  define TCC_TARGET_I386
 # endif
@@ -189,6 +202,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define TCC_IS_NATIVE
 # elif defined __riscv && defined __LP64__ && defined TCC_TARGET_RISCV64
 #  define TCC_IS_NATIVE
+/* wasm32 hosted TCC is not a native executable-memory JIT; it loads side modules. */
 # endif
 #endif
 
@@ -215,6 +229,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
     || defined TARGETOS_NetBSD \
     || defined TARGETOS_FreeBSD_kernel
 # define TARGETOS_BSD 1
+#elif defined TARGETOS_Emscripten
+/* do not alias Emscripten to Linux; wasm output is handled by wasm32-emit.c */
 #elif !(defined TCC_TARGET_PE || defined TCC_TARGET_MACHO)
 # define TARGETOS_Linux 1 /* for tccdefs_.h */
 #endif
@@ -228,8 +244,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* No ten-byte long doubles on window and macos except in
    cross-compilers made by a mingw-GCC */
 #if defined TCC_TARGET_PE \
-    || (defined TCC_TARGET_MACHO && defined TCC_TARGET_ARM64) \
-    || (defined _WIN32 && !defined __GNUC__)
+    || (defined TCC_TARGET_MACHO && defined TCC_TARGET_ARM64)
 # define TCC_USING_DOUBLE_FOR_LDOUBLE 1
 #endif
 
@@ -247,15 +262,14 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #ifndef CONFIG_SYSROOT
 # define CONFIG_SYSROOT ""
 #endif
+
 #if !defined CONFIG_TCCDIR && !defined _WIN32
 # define CONFIG_TCCDIR "/usr/local/lib/tcc"
 #endif
-#ifndef CONFIG_LDDIR
-# define CONFIG_LDDIR "lib"
-#endif
+
 #ifdef CONFIG_TRIPLET
 # define USE_TRIPLET(s) s "/" CONFIG_TRIPLET
-# define ALSO_TRIPLET(s) USE_TRIPLET(s) ":" s
+# define ALSO_TRIPLET(s) USE_TRIPLET(s) PATHSEP s
 #else
 # define USE_TRIPLET(s) s
 # define ALSO_TRIPLET(s) s
@@ -263,11 +277,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
 
 /* path to find crt1.o, crti.o and crtn.o */
 #ifndef CONFIG_TCC_CRTPREFIX
-# define CONFIG_TCC_CRTPREFIX USE_TRIPLET(CONFIG_SYSROOT "/usr/" CONFIG_LDDIR)
-#endif
-
-#ifndef CONFIG_USR_INCLUDE
-# define CONFIG_USR_INCLUDE "/usr/include"
+# define CONFIG_TCC_CRTPREFIX \
+    USE_TRIPLET(CONFIG_SYSROOT "/usr/lib")
 #endif
 
 /* Below: {B} is substituted by CONFIG_TCCDIR (rsp. -B option) */
@@ -275,25 +286,22 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* system include paths */
 #ifndef CONFIG_TCC_SYSINCLUDEPATHS
 # if defined TCC_TARGET_PE || defined _WIN32
-#  define CONFIG_TCC_SYSINCLUDEPATHS "{B}/include"PATHSEP"{B}/include/winapi"
+#  define CONFIG_TCC_SYSINCLUDEPATHS \
+    "{B}/include" PATHSEP "{B}/include/winapi"
 # else
 #  define CONFIG_TCC_SYSINCLUDEPATHS \
-        "{B}/include" \
-    ":" ALSO_TRIPLET(CONFIG_SYSROOT "/usr/local/include") \
-    ":" ALSO_TRIPLET(CONFIG_SYSROOT CONFIG_USR_INCLUDE)
+    "{B}/include" PATHSEP ALSO_TRIPLET(CONFIG_SYSROOT "/usr/include")
 # endif
 #endif
 
 /* library search paths */
 #ifndef CONFIG_TCC_LIBPATHS
 # if defined TCC_TARGET_PE || defined _WIN32
-#  define CONFIG_TCC_LIBPATHS "{B}/lib"
+#  define CONFIG_TCC_LIBPATHS \
+    "{B}/lib"
 # else
 #  define CONFIG_TCC_LIBPATHS \
-        "{B}" \
-    ":" ALSO_TRIPLET(CONFIG_SYSROOT "/usr/" CONFIG_LDDIR) \
-    ":" ALSO_TRIPLET(CONFIG_SYSROOT "/" CONFIG_LDDIR) \
-    ":" ALSO_TRIPLET(CONFIG_SYSROOT "/usr/local/" CONFIG_LDDIR)
+    "{B}" PATHSEP ALSO_TRIPLET(CONFIG_SYSROOT "/usr/lib")
 # endif
 #endif
 
@@ -309,26 +317,17 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define CONFIG_TCC_ELFINTERP "/lib64/ld-linux-x86-64.so.2"
 # elif defined(TCC_TARGET_RISCV64)
 #  define CONFIG_TCC_ELFINTERP "/lib/ld-linux-riscv64-lp64d.so.1"
-# elif defined(TCC_ARM_EABI)
-#  define DEFAULT_ELFINTERP(s) default_elfinterp(s)
+# elif defined(TCC_TARGET_ARM)
+#  define CONFIG_TCC_ELFINTERP "/lib/ld-linux.so.3"
+#  define CONFIG_TCC_ELFINTERP_ARMHF "/lib/ld-linux-armhf.so.3"
 # else
 #  define CONFIG_TCC_ELFINTERP "/lib/ld-linux.so.2"
 # endif
 #endif
 
-/* var elf_interp dans *-gen.c */
-#ifndef DEFAULT_ELFINTERP
-# define DEFAULT_ELFINTERP(s) CONFIG_TCC_ELFINTERP
-#endif
-
 /* (target specific) libtcc1.a */
 #ifndef TCC_LIBTCC1
 # define TCC_LIBTCC1 "libtcc1.a"
-#endif
-
-/* library to use with CONFIG_USE_LIBGCC instead of libtcc1.a */
-#if defined CONFIG_USE_LIBGCC && !defined TCC_LIBGCC
-#define TCC_LIBGCC USE_TRIPLET(CONFIG_SYSROOT "/" CONFIG_LDDIR) "/libgcc_s.so.1"
 #endif
 
 /* <cross-prefix-to->libtcc1.a */
@@ -395,6 +394,9 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # include "riscv64-gen.c"
 # include "riscv64-link.c"
 # include "riscv64-asm.c"
+#elif defined(TCC_TARGET_WASM32)
+# include "wasm32-gen.c"
+# include "wasm32-link.c"
 #else
 #error unknown target
 #endif
@@ -470,6 +472,9 @@ typedef struct CType {
     struct Sym *ref;
 } CType;
 
+/* long double words on host(!) platform */
+#define LDOUBLE_WORDS ((sizeof(long double)+3)/4)
+
 /* constant value */
 typedef union CValue {
     long double ld;
@@ -480,7 +485,7 @@ typedef union CValue {
         char *data;
         int size;
     } str;
-    int tab[LDOUBLE_SIZE/4];
+    int tab[LDOUBLE_WORDS];
 } CValue;
 
 /* value on stack */
@@ -730,6 +735,7 @@ struct sym_attr {
     unsigned plt_offset;
     int plt_sym;
     int dyn_index;
+    unsigned char linker_sym:1;
 #ifdef TCC_TARGET_ARM
     unsigned char plt_thumb_stub:1;
 #endif
@@ -937,21 +943,25 @@ struct TCCState {
     ElfW_Rel *qrel;
     #define qrel s1->qrel
 
+    addr_t tls_start, tls_end;
+
 #ifdef TCC_TARGET_RISCV64
-    struct pcrel_hi { addr_t addr, val; } last_hi;
-    #define last_hi s1->last_hi
+    struct pcrel_hi { addr_t addr, val; } **pcrel_hi_entries;
+    int nb_pcrel_hi_entries;
 #endif
 
 #ifdef TCC_TARGET_PE
     /* PE info */
     int pe_subsystem;
     unsigned pe_characteristics;
+    unsigned pe_dll_characteristics;
     unsigned pe_file_align;
     unsigned pe_stack_size;
     addr_t pe_imagebase;
-# ifdef TCC_TARGET_X86_64
+# if defined(TCC_TARGET_X86_64) || defined(TCC_TARGET_ARM64)
     Section *uw_pdata;
     int uw_sym;
+    int uw_xsym;
     unsigned uw_offs;
 # endif
 #endif
@@ -960,6 +970,13 @@ struct TCCState {
     char *install_name;
     uint32_t compatibility_version;
     uint32_t current_version;
+#endif
+
+#ifdef TCC_TARGET_WASM32
+    unsigned char wasm_side_module;     /* emit Emscripten dylink side module */
+    unsigned char wasm_import_memory;   /* import env.memory */
+    unsigned char wasm_import_table;    /* import env.__indirect_function_table */
+    char *wasm_module_name;             /* optional logical module name */
 #endif
 
 #ifndef ELF_OBJ_ONLY
@@ -1070,7 +1087,8 @@ struct filespec {
 #define VT_STATIC  0x00002000  /* static variable */
 #define VT_TYPEDEF 0x00004000  /* typedef definition */
 #define VT_INLINE  0x00008000  /* inline definition */
-/* currently unused: 0x000[1248]0000  */
+#define VT_TLS     0x00010000  /* thread-local storage */
+/* currently unused: 0x000[248]0000  */
 
 #define VT_STRUCT_SHIFT 20     /* shift for bitfield shift values (32 - 2*6) */
 #define VT_STRUCT_MASK (((1U << (6+6)) - 1) << VT_STRUCT_SHIFT | VT_BITFIELD)
@@ -1088,7 +1106,7 @@ struct filespec {
 #define VT_ATOMIC   VT_VOLATILE
 
 /* type mask (except storage) */
-#define VT_STORAGE (VT_EXTERN | VT_STATIC | VT_TYPEDEF | VT_INLINE)
+#define VT_STORAGE (VT_EXTERN | VT_STATIC | VT_TYPEDEF | VT_INLINE | VT_TLS)
 #define VT_TYPE (~(VT_STORAGE|VT_STRUCT_MASK))
 
 /* symbol was created by tccasm.c first */
@@ -1311,6 +1329,11 @@ PUB_FUNC void tcc_print_stats(TCCState *s, unsigned total_time);
 PUB_FUNC int tcc_parse_args(TCCState *s, int *argc, char ***argv);
 #ifdef _WIN32
 ST_FUNC char *normalize_slashes(char *path);
+PUB_FUNC FILE *tcc_fopen(const char *f, const char *m);
+PUB_FUNC int tcc_fclose(FILE *f);
+#else
+# define tcc_fopen fopen
+# define tcc_fclose fclose
 #endif
 ST_FUNC DLLReference *tcc_add_dllref(TCCState *s1, const char *dllname, int level);
 ST_FUNC char *tcc_load_text(int fd);
@@ -1435,8 +1458,8 @@ ST_DATA int nocode_wanted; /* true if no code generation wanted for an expressio
 ST_DATA int global_expr;  /* true if compound literals must be allocated globally (used during initializers parsing */
 ST_DATA CType func_vt; /* current function return type (used by return instruction) */
 ST_DATA int func_var; /* true if current function is variadic */
-ST_DATA int func_vc;
-ST_DATA int func_ind;
+ST_DATA int func_vc; /* stack address for implicit struct return storage */
+ST_DATA int func_ind; /* function start address */
 ST_DATA const char *funcname;
 
 ST_FUNC void tccgen_init(TCCState *s1);
@@ -1524,6 +1547,7 @@ ST_FUNC Sym *gfunc_set_param(Sym *s, int c, int byref);
 #define TCC_OUTPUT_FORMAT_ELF    0 /* default output format: ELF */
 #define TCC_OUTPUT_FORMAT_BINARY 1 /* binary image output */
 #define TCC_OUTPUT_FORMAT_COFF   2 /* COFF */
+#define TCC_OUTPUT_FORMAT_WASM   3 /* WebAssembly binary module */
 #define TCC_OUTPUT_DYN           TCC_OUTPUT_DLL
 
 #define ARMAG  "!<arch>\n"    /* For COFF and a.out archives */
@@ -1667,6 +1691,16 @@ static inline void write64le(unsigned char *p, uint64_t x) {
 static inline void add64le(unsigned char *p, int64_t x) {
     write64le(p, read64le(p) + x);
 }
+
+/* ------------ wasm32-emit.c ------------ */
+#ifdef TCC_TARGET_WASM32
+ST_FUNC int wasm_output_file(TCCState *s1, const char *filename);
+ST_FUNC int wasm_output_memory(TCCState *s1,
+                               unsigned char **out,
+                               unsigned long *out_len);
+ST_FUNC void wasm_free_buffer(unsigned char *ptr);
+#endif
+
 /* ------------ i386-gen.c ------------ */
 #if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM
 ST_FUNC void g(int c);
@@ -1682,7 +1716,6 @@ ST_FUNC void gen_increment_tcov (SValue *sv);
 
 /* ------------ x86_64-gen.c ------------ */
 #ifdef TCC_TARGET_X86_64
-ST_FUNC void gen_addr64(int r, Sym *sym, int64_t c);
 ST_FUNC void gen_opl(int op);
 #ifdef TCC_TARGET_PE
 ST_FUNC void gen_vla_result(int addr);
@@ -1715,11 +1748,12 @@ ST_FUNC void gen_increment_tcov (SValue *sv);
 /* ------------ riscv64-gen.c ------------ */
 #ifdef TCC_TARGET_RISCV64
 ST_FUNC void gen_opl(int op);
-//ST_FUNC void gfunc_return(CType *func_type);
 ST_FUNC void gen_va_start(void);
 ST_FUNC void arch_transfer_ret_regs(int);
 ST_FUNC void gen_cvt_sxtw(void);
+ST_FUNC void gen_cvt_csti(int t);
 ST_FUNC void gen_increment_tcov (SValue *sv);
+ST_FUNC void gen_clear_cache(void);
 #endif
 
 /* ------------ c67-gen.c ------------ */
@@ -1741,11 +1775,11 @@ ST_FUNC int find_constraint(ASMOperand *operands, int nb_operands, const char *n
 ST_FUNC Sym* get_asm_sym(int name, Sym *csym);
 ST_FUNC void asm_expr(TCCState *s1, ExprValue *pe);
 ST_FUNC int asm_int_expr(TCCState *s1);
-/* ------------ i386-asm.c ------------ */
-ST_FUNC void gen_expr32(ExprValue *pe);
-#ifdef TCC_TARGET_X86_64
+#if PTR_SIZE == 8
 ST_FUNC void gen_expr64(ExprValue *pe);
 #endif
+/* ------------ i386-asm.c ------------ */
+ST_FUNC void gen_expr32(ExprValue *pe);
 ST_FUNC void asm_opcode(TCCState *s1, int opcode);
 ST_FUNC int asm_parse_regvar(int t);
 ST_FUNC void asm_compute_constraints(ASMOperand *operands, int nb_operands, int nb_outputs, const uint8_t *clobber_regs, int *pout_reg);
@@ -1762,7 +1796,7 @@ ST_FUNC int pe_putimport(TCCState *s1, int dllindex, const char *name, addr_t va
 ST_FUNC int pe_setsubsy(TCCState *s1, const char *arg);
 #if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
 #endif
-#ifdef TCC_TARGET_X86_64
+#if defined(TCC_TARGET_X86_64) || defined(TCC_TARGET_ARM64)
 ST_FUNC void pe_add_unwind_data(unsigned start, unsigned end, unsigned stack);
 #endif
 PUB_FUNC int tcc_get_dllexports(const char *filename, char **pp);
@@ -1919,10 +1953,15 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
 /********************************************************/
 #if CONFIG_TCC_SEMLOCK
 #if defined _WIN32
-typedef struct { int init; CRITICAL_SECTION cs; } TCCSem;
+typedef struct { volatile LONG init; CRITICAL_SECTION cs; } TCCSem;
 static inline void wait_sem(TCCSem *p) {
-    if (!p->init)
-        InitializeCriticalSection(&p->cs), p->init = 1;
+    if (InterlockedCompareExchange(&p->init, 1, 0) == 0) {
+        InitializeCriticalSection(&p->cs);
+        InterlockedExchange(&p->init, 2);
+    } else {
+        while (InterlockedCompareExchange(&p->init, 2, 2) != 2)
+            Sleep(0);
+    }
     EnterCriticalSection(&p->cs);
 }
 static inline void post_sem(TCCSem *p) {

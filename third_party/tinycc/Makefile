@@ -31,9 +31,11 @@ ifdef CONFIG_WIN32
   LIBTCCDEF = libtcc.def
  endif
  ifneq ($(CONFIG_debug),yes)
-  LDFLAGS += -s
+  ifneq ($(CC_NAME),clang)
+   LDFLAGS += -s
+  endif
  endif
- NATIVE_TARGET = $(ARCH)-win$(if $(findstring arm,$(ARCH)),ce,32)
+ NATIVE_TARGET = $(if $(findstring arm64,$(ARCH)),arm64-win32,$(ARCH)-win$(if $(findstring arm,$(ARCH)),ce,32))
 else
  CFG = -unx
  LIBS+=-lm
@@ -113,11 +115,14 @@ DEF-arm64-osx      = $(DEF-arm64) -DTCC_TARGET_MACHO
 DEF-arm64-FreeBSD  = $(DEF-arm64) -DTARGETOS_FreeBSD
 DEF-arm64-NetBSD   = $(DEF-arm64) -DTARGETOS_NetBSD
 DEF-arm64-OpenBSD  = $(DEF-arm64) -DTARGETOS_OpenBSD
+DEF-arm64-win32    = $(DEF-arm64) -DTCC_TARGET_PE
 DEF-riscv64        = -DTCC_TARGET_RISCV64
 DEF-c67            = -DTCC_TARGET_C67 -w # disable warnigs
 DEF-x86_64-FreeBSD = $(DEF-x86_64) -DTARGETOS_FreeBSD
 DEF-x86_64-NetBSD  = $(DEF-x86_64) -DTARGETOS_NetBSD
 DEF-x86_64-OpenBSD = $(DEF-x86_64) -DTARGETOS_OpenBSD
+DEF-wasm32         = -DTCC_TARGET_WASM32 -DTARGETOS_Emscripten
+DEF-wasm32-emscripten = $(DEF-wasm32)
 
 ifeq ($(INCLUDED),no)
 # --------------------------------------------------------------------------
@@ -130,8 +135,8 @@ TCCDOCS = tcc.1 tcc-doc.html tcc-doc.info
 all: $(PROGS) $(TCCLIBS) $(TCCDOCS)
 
 # cross compiler targets to build
-TCC_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm-wince c67
-TCC_X += riscv64 arm64-osx
+TCC_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm64-win32 arm-wince c67
+TCC_X += riscv64 arm64-osx wasm32 wasm32-emscripten
 # TCC_X += arm-fpa arm-fpa-ld arm-vfp arm-eabi
 
 # cross libtcc1.a targets to build
@@ -155,10 +160,31 @@ all : cross
 endif
 
 # --------------------------------------------
-
-T = $(or $(CROSS_TARGET),$(NATIVE_TARGET),unknown)
+T = $(or $(CROSS_TARGET),$(NATIVE_TARGET))
 X = $(if $(CROSS_TARGET),$(CROSS_TARGET)-)
 
+ifneq ($(T),$(NATIVE_TARGET))
+$(if $(DEF-$T),,$(error error: unknown target: '$T'))
+ifneq ($(CONFIG_WIN32),yes)
+DEF-win = -DCONFIG_TCCDIR="\"$(tccdir)/win32\""
+endif
+# some default config for cross compilers
+TRIPLET-i386 = i686-linux-gnu
+TRIPLET-x86_64 = x86_64-linux-gnu
+TRIPLET-arm = arm-linux-gnueabihf
+TRIPLET-arm64 = aarch64-linux-gnu
+TRIPLET-riscv64 = riscv64-linux-gnu
+TRIPLET-wasm32 = wasm32-unknown-emscripten
+TRIPLET-wasm32-emscripten = wasm32-unknown-emscripten
+ifneq ($(TRIPLET-$T),)
+# assume support files in "/usr/<triplet>"
+ROOT-$T = /usr/$(TRIPLET-$T)
+INC-$T = {B}/include:{R}/include
+LIB-$T = {R}/lib:{B}
+CRT-$T = {R}/lib
+endif
+INC-wasm32 = {B}/include/wasm32:{B}/include:{R}/include
+INC-wasm32-emscripten = $(INC-wasm32)
 DEFINES += $(DEF-$T)
 DEFINES += $(if $(ROOT-$T),-DCONFIG_SYSROOT="\"$(ROOT-$T)\"")
 DEFINES += $(if $(CRT-$T),-DCONFIG_TCC_CRTPREFIX="\"$(CRT-$T)\"")
@@ -166,36 +192,17 @@ DEFINES += $(if $(LIB-$T),-DCONFIG_TCC_LIBPATHS="\"$(LIB-$T)\"")
 DEFINES += $(if $(INC-$T),-DCONFIG_TCC_SYSINCLUDEPATHS="\"$(INC-$T)\"")
 DEFINES += $(if $(ELF-$T),-DCONFIG_TCC_ELFINTERP="\"$(ELF-$T)\"")
 DEFINES += $(DEF-$(or $(findstring win,$T),unx))
-
-ifneq ($(X),)
-$(if $(DEF-$T),,$(error error: unknown target: '$T'))
-DEF-$(NATIVE_TARGET) =
-DEF-$T += -DCONFIG_TCC_CROSSPREFIX="\"$X\""
-ifneq ($(CONFIG_WIN32),yes)
-DEF-win += -DCONFIG_TCCDIR="\"$(tccdir)/win32\""
-endif
-else
-# using values from config.h
-DEF-$(NATIVE_TARGET) =
+DEFINES += -DCONFIG_TCC_CROSSPREFIX="\"$X\""
 endif
 
 # include custom configuration (see make help)
 -include config-extra.mak
 
-ifneq ($(T),$(NATIVE_TARGET))
-# assume support files for cross-targets in "/usr/<triplet>" by default
-TRIPLET-i386 ?= i686-linux-gnu
-TRIPLET-x86_64 ?= x86_64-linux-gnu
-TRIPLET-arm ?= arm-linux-gnueabi
-TRIPLET-arm64 ?= aarch64-linux-gnu
-TRIPLET-riscv64 ?= riscv64-linux-gnu
-MARCH-i386 ?= i386-linux-gnu
-MARCH-$T ?= $(TRIPLET-$T)
-TR = $(if $(TRIPLET-$T),$T,ignored)
-CRT-$(TR) ?= /usr/$(TRIPLET-$T)/lib
-LIB-$(TR) ?= {B}:/usr/$(TRIPLET-$T)/lib:/usr/lib/$(MARCH-$T)
-INC-$(TR) ?= {B}/include:/usr/$(TRIPLET-$T)/include:/usr/include
-endif
+# so one can use: make EXTRA-DEFS=...
+DEFINES += $(EXTRA-DEFS)
+
+# find config.h with 'out of tree' builds
+DEFINES += -I$(TOP)
 
 CORE_FILES = tcc.c tcctools.c libtcc.c tccpp.c tccgen.c tccdbg.c tccelf.c tccasm.c tccrun.c
 CORE_FILES += tcc.h config.h libtcc.h tcctok.h
@@ -206,17 +213,18 @@ x86_64-win32_FILES = $(x86_64_FILES) tccpe.c
 x86_64-osx_FILES = $(x86_64_FILES) tccmacho.c
 arm_FILES = $(CORE_FILES) arm-gen.c arm-link.c arm-asm.c arm-tok.h
 arm-wince_FILES = $(arm_FILES) tccpe.c
-arm-eabihf_FILES = $(arm_FILES)
 arm-fpa_FILES     = $(arm_FILES)
 arm-fpa-ld_FILES  = $(arm_FILES)
 arm-vfp_FILES     = $(arm_FILES)
 arm-eabi_FILES    = $(arm_FILES)
 arm-eabihf_FILES  = $(arm_FILES)
-arm64_FILES = $(CORE_FILES) arm64-gen.c arm64-link.c arm64-asm.c
+arm64_FILES = $(CORE_FILES) arm64-gen.c arm64-link.c arm64-asm.c arm64-tok.h
 arm64-osx_FILES = $(arm64_FILES) tccmacho.c
+arm64-win32_FILES = $(arm64_FILES) tccpe.c
 c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c riscv64-asm.c
-
+wasm32_FILES = $(CORE_FILES) wasm32-gen.c wasm32-link.c wasm32-emit.c wasm32-dylink.c wasm32-twir.h
+wasm32-emscripten_FILES = $(wasm32_FILES)
 TCCDEFS_H$(subst yes,,$(CONFIG_predefs)) = tccdefs_.h
 
 # libtcc sources
@@ -237,7 +245,6 @@ $(CROSS_TARGET)-tcc.o : DEFINES += -DONE_SOURCE=0
 endif
 # native tcc always made from tcc.o and libtcc.[so|a]
 tcc.o : DEFINES += -DONE_SOURCE=0
-DEFINES += -I$(TOP)
 
 GITHASH:=$(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo no)
 ifneq ($(GITHASH),no)
@@ -291,6 +298,11 @@ tcc_p$(EXESUF): $($T_FILES)
 libtcc.a: $(LIBTCC_OBJ)
 	$S$(AR) rcs $@ $^
 
+ifeq ($(CC_NAME)-$(ARCH),clang-x86_64)
+# avoid 32-bit relocations in libtcc.a for its usage with tcc -run
+libtcc.a: override CFLAGS += -fPIC
+endif
+
 # dynamic libtcc library
 libtcc.so: $(LIBTCC_OBJ)
 	$S$(CC) -shared -Wl,-soname,$@ -o $@ $^ $(LIBS) $(LDFLAGS)
@@ -331,7 +343,7 @@ FORCE:
 # some versions of gnu-make do not recognize 'command' as a shell builtin
 WHICH = sh -c 'command -v $1'
 
-run-if = $(if $(shell $(call WHICH,$1)),$S $1 $2)
+run-if = $(if $(shell $(call WHICH,$1)),$S $1 $2,echo "(skipping $@ - no $1)")
 S = $(if $(findstring yes,$(SILENT)),@$(info * $@))
 
 # --------------------------------------------------------------------------
@@ -367,7 +379,7 @@ IR = $(IM) mkdir -p $2 && cp -r $1/. $2
 IM = @echo "-> $2 : $1" ;
 BINCHECK = $(if $(wildcard $(PROGS) *-tcc$(EXESUF)),,@echo "Makefile: nothing found to install" && exit 1)
 
-EXTRA_O = runmain.o run_nostdlib.o bt-exe.o bt-dll.o bt-log.o bcheck.o
+EXTRA_O = runmain.o bt-exe.o bt-dll.o bt-log.o bcheck.o
 
 # install progs & libs
 install-unx:
@@ -389,7 +401,7 @@ endif
 # uninstall
 uninstall-unx:
 	@rm -fv $(addprefix "$(bindir)/",$(PROGS) $(PROGS_CROSS))
-	@rm -fv $(addprefix "$(libdir)/", libtcc*.a libtcc*.so libtcc.dylib,$P)
+	@rm -fv $(addprefix "$(libdir)/", libtcc*.a libtcc*.so libtcc.dylib)
 	@rm -fv $(addprefix "$(includedir)/", libtcc.h)
 	@rm -fv "$(mandir)/man1/tcc.1" "$(infodir)/tcc-doc.info"
 	@rm -fv "$(docdir)/tcc-doc.html"
@@ -455,6 +467,22 @@ config.mak:
 # run all tests
 test:
 	@$(MAKE) -C tests
+# run wasm32 backend validation smoke
+.PHONY: test-wasm32 test-wasm32-emscripten test-wasm32-differential test-wasm32-browser
+test-wasm32 test-wasm32-emscripten:
+	@$(MAKE) --no-print-directory tcc libtcc1.a
+	@$(MAKE) --no-print-directory cross-wasm32-emscripten ONE_SOURCE=yes
+	@tests/wasm32/run-core-smoke.sh
+	@node tests/wasm32/run-differential-smoke.mjs
+	@tests/wasm32/run-browser-smoke.sh
+
+test-wasm32-differential:
+	@$(MAKE) --no-print-directory tcc libtcc1.a
+	@$(MAKE) --no-print-directory cross-wasm32-emscripten ONE_SOURCE=yes
+	@node tests/wasm32/run-differential-smoke.mjs
+
+test-wasm32-browser:
+	@tests/wasm32/run-browser-smoke.sh
 # run test(s) from tests2 subdir (see make help)
 tests2.%:
 	@$(MAKE) -C tests/tests2 $@
@@ -471,7 +499,7 @@ tcc_c$(EXESUF): $($T_FILES)
 sani-tes% : tcc_s$(EXESUF)
 	@$(MAKE) --no-print-directory TCC_LOCAL=$(CURDIR)/$< tes$*
 tcc_s$(EXESUF): $($T_FILES)
-	$S$(CC) tcc.c -o $@ -fsanitize=address,undefined $(DEFINES) $(CFLAGS) $(LIBS)
+	$S$(CC) tcc.c -o $@ -fsanitize=address,undefined $(DEFINES) $(CFLAGS) $(LDFLAGS) $(LIBS)
 # test the installed tcc instead
 test-install: $(TCCDEFS_H)
 	@$(MAKE) -C tests TESTINSTALL=yes #_all
@@ -487,21 +515,27 @@ distclean: clean
 	@rm -vf config.h config.mak config.texi
 	@rm -vf $(TCCDOCS)
 
-.PHONY: all clean test tar tags ETAGS doc distclean install uninstall FORCE
+.PHONY: all clean test test-wasm32 test-wasm32-emscripten test-wasm32-differential test-wasm32-browser tar tags ETAGS doc distclean install uninstall FORCE
 
 help:
 	@echo "make"
 	@echo "   build native compiler (from separate objects)"
-	@echo "make cross"
-	@echo "   build cross compilers (from one source)"
 	@echo "make ONE_SOURCE=no/yes SILENT=no/yes"
 	@echo "   force building from separate/one object(s), less/more silently"
 	@echo "make cross-TARGET"
 	@echo "   build one specific cross compiler for 'TARGET'. Currently supported:"
 	@echo "   $(wordlist 1,8,$(TCC_X))"
 	@echo "   $(wordlist 9,99,$(TCC_X))"
+	@echo "make cross"
+	@echo "   build all cross compilers"
 	@echo "make test"
 	@echo "   run all tests"
+	@echo "make test-wasm32-emscripten"
+	@echo "   build and validate the wasm32-emscripten cross compiler in Node and Chromium"
+	@echo "make test-wasm32-differential"
+	@echo "   compare curated wasm32 exports against native TinyCC results"
+	@echo "make test-wasm32-browser"
+	@echo "   run the wasm32 Chromium execution smoke against existing wasm artifacts"
 	@echo "make tests2.all / make tests2.37 / make tests2.37+"
 	@echo "   run all/single test(s) from tests2, optionally update .expect"
 	@echo "make testspp.all / make testspp.17"

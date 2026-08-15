@@ -970,12 +970,18 @@ static void tcc_typedesc_destroy(tcc_typedesc_t *desc) {
 	duckdb_free(desc);
 }
 
-/* tcc_typedesc_parse_token: Type-system conversion/parsing helper. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
-static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typedesc_t **out_desc,
-                                     tcc_error_buffer_t *error_buf) {
+#define TCC_TYPEDESC_MAX_DEPTH 64
+
+/* Recursive implementation behind tcc_typedesc_parse_token. */
+static bool tcc_typedesc_parse_token_depth(const char *token, bool allow_void, unsigned int depth,
+                                           tcc_typedesc_t **out_desc, tcc_error_buffer_t *error_buf) {
 	tcc_typedesc_t *desc = NULL;
 	tcc_ffi_type_t parsed = TCC_FFI_VOID;
 	size_t array_size = 0;
+	if (depth >= TCC_TYPEDESC_MAX_DEPTH) {
+		tcc_set_error(error_buf, "type nesting exceeds 64 levels");
+		return false;
+	}
 	if (!token || !out_desc) {
 		tcc_set_error(error_buf, "type token is required");
 		return false;
@@ -1033,7 +1039,8 @@ static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typ
 				child_token = tcc_trim_inplace(owned_child_token);
 			}
 		}
-		if (!child_token || !tcc_typedesc_parse_token(child_token, false, &desc->as.list_like.child, error_buf)) {
+		if (!child_token ||
+		    !tcc_typedesc_parse_token_depth(child_token, false, depth + 1, &desc->as.list_like.child, error_buf)) {
 			if (owned_child_token) {
 				duckdb_free(owned_child_token);
 			}
@@ -1066,7 +1073,8 @@ static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typ
 				child_token = tcc_trim_inplace(owned_child_token);
 			}
 		}
-		if (!child_token || !tcc_typedesc_parse_token(child_token, false, &desc->as.list_like.child, error_buf)) {
+		if (!child_token ||
+		    !tcc_typedesc_parse_token_depth(child_token, false, depth + 1, &desc->as.list_like.child, error_buf)) {
 			if (owned_child_token) {
 				duckdb_free(owned_child_token);
 			}
@@ -1100,7 +1108,8 @@ static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typ
 		for (i = 0; i < (idx_t)meta.field_count; i++) {
 			desc->as.struct_like.fields[i].name = tcc_strdup(meta.field_names[i]);
 			if (!desc->as.struct_like.fields[i].name ||
-			    !tcc_typedesc_parse_token(meta.field_tokens[i], false, &desc->as.struct_like.fields[i].type, error_buf)) {
+			    !tcc_typedesc_parse_token_depth(meta.field_tokens[i], false, depth + 1,
+			                                    &desc->as.struct_like.fields[i].type, error_buf)) {
 				tcc_struct_meta_destroy(&meta);
 				tcc_typedesc_destroy(desc);
 				if (!error_buf || error_buf->message[0] == '\0') {
@@ -1115,8 +1124,8 @@ static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typ
 		desc->kind = TCC_TYPEDESC_MAP;
 		memset(&meta, 0, sizeof(meta));
 		if (!tcc_parse_map_meta_token(token, &meta, error_buf) ||
-		    !tcc_typedesc_parse_token(meta.key_token, false, &desc->as.map_like.key, error_buf) ||
-		    !tcc_typedesc_parse_token(meta.value_token, false, &desc->as.map_like.value, error_buf)) {
+		    !tcc_typedesc_parse_token_depth(meta.key_token, false, depth + 1, &desc->as.map_like.key, error_buf) ||
+		    !tcc_typedesc_parse_token_depth(meta.value_token, false, depth + 1, &desc->as.map_like.value, error_buf)) {
 			tcc_map_meta_destroy(&meta);
 			tcc_typedesc_destroy(desc);
 			return false;
@@ -1147,7 +1156,8 @@ static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typ
 			const char *member_token = meta.member_tokens ? meta.member_tokens[i] : NULL;
 			desc->as.union_like.members[i].name = tcc_strdup(meta.member_names[i]);
 			if (!member_token || !desc->as.union_like.members[i].name ||
-			    !tcc_typedesc_parse_token(member_token, false, &desc->as.union_like.members[i].type, error_buf)) {
+			    !tcc_typedesc_parse_token_depth(member_token, false, depth + 1,
+			                                    &desc->as.union_like.members[i].type, error_buf)) {
 				tcc_union_meta_destroy(&meta);
 				tcc_typedesc_destroy(desc);
 				if (!error_buf || error_buf->message[0] == '\0') {
@@ -1163,6 +1173,14 @@ static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typ
 	*out_desc = desc;
 	return true;
 }
+
+/* tcc_typedesc_parse_token: Parses one bounded recursive SQL-visible type descriptor. */
+static bool tcc_typedesc_parse_token(const char *token, bool allow_void, tcc_typedesc_t **out_desc,
+                                     tcc_error_buffer_t *error_buf) {
+	return tcc_typedesc_parse_token_depth(token, allow_void, 0, out_desc, error_buf);
+}
+
+#undef TCC_TYPEDESC_MAX_DEPTH
 
 /* tcc_parse_signature: Parser helper for signature, type, or helper-codegen grammar. Allocation/Lifetime: may allocate owned memory; caller or owning context must release via matching destroy path. */
 static bool tcc_parse_signature(const char *return_type, const char *arg_types_csv, tcc_ffi_type_t *out_return_type,

@@ -1,0 +1,681 @@
+# name: test/sql/tcc_module_union.test
+# description: UNION, nested composite, and scalar-width coverage
+# group: [ducktinycc]
+
+require ducktinycc
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_union_return(long long x){ return x; }',
+  symbol := 'bad_union_return',
+  sql_name := 'bad_union_return',
+  return_type := 'union<i:i64;d:f64>',
+  arg_types := ['i64']
+);
+----
+false	quick_compile	E_COMPILE_FAILED
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_union_arg(long long x){ return x; }',
+  symbol := 'bad_union_arg',
+  sql_name := 'bad_union_arg',
+  return_type := 'i64',
+  arg_types := ['union<i:i64;d:f64>']
+);
+----
+false	quick_compile	E_COMPILE_FAILED
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_union(ducktinycc_union_t u){ (void)u; return 0; }',
+  symbol := 'bad_union',
+  sql_name := 'bad_union',
+  return_type := 'i64',
+  arg_types := ['union<a:list<i64>;b:i64>']
+);
+----
+true	quick_compile	OK
+
+# ----- UNION input round-trip: read tag and extract active member value
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+long long union_read_demo(ducktinycc_union_t u) {
+  int tag = ducktinycc_union_tag(&u);
+  if (tag < 0) return -999;
+  if (tag == 0) {
+    const long long *p = (const long long *)ducktinycc_union_member_ptr(&u, 0);
+    if (!p) return -1;
+    if (!ducktinycc_union_member_is_valid(&u, 0)) return -2;
+    return p[u.offset];
+  } else if (tag == 1) {
+    const double *p = (const double *)ducktinycc_union_member_ptr(&u, 1);
+    if (!p) return -3;
+    if (!ducktinycc_union_member_is_valid(&u, 1)) return -4;
+    return (long long)p[u.offset];
+  }
+  return -5;
+}',
+  symbol := 'union_read_demo',
+  sql_name := 'union_read_demo',
+  return_type := 'i64',
+  arg_types := ['union<i:i64;d:f64>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT union_read_demo(42::BIGINT::UNION(i BIGINT, d DOUBLE)) AS val;
+----
+42
+
+query I
+SELECT union_read_demo(3.14::DOUBLE::UNION(i BIGINT, d DOUBLE)) AS val;
+----
+3
+
+# ----- UNION output: return a union value from C
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+static uint8_t _tag_val;
+static long long _member_val;
+static const void *_member_ptrs[2];
+static const uint64_t *_member_validity[2];
+ducktinycc_union_t union_make_demo(long long x) {
+  ducktinycc_union_t out;
+  _tag_val = 0;
+  _member_val = x * 10;
+  _member_ptrs[0] = &_member_val;
+  _member_ptrs[1] = (void*)0;
+  _member_validity[0] = (void*)0;
+  _member_validity[1] = (void*)0;
+  out.tag_ptr = &_tag_val;
+  out.member_ptrs = _member_ptrs;
+  out.member_validity = _member_validity;
+  out.member_count = 2;
+  out.offset = 0;
+  return out;
+}',
+  symbol := 'union_make_demo',
+  sql_name := 'union_make_demo',
+  return_type := 'union<i:i64;d:f64>',
+  arg_types := ['i64']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT union_extract(union_make_demo(7), 'i') AS val;
+----
+70
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_struct(ducktinycc_struct_t s){ (void)s; return 0; }',
+  symbol := 'bad_struct',
+  sql_name := 'bad_struct',
+  return_type := 'i64',
+  arg_types := ['struct<a:varchar>']
+);
+----
+true	quick_compile	OK
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long batch_add(long long a, long long b){ return a + b; }',
+  symbol := 'batch_add',
+  sql_name := 'batch_add',
+  return_type := 'i64',
+  arg_types := ['i64','i64'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT CAST(SUM(batch_add(i, 2)) AS BIGINT)
+FROM range(1000) AS t(i);
+----
+501500
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long batch_double(long long x){ return x * 2; }',
+  symbol := 'batch_double',
+  sql_name := 'batch_double',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	quick_compile	OK
+
+query TT
+SELECT batch_double(NULL), batch_double(21);
+----
+NULL	42
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'void batch_touch(long long x){ (void)x; }',
+  symbol := 'batch_touch',
+  sql_name := 'batch_touch',
+  return_type := 'void',
+  arg_types := ['i64'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT COUNT(*)::BIGINT
+FROM range(128) AS t(i)
+WHERE batch_touch(i) IS NULL;
+----
+128
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'long long bad_wrapper(long long x){ return x; }',
+  symbol := 'bad_wrapper',
+  sql_name := 'bad_wrapper',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  wrapper_mode := 'arrow'
+);
+----
+false	quick_compile	E_BAD_WRAPPER_MODE
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_struct',
+  source := 'struct point_i32_auto { int x; int y; };',
+  symbol := 'point_i32_auto',
+  arg_types := ['x:i32','y:i32']
+);
+----
+true	c_struct	OK
+
+query TT
+SELECT struct_point_i32_auto_sizeof() > 0, struct_point_i32_auto_alignof() > 0;
+----
+true	true
+
+query TTTTTT
+WITH p AS (
+  SELECT struct_point_i32_auto_new() AS p
+),
+s AS (
+  SELECT struct_point_i32_auto_set_y(struct_point_i32_auto_set_x(p, 12), 30) AS p
+  FROM p
+),
+r AS (
+  SELECT p,
+         struct_point_i32_auto_get_x(p) AS x,
+         struct_point_i32_auto_get_y(p) AS y,
+         struct_point_i32_auto_off_x() AS ox,
+         struct_point_i32_auto_off_y() AS oy,
+         CAST(struct_point_i32_auto_x_addr(p) AS BIGINT) - CAST(p AS BIGINT) AS dx
+  FROM s
+),
+f AS (
+  SELECT x, y, ox, oy, dx, struct_point_i32_auto_free(p) IS NULL AS freed FROM r
+)
+SELECT CAST(x AS VARCHAR), CAST(y AS VARCHAR), CAST(ox AS VARCHAR), CAST(oy AS VARCHAR), CAST(dx AS VARCHAR),
+       CAST(freed AS VARCHAR)
+FROM f;
+----
+12	30	0	4	0	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_struct',
+  source := 'struct buf_u8_auto { unsigned char data[4]; };',
+  symbol := 'buf_u8_auto',
+  arg_types := ['data:u8[4]']
+);
+----
+true	c_struct	OK
+
+query TTTTT
+WITH p AS (
+  SELECT struct_buf_u8_auto_new() AS p
+),
+s AS (
+  SELECT struct_buf_u8_auto_set_data_elt(struct_buf_u8_auto_set_data_elt(p, 0, 202), 1, 254) AS p
+  FROM p
+),
+r AS (
+  SELECT p,
+         struct_buf_u8_auto_get_data_elt(p, 0) AS a,
+         struct_buf_u8_auto_get_data_elt(p, 1) AS b,
+         struct_buf_u8_auto_off_data() AS od,
+         CAST(struct_buf_u8_auto_data_addr(p) AS BIGINT) - CAST(p AS BIGINT) AS dd
+  FROM s
+),
+f AS (
+  SELECT a, b, od, dd, struct_buf_u8_auto_free(p) IS NULL AS freed FROM r
+)
+SELECT CAST(a AS VARCHAR), CAST(b AS VARCHAR), CAST(od AS VARCHAR), CAST(dd AS VARCHAR), CAST(freed AS VARCHAR)
+FROM f;
+----
+202	254	0	0	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_bitfield',
+  source := 'struct flags_auto { unsigned int active : 1; unsigned int level : 4; };',
+  symbol := 'flags_auto',
+  arg_types := ['active:u8','level:u8']
+);
+----
+true	c_bitfield	OK
+
+query TTT
+WITH p AS (
+  SELECT struct_flags_auto_new() AS p
+),
+s AS (
+  SELECT struct_flags_auto_set_level(struct_flags_auto_set_active(p, 1), 9) AS p FROM p
+),
+f AS (
+  SELECT struct_flags_auto_get_active(p) AS active,
+         struct_flags_auto_get_level(p) AS level,
+         struct_flags_auto_free(p) IS NULL AS freed
+  FROM s
+)
+SELECT CAST(active AS VARCHAR), CAST(level AS VARCHAR), CAST(freed AS VARCHAR) FROM f;
+----
+1	9	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_union',
+  source := 'union number_auto { int i; float f; };',
+  symbol := 'number_auto',
+  arg_types := ['i:i32','f:f32']
+);
+----
+true	c_union	OK
+
+query TTT
+WITH p AS (
+  SELECT union_number_auto_new() AS p
+),
+s AS (
+  SELECT union_number_auto_set_i(p, 77) AS p FROM p
+),
+f AS (
+  SELECT union_number_auto_get_i(p) AS v, union_number_auto_free(p) IS NULL AS freed FROM s
+)
+SELECT CAST(v AS VARCHAR), CAST(union_number_auto_sizeof() > 0 AS VARCHAR), CAST(freed AS VARCHAR) FROM f;
+----
+77	true	true
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'c_enum',
+  source := 'enum color_auto { RED_AUTO = 0, GREEN_AUTO = 1, BLUE_AUTO = 2 };',
+  symbol := 'color_auto',
+  arg_types := ['RED_AUTO','GREEN_AUTO','BLUE_AUTO']
+);
+----
+true	c_enum	OK
+
+query TTTT
+SELECT CAST(enum_color_auto_RED_AUTO() AS VARCHAR),
+       CAST(enum_color_auto_BLUE_AUTO() AS VARCHAR),
+       CAST(enum_color_auto_sizeof() > 0 AS VARCHAR),
+       CAST((enum_color_auto_GREEN_AUTO() - enum_color_auto_RED_AUTO()) AS VARCHAR);
+----
+0	2	true	1
+
+# ---------- scalar type quick_compile round-trips: i8 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'signed char add_i8(signed char a, signed char b){ return a + b; }',
+  symbol := 'add_i8',
+  sql_name := 'add_i8',
+  return_type := 'i8',
+  arg_types := ['i8', 'i8']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_i8(10::TINYINT, 20::TINYINT);
+----
+30
+
+# ---------- scalar type quick_compile round-trips: u8 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'unsigned char add_u8(unsigned char a, unsigned char b){ return a + b; }',
+  symbol := 'add_u8',
+  sql_name := 'add_u8',
+  return_type := 'u8',
+  arg_types := ['u8', 'u8']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_u8(100::UTINYINT, 50::UTINYINT);
+----
+150
+
+# ---------- scalar type quick_compile round-trips: i16 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'short add_i16(short a, short b){ return a + b; }',
+  symbol := 'add_i16',
+  sql_name := 'add_i16',
+  return_type := 'i16',
+  arg_types := ['i16', 'i16']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_i16(1000::SMALLINT, 2000::SMALLINT);
+----
+3000
+
+# ---------- scalar type quick_compile round-trips: u16 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'unsigned short add_u16(unsigned short a, unsigned short b){ return a + b; }',
+  symbol := 'add_u16',
+  sql_name := 'add_u16',
+  return_type := 'u16',
+  arg_types := ['u16', 'u16']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_u16(30000::USMALLINT, 10000::USMALLINT);
+----
+40000
+
+# ---------- scalar type quick_compile round-trips: u32 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'unsigned int add_u32(unsigned int a, unsigned int b){ return a + b; }',
+  symbol := 'add_u32',
+  sql_name := 'add_u32',
+  return_type := 'u32',
+  arg_types := ['u32', 'u32']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT add_u32(100000::UINTEGER, 200000::UINTEGER);
+----
+300000
+
+# ---------- scalar type quick_compile round-trips: f32 ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'float mul_f32(float a, float b){ return a * b; }',
+  symbol := 'mul_f32',
+  sql_name := 'mul_f32',
+  return_type := 'f32',
+  arg_types := ['f32', 'f32']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT CAST(mul_f32(2.5::FLOAT, 4.0::FLOAT) AS INTEGER);
+----
+10
+
+# ----- UNION with nested LIST member: read list length from active member
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+long long union_list_len(ducktinycc_union_t u) {
+  int tag = ducktinycc_union_tag(&u);
+  if (tag < 0) return -999;
+  /* tag 0 = list<i32>, tag 1 = i64 */
+  if (tag == 0) {
+    /* member 0 is a list; its data pointer is a ducktinycc_list_t row-slice */
+    const ducktinycc_list_t *lp = (const ducktinycc_list_t *)ducktinycc_union_member_ptr(&u, 0);
+    if (!lp) return -1;
+    return (long long)lp[u.offset].len;
+  }
+  if (tag == 1) {
+    const long long *p = (const long long *)ducktinycc_union_member_ptr(&u, 1);
+    if (!p) return -2;
+    return p[u.offset];
+  }
+  return -5;
+}',
+  symbol := 'union_list_len',
+  sql_name := 'union_list_len',
+  return_type := 'i64',
+  arg_types := ['union<a:i32[];b:i64>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT union_list_len([1, 2, 3]::INT[]::UNION(a INT[], b BIGINT)) AS val;
+----
+3
+
+query I
+SELECT union_list_len(42::BIGINT::UNION(a INT[], b BIGINT)) AS val;
+----
+42
+
+# ----- UNION with nested STRUCT member: read struct field from active member
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+long long union_struct_read(ducktinycc_union_t u) {
+  int tag = ducktinycc_union_tag(&u);
+  if (tag < 0) return -999;
+  /* tag 0 = i32, tag 1 = struct<x:i64,y:f64> */
+  if (tag == 0) {
+    const int *p = (const int *)ducktinycc_union_member_ptr(&u, 0);
+    if (!p) return -1;
+    return (long long)p[u.offset];
+  }
+  if (tag == 1) {
+    /* member 1 is a struct; data is a ducktinycc_struct_t row-slice */
+    const ducktinycc_struct_t *sp = (const ducktinycc_struct_t *)ducktinycc_union_member_ptr(&u, 1);
+    if (!sp) return -2;
+    /* read field 0 (x:i64) from the struct at this row */
+    const long long *xp = (const long long *)ducktinycc_struct_field_ptr(&sp[u.offset], 0);
+    if (!xp) return -3;
+    return xp[sp[u.offset].offset];
+  }
+  return -5;
+}',
+  symbol := 'union_struct_read',
+  sql_name := 'union_struct_read',
+  return_type := 'i64',
+  arg_types := ['union<a:i32;b:struct<x:i64;y:f64>>']
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT union_struct_read(7::INT::UNION(a INT, b STRUCT(x BIGINT, y DOUBLE))) AS val;
+----
+7
+
+query I
+SELECT union_struct_read({'x': 100::BIGINT, 'y': 2.5}::STRUCT(x BIGINT, y DOUBLE)::UNION(a INT, b STRUCT(x BIGINT, y DOUBLE))) AS val;
+----
+100
+
+# ----- UNION NULL input: NULL union row produces NULL output (not -999)
+query I
+SELECT union_read_demo(NULL::UNION(i BIGINT, d DOUBLE)) AS val;
+----
+NULL
+
+# ----- UNION NULL input: NULL union passed to union_list_len produces NULL
+query I
+SELECT union_list_len(NULL::UNION(a INT[], b BIGINT)) AS val;
+----
+NULL
+
+# ----- UNION output with nested LIST member: return union<a:i32[];b:i64> from C
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+/* Return union member 0 (i32[]) containing a small list; member 1 (i64) is null. */
+static int _out_tag;
+static ducktinycc_list_t _out_list;
+static int _out_elems[3];
+static const void *_out_member_ptrs[2];
+static const uint64_t *_out_member_validity[2];
+ducktinycc_union_t union_make_list(long long n) {
+  ducktinycc_union_t out;
+  int i;
+  for (i = 0; i < (int)n && i < 3; i++) _out_elems[i] = (i + 1) * 10;
+  _out_list.ptr = _out_elems;
+  _out_list.validity = (const uint64_t *)0;
+  _out_list.offset = 0;
+  _out_list.len = (uint64_t)n;
+  _out_tag = 0;
+  _out_member_ptrs[0] = &_out_list;
+  _out_member_ptrs[1] = (void*)0;
+  _out_member_validity[0] = (void*)0;
+  _out_member_validity[1] = (void*)0;
+  out.tag_ptr = (uint8_t *)&_out_tag;
+  out.member_ptrs = _out_member_ptrs;
+  out.member_validity = _out_member_validity;
+  out.member_count = 2;
+  out.offset = 0;
+  return out;
+}',
+  symbol := 'union_make_list',
+  sql_name := 'union_make_list',
+  return_type := 'union<a:i32[];b:i64>',
+  arg_types := ['i64']
+);
+----
+true	quick_compile	OK
+
+query T
+SELECT union_extract(union_make_list(3), 'a')::VARCHAR AS val;
+----
+[10, 20, 30]
+
+query T
+SELECT union_extract(union_make_list(0), 'a')::VARCHAR AS val;
+----
+[]
+
+# ----- UNION with deeply nested member: union<a:list<struct<x:i64;y:f64>>;b:i64> input
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+/* Read first struct element x-field from list member, or return scalar from b member. */
+long long union_deep_read(ducktinycc_union_t u) {
+  int tag = ducktinycc_union_tag(&u);
+  if (tag < 0) return -999;
+  if (tag == 0) {
+    /* member 0 is list<struct<x:i64,y:f64>> */
+    const ducktinycc_list_t *lp = (const ducktinycc_list_t *)ducktinycc_union_member_ptr(&u, 0);
+    if (!lp) return -1;
+    if (lp[u.offset].len == 0) return 0;
+    /* list element 0 is a ducktinycc_struct_t */
+    const ducktinycc_struct_t *elems = (const ducktinycc_struct_t *)lp[u.offset].ptr;
+    if (!elems) return -2;
+    /* field 0 of the struct is x:i64 */
+    const long long *xp = (const long long *)ducktinycc_struct_field_ptr(&elems[0], 0);
+    if (!xp) return -3;
+    return xp[elems[0].offset];
+  }
+  if (tag == 1) {
+    const long long *p = (const long long *)ducktinycc_union_member_ptr(&u, 1);
+    if (!p) return -4;
+    return p[u.offset];
+  }
+  return -5;
+}',
+  symbol := 'union_deep_read',
+  sql_name := 'union_deep_read',
+  return_type := 'i64',
+  arg_types := ['union<a:list<struct<x:i64;y:f64>>;b:i64>']
+);
+----
+true	quick_compile	OK
+
+# b member: scalar i64
+query I
+SELECT union_deep_read(99::BIGINT::UNION(a STRUCT(x BIGINT, y DOUBLE)[], b BIGINT)) AS val;
+----
+99
+
+# a member: list with one struct element; x=42
+query I
+SELECT union_deep_read([{'x': 42::BIGINT, 'y': 1.5}]::STRUCT(x BIGINT, y DOUBLE)[]::UNION(a STRUCT(x BIGINT, y DOUBLE)[], b BIGINT)) AS val;
+----
+42
+
+# a member: empty list; returns 0
+query I
+SELECT union_deep_read([]::STRUCT(x BIGINT, y DOUBLE)[]::UNION(a STRUCT(x BIGINT, y DOUBLE)[], b BIGINT)) AS val;
+----
+0
+
+# NULL union: output is NULL
+query I
+SELECT union_deep_read(NULL::UNION(a STRUCT(x BIGINT, y DOUBLE)[], b BIGINT)) AS val;
+----
+NULL

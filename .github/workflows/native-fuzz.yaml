@@ -1,0 +1,63 @@
+name: Native and SQL fuzzing
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Native inputs per sanitizer
+        required: false
+        default: "250000"
+      sql_trials:
+        description: SQL mutation trials per sanitizer
+        required: false
+        default: "1000"
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions: read-all
+
+jobs:
+  native-parsers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native fuzz toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang llvm
+      - name: Fuzz extension-owned parsers and codegen
+        run: make fuzz FUZZ_RUNS=${{ github.event.inputs.runs || '250000' }}
+
+  complete-extension:
+    name: Complete extension ${{ matrix.sanitizer }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, ubsan]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install build and fuzz toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake curl unzip
+      - name: Install DuckDB CLI
+        run: |
+          curl -fsSL --retry 3 -o /tmp/duckdb.zip \
+            https://github.com/duckdb/duckdb/releases/download/v1.4.3/duckdb_cli-linux-amd64.zip
+          unzip -q /tmp/duckdb.zip -d /tmp/duckdb-cli
+          chmod +x /tmp/duckdb-cli/duckdb
+          echo "/tmp/duckdb-cli" >> "$GITHUB_PATH"
+      - name: Configure
+        run: make configure
+      - name: Run replayable SQL fuzz under sanitizer
+        env:
+          DUCKTINYCC_SQL_FUZZ_TRIALS: ${{ github.event.inputs.sql_trials || '1000' }}
+        run: make test-sanitized-extension SANITIZER=${{ matrix.sanitizer }}

@@ -362,17 +362,17 @@ static char *tcc_generate_c_composite_helpers_source(const char *kind_keyword, c
 	}
 	ok = tcc_text_buf_appendf(
 	    &src,
-	    "extern void *malloc(unsigned long long);\n"
-	    "extern void free(void *);\n"
-	    "/* Generated helpers allocate with libc malloc/free. Pair %s_new with %s_free. */\n"
+	    "extern void *ducktinycc_helper_malloc(unsigned long long);\n"
+	    "extern void ducktinycc_helper_free(void *);\n"
+	    "/* Generated helpers allocate through the host libc domain. Pair %s_new with %s_free. */\n"
 	    "#ifndef DUCKTINYCC_OFFSETOF\n"
 	    "#define DUCKTINYCC_OFFSETOF(type, member) ((unsigned long long)((const char *)&(((type *)0)->member) - (const char *)0))\n"
 	    "#endif\n"
 	    "unsigned long long %s_sizeof(void){ return (unsigned long long)sizeof(%s %s); }\n"
 	    "unsigned long long %s_alignof(void){ struct __ducktinycc_align_%s { char c; %s %s v; };"
 	    " return (unsigned long long)(sizeof(struct __ducktinycc_align_%s) - sizeof(%s %s)); }\n"
-	    "void *%s_new(void){ return malloc(sizeof(%s %s)); }\n"
-	    "void %s_free(void *p){ if (p) free(p); }\n",
+	    "void *%s_new(void){ return ducktinycc_helper_malloc(sizeof(%s %s)); }\n"
+	    "void %s_free(void *p){ if (p) ducktinycc_helper_free(p); }\n",
 	    prefix, prefix, prefix, kind_keyword, type_name, prefix, prefix, kind_keyword, type_name, prefix,
 	    kind_keyword, type_name, prefix, kind_keyword, type_name, prefix);
 	if (!ok) {

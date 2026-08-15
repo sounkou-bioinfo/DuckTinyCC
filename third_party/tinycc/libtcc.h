@@ -1,6 +1,8 @@
 #ifndef LIBTCC_H
 #define LIBTCC_H
 
+#include <stddef.h>
+
 #ifndef LIBTCCAPI
 # define LIBTCCAPI
 #endif
@@ -70,6 +72,8 @@ LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type);
 #define TCC_OUTPUT_DLL      4 /* dynamic library */
 #define TCC_OUTPUT_OBJ      3 /* object file */
 #define TCC_OUTPUT_PREPROCESS 5 /* only preprocess */
+#define TCC_OUTPUT_WASM        6 /* WebAssembly module */
+#define TCC_OUTPUT_WASM_SIDE   7 /* Emscripten dynamic side module */
 
 /* equivalent to -Lpath option */
 LIBTCCAPI int tcc_add_library_path(TCCState *s, const char *pathname);
@@ -87,6 +91,23 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename);
 /* link and run main() function and return its value. DO NOT call
    tcc_relocate() before. */
 LIBTCCAPI int tcc_run(TCCState *s, int argc, char **argv);
+
+/* Select wasm32-emscripten output policy.  This is a no-op on non-wasm32
+   TinyCC builds except for returning -1 with the TCC error callback set. */
+LIBTCCAPI int tcc_set_wasm32_emscripten(TCCState *s);
+
+/* Output the linked wasm module to a freshly allocated buffer.  The buffer is
+   owned by libtcc and must be released with tcc_free_wasm_buffer(). */
+LIBTCCAPI int tcc_output_wasm_to_memory(TCCState *s,
+                                        unsigned char **out,
+                                        unsigned long *out_len);
+LIBTCCAPI void tcc_free_wasm_buffer(unsigned char *ptr);
+
+/* Browser/Node Emscripten helper: dlopen(path), then dlsym(symbol).  On native
+   hosts this returns NULL and reports an error through the usual TCC path. */
+LIBTCCAPI void *tcc_wasm_dlopen_symbol(TCCState *s,
+                                       const char *wasm_path,
+                                       const char *symbol);
 
 /* do all relocations (needed before using tcc_get_symbol()) */
 LIBTCCAPI int tcc_relocate(TCCState *s1);

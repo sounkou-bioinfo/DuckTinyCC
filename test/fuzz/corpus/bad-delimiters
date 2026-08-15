@@ -1,0 +1,1 @@
+union<a:list<struct<x:i64>;b:map<i32;varchar>>]]

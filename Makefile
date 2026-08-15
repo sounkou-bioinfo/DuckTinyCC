@@ -1,5 +1,7 @@
 .PHONY: clean clean_all rdm test_embedded_debug test_embedded_release \
-	community_sim_build community_sim_run community_sim
+	community_sim_build community_sim_run community_sim \
+	fuzz fuzz-asan fuzz-ubsan fuzz-sql fuzz-all fuzz-clean \
+	test-sanitized-extension test-sanitizers
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -58,6 +60,73 @@ community_sim_run:
 
 community_sim: community_sim_build
 	bash $(PROJ_DIR)scripts/community_sim_run.sh
+
+FUZZ_CC ?= clang
+FUZZ_RUNS ?= 100000
+FUZZ_MAX_LEN ?= 65536
+FUZZ_SEED ?= 3735928559
+FUZZ_BUILD_DIR ?= .fuzz
+FUZZ_CORPUS := test/fuzz/corpus
+FUZZ_DRIVER := test/fuzz/ducktinycc_fuzz.c
+FUZZ_SOURCES := src/tcc_module.c $(wildcard src/tcc_module_*.c)
+FUZZ_HEADERS := $(wildcard src/include/*.h) $(wildcard duckdb_capi/*.h)
+FUZZ_COMMON_CFLAGS := \
+	-std=c11 -g -O1 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter \
+	-DDUCKDB_EXTENSION_API_VERSION_MAJOR=1 \
+	-DDUCKDB_EXTENSION_API_VERSION_MINOR=4 \
+	-DDUCKDB_EXTENSION_API_VERSION_PATCH=3 \
+	-DDUCKDB_EXTENSION_API_VERSION_UNSTABLE=v1.4.3 \
+	-fvisibility=hidden -ffunction-sections -fdata-sections \
+	-Isrc/include -Iduckdb_capi -Ithird_party/tinycc
+FUZZ_LIBSTDCXX_DIR := $(shell dirname "$$(cc -print-file-name=libstdc++.so)")
+FUZZ_COMMON_LDFLAGS := -Wl,--gc-sections -L$(FUZZ_LIBSTDCXX_DIR) -lstdc++
+FUZZ_ASAN_BIN := $(FUZZ_BUILD_DIR)/ducktinycc_fuzz_asan
+FUZZ_UBSAN_BIN := $(FUZZ_BUILD_DIR)/ducktinycc_fuzz_ubsan
+
+$(FUZZ_ASAN_BIN): $(FUZZ_DRIVER) $(FUZZ_SOURCES) $(FUZZ_HEADERS) Makefile
+	mkdir -p $(FUZZ_BUILD_DIR)
+	$(FUZZ_CC) $(FUZZ_COMMON_CFLAGS) -fsanitize=fuzzer,address \
+		-fno-omit-frame-pointer $(FUZZ_DRIVER) $(FUZZ_COMMON_LDFLAGS) \
+		-fsanitize=fuzzer,address -o $@
+
+$(FUZZ_UBSAN_BIN): $(FUZZ_DRIVER) $(FUZZ_SOURCES) $(FUZZ_HEADERS) Makefile
+	mkdir -p $(FUZZ_BUILD_DIR)
+	$(FUZZ_CC) $(FUZZ_COMMON_CFLAGS) -fsanitize=fuzzer,undefined \
+		-fno-omit-frame-pointer $(FUZZ_DRIVER) $(FUZZ_COMMON_LDFLAGS) \
+		-fsanitize=fuzzer,undefined -o $@
+
+fuzz-asan: $(FUZZ_ASAN_BIN)
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+	cp $(FUZZ_CORPUS)/* "$$tmp"/; mkdir "$$tmp/artifacts"; \
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
+	$(FUZZ_ASAN_BIN) "$$tmp" -dict=test/fuzz/ducktinycc.dict \
+		-artifact_prefix="$$tmp/artifacts/" -max_len=$(FUZZ_MAX_LEN) \
+		-timeout=5 -rss_limit_mb=2048 -print_funcs=0 -seed=$(FUZZ_SEED) -runs=$(FUZZ_RUNS)
+
+fuzz-ubsan: $(FUZZ_UBSAN_BIN)
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+	cp $(FUZZ_CORPUS)/* "$$tmp"/; mkdir "$$tmp/artifacts"; \
+	UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1:print_stacktrace=1 \
+	$(FUZZ_UBSAN_BIN) "$$tmp" -dict=test/fuzz/ducktinycc.dict \
+		-artifact_prefix="$$tmp/artifacts/" -max_len=$(FUZZ_MAX_LEN) \
+		-timeout=5 -rss_limit_mb=2048 -print_funcs=0 -seed=$(FUZZ_SEED) -runs=$(FUZZ_RUNS)
+
+fuzz: fuzz-asan fuzz-ubsan
+
+fuzz-sql: release
+	bash scripts/test_sql_fuzz.sh build/release/ducktinycc.duckdb_extension
+
+test-sanitized-extension: configure
+	bash scripts/test_sanitized_extension.sh $${SANITIZER:-asan}
+
+test-sanitizers:
+	$(MAKE) test-sanitized-extension SANITIZER=asan
+	$(MAKE) test-sanitized-extension SANITIZER=ubsan
+
+fuzz-all: fuzz fuzz-sql test-sanitizers
+
+fuzz-clean:
+	rm -rf $(FUZZ_BUILD_DIR) cmake_build/sanitizer-* build/sanitizer-*
 
 # Override header fetch to use the actual DuckDB release version, not the C API version
 update_duckdb_headers_custom:

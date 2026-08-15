@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <pthread.h>
+#include "threads.h"
 #include <stdatomic.h>
 
 #define NR_THREADS 16

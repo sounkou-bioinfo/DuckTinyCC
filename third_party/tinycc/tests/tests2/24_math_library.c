@@ -23,6 +23,12 @@ int main()
    printf("%f\n", round(12.34));
    printf("%f\n", ceil(12.34));
    printf("%f\n", floor(12.34));
+   printf("%f\n", rint(12.75));
+   printf("%f\n", (double)rintf(12.75f));
+   printf("%ld\n", lrint(12.75));
+   printf("%lld\n", llrint(12.75));
+   printf("%f\n", trunc(-12.75));
+   printf("%f\n", (double)truncf(-12.75f));
 
    return 0;
 }

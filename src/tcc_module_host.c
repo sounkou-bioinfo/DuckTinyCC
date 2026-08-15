@@ -5,6 +5,19 @@
  * They are intentionally small, bounds-checked, and operate only on borrowed spans/descriptors.
  */
 
+/* Generated composite helpers allocate in the host libc domain so allocation
+ * and release always cross the same CRT boundary, including Windows UCRT. */
+static void *ducktinycc_helper_malloc(uint64_t size) {
+	if (size > (uint64_t)SIZE_MAX) {
+		return NULL;
+	}
+	return malloc((size_t)size);
+}
+
+static void ducktinycc_helper_free(void *ptr) {
+	free(ptr);
+}
+
 /* ducktinycc_valid_is_set: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_valid_is_set(const uint64_t *validity, uint64_t idx) {
 	if (!validity) {
@@ -158,12 +171,10 @@ static int ducktinycc_list_is_valid(const ducktinycc_list_t *list, uint64_t idx)
 }
 
 static const void *ducktinycc_list_elem_ptr(const ducktinycc_list_t *list, uint64_t idx, uint64_t elem_size) {
-	uint64_t global_idx;
 	if (!list || !list->ptr || idx >= list->len || elem_size == 0) {
 		return NULL;
 	}
-	global_idx = list->offset + idx;
-	return ducktinycc_ptr_add(list->ptr, global_idx * elem_size);
+	return ducktinycc_ptr_add(list->ptr, idx * elem_size);
 }
 
 /* ducktinycc_array_is_valid: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
@@ -180,12 +191,10 @@ static int ducktinycc_array_is_valid(const ducktinycc_array_t *arr, uint64_t idx
 }
 
 static const void *ducktinycc_array_elem_ptr(const ducktinycc_array_t *arr, uint64_t idx, uint64_t elem_size) {
-	uint64_t global_idx;
 	if (!arr || !arr->ptr || idx >= arr->len || elem_size == 0) {
 		return NULL;
 	}
-	global_idx = arr->offset + idx;
-	return ducktinycc_ptr_add(arr->ptr, global_idx * elem_size);
+	return ducktinycc_ptr_add(arr->ptr, idx * elem_size);
 }
 
 static const void *ducktinycc_struct_field_ptr(const ducktinycc_struct_t *st, uint64_t idx) {
@@ -207,21 +216,17 @@ static int ducktinycc_struct_field_is_valid(const ducktinycc_struct_t *st, uint6
 }
 
 static const void *ducktinycc_map_key_ptr(const ducktinycc_map_t *m, uint64_t idx, uint64_t key_size) {
-	uint64_t global_idx;
 	if (!m || !m->key_ptr || idx >= m->len || key_size == 0) {
 		return NULL;
 	}
-	global_idx = m->offset + idx;
-	return ducktinycc_ptr_add(m->key_ptr, global_idx * key_size);
+	return ducktinycc_ptr_add(m->key_ptr, idx * key_size);
 }
 
 static const void *ducktinycc_map_value_ptr(const ducktinycc_map_t *m, uint64_t idx, uint64_t value_size) {
-	uint64_t global_idx;
 	if (!m || !m->value_ptr || idx >= m->len || value_size == 0) {
 		return NULL;
 	}
-	global_idx = m->offset + idx;
-	return ducktinycc_ptr_add(m->value_ptr, global_idx * value_size);
+	return ducktinycc_ptr_add(m->value_ptr, idx * value_size);
 }
 
 /* ducktinycc_map_key_is_valid: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
@@ -280,6 +285,8 @@ static int ducktinycc_union_member_is_valid(const ducktinycc_union_t *u, uint64_
 #define TCC_HOST_SYMBOL_TABLE(X)                                                                                          \
 	X("duckdb_ext_api", &duckdb_ext_api)                                                                                 \
 	X("ducktinycc_register_signature", ducktinycc_register_signature)                                                    \
+	X("ducktinycc_helper_malloc", ducktinycc_helper_malloc)                                                              \
+	X("ducktinycc_helper_free", ducktinycc_helper_free)                                                                  \
 	X("ducktinycc_valid_is_set", ducktinycc_valid_is_set)                                                                \
 	X("ducktinycc_valid_set", ducktinycc_valid_set)                                                                      \
 	X("ducktinycc_span_contains", ducktinycc_span_contains)                                                              \

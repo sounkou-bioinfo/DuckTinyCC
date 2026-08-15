@@ -262,3 +262,31 @@ bar 15 12 34
 [test_scope_3]
 60_errors_and_warnings.c:548: warning: assignment from incompatible pointer type
 60_errors_and_warnings.c:549: error: initialization of incomplete type
+
+[test_const_array_member_addr_ok]
+
+[test_const_array_member_decay_ok]
+
+[test_const_array_member_addr_bad]
+60_errors_and_warnings.c:581: warning: assignment discards qualifiers from pointer target type
+
+[test_const_array_member_decay_bad]
+60_errors_and_warnings.c:591: warning: assignment discards qualifiers from pointer target type
+
+[test_const_array_member_write_bad]
+60_errors_and_warnings.c:601: warning: assignment of read-only location
+
+[test_const_struct_array_member_write_bad]
+60_errors_and_warnings.c:611: warning: assignment of read-only location
+
+[test_volatile_array_member_addr_ok]
+
+[test_volatile_array_member_decay_ok]
+
+[test_volatile_array_member_addr_bad]
+60_errors_and_warnings.c:641: warning: assignment discards qualifiers from pointer target type
+
+[test_volatile_array_member_decay_bad]
+60_errors_and_warnings.c:651: warning: assignment discards qualifiers from pointer target type
+
+[test_volatile_array_member_write_ok]

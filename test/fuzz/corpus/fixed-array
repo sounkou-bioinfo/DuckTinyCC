@@ -1,0 +1,1 @@
+struct<x:i32[4];y:map<varchar;list<u8>>>

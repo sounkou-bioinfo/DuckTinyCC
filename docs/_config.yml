@@ -1,0 +1,16 @@
+title: DuckTinyCC
+description: Runtime C UDF compilation for DuckDB through an embedded TinyCC
+url: https://sounkou-bioinfo.github.io
+baseurl: /DuckTinyCC
+repository: sounkou-bioinfo/DuckTinyCC
+theme: minima
+markdown: kramdown
+kramdown:
+  input: GFM
+header_pages:
+  - DESIGN.md
+  - FUZZING.md
+  - LIFETIME_OWNERSHIP.md
+  - ROADMAP.md
+exclude:
+  - README.md

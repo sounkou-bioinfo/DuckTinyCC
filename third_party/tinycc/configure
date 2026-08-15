@@ -35,13 +35,11 @@ mingw32="no"
 LIBSUF=".a"
 EXESUF=""
 DLLSUF=".so"
-tcc_usrinclude=""
 tcc_sysincludepaths=""
 tcc_libpaths=""
 tcc_crtprefix=""
 tcc_elfinterp=""
 triplet=
-tcc_lddir=
 confvars=
 suggest="yes"
 gcc_major=0
@@ -53,6 +51,7 @@ cpuver=
 dwarf=
 targetos=
 build_cross=
+quiet=
 
 # use CC/AR from environment when set
 test -n "$CC" && cc="$CC"
@@ -160,8 +159,6 @@ for opt do
   ;;
   --debug) confvars_set debug
   ;;
-  --with-libgcc) confvars_set libgcc
-  ;;
   --with-selinux) confvars_set selinux
   ;;
   --tcc-switches=*) assign_opt "$opt" tcc_switches
@@ -173,6 +170,8 @@ for opt do
   --config-*) confvars_set "${opt#--config-}"; suggest="no"
   ;;
   --help|-h) show_help="yes"
+  ;;
+  -q) quiet=yes
   ;;
   *) echo "configure: WARNING: unrecognized option $opt"
   ;;
@@ -197,6 +196,7 @@ Standard options:
   --docdir=DIR             documentation in DIR [SHAREDIR/doc/tcc]
   --mandir=DIR             man documentation in DIR [SHAREDIR/man]
   --infodir=DIR            info documentation in DIR [SHAREDIR/info]
+   -q                      be quiet
 
 Advanced options (experts only):
   --source-path=PATH       path of source code [$source_path]
@@ -210,9 +210,8 @@ Advanced options (experts only):
   --disable-static         make libtcc.so instead of libtcc.a
   --enable-static          make libtcc.a instead of libtcc.dll (win32)
   --disable-rpath          disable use of -rpath with libtcc.so
-  --with-libgcc            use libgcc_s.so.1 instead of libtcc1.a
   --with-selinux           use mmap for executable memory (tcc -run)
-  --enable-cross           build cross compilers (see also 'make help')
+  --enable-cross           build all cross compilers (see also 'make help')
 
   --sysincludepaths=...    specify system include paths, colon separated
   --libpaths=...           specify system library paths, colon separated
@@ -230,6 +229,7 @@ Advanced options (experts only):
   --config-new_dtags=yes   use new ELF DTAGs (DT_RUNPATH instead of DT_RPATH)
   --config-codesign=no     do not use codesign on apple to sign executables
   --config-dwarf=x         use dwarf debug info instead of stabs (x=2..5)
+  --config-pie             let tcc generate position independent executables
 
 Cross build options (experimental):
   --cpu=CPU                target CPU [$cpu]
@@ -265,7 +265,11 @@ default os_release "$(uname -r)"
 case $buildos in
   Windows_NT|MINGW*|MSYS*|CYGWIN*)
     buildos="WIN32"
-    test "$MSYSTEM" = "MINGW32" && cpu_sys=i386
+    case "$MSYSTEM" in
+      MINGW32) cpu_sys=i386 ;;
+      MINGW64) cpu_sys=x86_64 ;;
+      CLANGARM64|MINGW_ARM64) cpu_sys=arm64 ;;
+    esac
   ;;
   Linux)
     if test "$(uname -o)" = "Android"; then
@@ -347,6 +351,9 @@ case "$cpu" in
   riscv64)
     cpu="riscv64"
   ;;
+  wasm|wasm32|wasm32-unknown-emscripten)
+    cpu="wasm32"
+  ;;
   *)
     echo "Unsupported CPU"
     exit 1
@@ -359,9 +366,12 @@ case $targetos in
     default_conf "codesign"
     DLLSUF=".dylib"
     if test -z "$build_cross"; then
-      cc=`command -v cc`
-      cc=`readlink $cc || echo clang`
+      if test "$cc" = "gcc"; then
+        cc=`command -v cc`
+        cc=`readlink $cc || echo clang`
+      fi
       tcc_usrinclude="`xcrun --show-sdk-path`/usr/include"
+      default tcc_sysincludepaths "{B}/include:$tcc_usrinclude"
       if test "${confvars%new_macho*}" = "${confvars}"; then
           # if new_macho was not specified and (known) ver <= 10, use old (=no)
           osxver=$(sw_vers -productVersion 2>/dev/null)  # X.Y.Z
@@ -401,6 +411,16 @@ case $targetos in
     default tcc_crtprefix "{R}/lib"
     default tcc_elfinterp "/system/bin/linker${S}"
     default tcc_switches "-Wl,-rpath=$sysroot/lib"
+    ;;
+  Emscripten|emscripten)
+    targetos=Emscripten
+    confvars_set Emscripten backtrace=no bcheck=no semlock=0
+    default prefix "/tcc"
+    default tccdir "${prefix}"
+    default includedir "${prefix}/include"
+    default tcc_sysincludepaths "{B}/include:{B}/include/wasm32:{R}/include"
+    default tcc_libpaths "{B}:{R}/lib"
+    default tcc_crtprefix "{R}/lib"
     ;;
   WIN32)
     mingw32="yes"
@@ -473,7 +493,8 @@ if test -z "$build_cross"; then
       if test -z "$triplet"; then
         case $cpu in x86_64|arm64|riscv64)
           if test -f "/usr/lib64/crti.o" ; then
-            tcc_lddir="lib64"
+            default tcc_libpaths "{B}:/usr/lib64"
+            default tcc_crtprefix "/usr/lib64"
           fi
         esac
       fi
@@ -547,6 +568,7 @@ fi
 
 fcho() { if test -n "$2"; then echo "$1$2"; fi }
 
+if test -z "$quiet"; then
 fcho "Binary directory    " "$bindir"
 fcho "TinyCC directory    " "$tccdir"
 fcho "Library directory   " "$libdir"
@@ -555,7 +577,6 @@ fcho "Manual directory    " "$mandir"
 fcho "Info directory      " "$infodir"
 fcho "Doc directory       " "$docdir"
 fcho "Target root prefix  " "$sysroot"
-fcho "/usr/include dir    " "$tcc_usrinclude"
 echo "Source path         $source_path"
 echo "Build OS            $(uname -m -s)"
 echo "C compiler          $cc ($gcc_major.$gcc_minor)"
@@ -569,6 +590,7 @@ fcho "Elfinterp           " "$tcc_elfinterp"
 fcho "Switches            " "$tcc_switches"
 fcho "Config              " "${confvars# }"
 echo "Creating config.mak and config.h"
+fi
 
 version=$(head "$source_path/VERSION")
 
@@ -635,7 +657,7 @@ cat >$TMPH <<EOF
 #define GCC_MINOR $gcc_minor
 
 #if !(TCC_TARGET_I386 || TCC_TARGET_X86_64 || TCC_TARGET_ARM\
- || TCC_TARGET_ARM64 || TCC_TARGET_RISCV64 || TCC_TARGET_C67)
+ || TCC_TARGET_ARM64 || TCC_TARGET_RISCV64 || TCC_TARGET_C67 || TCC_TARGET_WASM32)
 EOF
 
 predefs=1
@@ -652,6 +674,7 @@ for v in $cpu $confvars ; do
     CONFIG_x86_64=yes)      print_num TCC_TARGET_X86_64 1 ;;
     CONFIG_arm64=yes)       print_num TCC_TARGET_ARM64 1 ;;
     CONFIG_riscv64=yes)     print_num TCC_TARGET_RISCV64 1 ;;
+    CONFIG_wasm32=yes)      print_num TCC_TARGET_WASM32 1 ;;
     CONFIG_arm=yes)         print_num TCC_TARGET_ARM 1
                             print_num CONFIG_TCC_CPUVER "$cpuver" ;;
     CONFIG_arm_eabihf=yes)  print_num TCC_ARM_EABI 1
@@ -663,6 +686,9 @@ for v in $cpu $confvars ; do
     CONFIG_WIN32=yes)       print_num TCC_TARGET_PE 1 ;;
     CONFIG_OSX=yes)         print_num TCC_TARGET_MACHO 1 ;;
     CONFIG_Android=yes)     print_num TARGETOS_ANDROID 1 ;;
+    CONFIG_Emscripten=yes)  print_num TARGETOS_Emscripten 1
+                            print_num CONFIG_TCC_BACKTRACE 0
+                            print_num CONFIG_TCC_BCHECK 0 ;;
     CONFIG_BSD=yes)         print_num TARGETOS_$targetos 1
       case "$targetos" in
         FreeBSD)    default tcc_elfinterp "/libexec/ld-elf.so.1";;
@@ -686,7 +712,6 @@ for v in $cpu $confvars ; do
       esac
       ;;
     # other
-    CONFIG_libgcc=yes)      print_num CONFIG_USE_LIBGCC 1 ;;
     CONFIG_selinux=yes)     print_num CONFIG_SELINUX 1 ;;
     CONFIG_pie=yes)         print_num CONFIG_TCC_PIE 1 ;;
     CONFIG_pic=yes)         print_num CONFIG_TCC_PIC 1 ;;
@@ -701,13 +726,11 @@ for v in $cpu $confvars ; do
   esac
 done
 
-print_str CONFIG_USR_INCLUDE "$tcc_usrinclude"
 print_str CONFIG_TCC_SYSINCLUDEPATHS "$tcc_sysincludepaths"
 print_str CONFIG_TCC_LIBPATHS "$tcc_libpaths"
 print_str CONFIG_TCC_CRTPREFIX "$tcc_crtprefix"
 print_str CONFIG_TCC_ELFINTERP "$tcc_elfinterp"
 print_str CONFIG_TCC_SWITCHES "$tcc_switches"
-print_str CONFIG_LDDIR "$tcc_lddir"
 print_str CONFIG_TRIPLET "$triplet"
 print_str CONFIG_OS_RELEASE "$os_release"
 echo "#endif" >> $TMPH && echo >> $TMPH
@@ -719,7 +742,7 @@ print_num CONFIG_TCC_PREDEFS "$predefs"
 diff $TMPH config.h >/dev/null 2>&1
 if test $? -ne 0 ; then
     mv -f $TMPH config.h
-else
+elif test -z "$quiet"; then
     echo "config.h is unchanged"
 fi
 

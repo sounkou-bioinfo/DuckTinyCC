@@ -18,11 +18,6 @@
 #define PCRELATIVE_DLLPLT 1
 #define RELOCATE_DLLPLT 1
 
-enum float_abi {
-    ARM_SOFTFP_FLOAT,
-    ARM_HARD_FLOAT,
-};
-
 #else /* !TARGET_DEFS_ONLY */
 
 #include "tcc.h"
@@ -49,6 +44,7 @@ ST_FUNC int code_reloc (int reloc_type)
 	case R_ARM_TARGET1:
 	case R_ARM_MOVT_PREL:
 	case R_ARM_MOVW_PREL_NC:
+	case R_ARM_TLS_LE32:
             return 0;
 
         case R_ARM_PC24:
@@ -75,6 +71,7 @@ ST_FUNC int gotplt_entry_type (int reloc_type)
 	case R_ARM_COPY:
 	case R_ARM_GLOB_DAT:
 	case R_ARM_JUMP_SLOT:
+	case R_ARM_TLS_LE32:
             return NO_GOTPLT_ENTRY;
 
         case R_ARM_PC24:
@@ -434,6 +431,19 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
             add32le(ptr, val - s1->pe_imagebase);
 #endif
             /* do nothing */
+            return;
+        case R_ARM_TLS_LE32:
+            {
+                int32_t x;
+                if (s1->tls_end) {
+                    x = val - s1->tls_start + 8;
+                } else {
+                    ElfW(Sym) *sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+                    Section *sec = s1->sections[sym->st_shndx];
+                    x = val - sec->sh_addr - sec->data_offset + 8;
+                }
+                add32le(ptr, x);
+            }
             return;
         default:
             fprintf(stderr,"FIXME: handle reloc type %d at %x [%p] to %x\n",

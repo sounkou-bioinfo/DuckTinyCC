@@ -1,0 +1,96 @@
+# name: test/sql/tcc_module_symbols_errors.test
+# description: symbol injection and compile-error coverage
+# group: [ducktinycc]
+
+require ducktinycc
+
+# ----- add_symbol: inject an arbitrary symbol into TCC state -----
+
+# Stage a symbol: the address itself encodes the value (no dereference needed)
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_symbol',
+  symbol_name := 'MY_MAGIC',
+  symbol_ptr := 42::UBIGINT
+);
+----
+true	add_symbol	OK
+
+# Compile C code that uses the injected symbol address as a value
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+extern char MY_MAGIC[];
+long long get_magic(void) {
+  return (long long)(unsigned long long)(void *)MY_MAGIC;
+}',
+  symbol := 'get_magic',
+  sql_name := 'get_magic',
+  return_type := 'i64',
+  arg_types := []
+);
+----
+true	quick_compile	OK
+
+query I
+SELECT get_magic();
+----
+42
+
+# Reset state and verify symbols are cleared
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(mode := 'tcc_new_state');
+----
+true	tcc_new_state	OK
+
+# ----- add_symbol: missing args produce proper errors -----
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_symbol',
+  symbol_name := 'foo'
+);
+----
+false	add_symbol	E_MISSING_ARGS
+
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'add_symbol',
+  symbol_ptr := 12345::UBIGINT
+);
+----
+false	add_symbol	E_MISSING_ARGS
+
+# ---------- error: bad C source (syntax error) ----------
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'int bad_syntax(int x { return x; }',
+  symbol := 'bad_syntax',
+  sql_name := 'bad_syntax',
+  return_type := 'i32',
+  arg_types := ['i32']
+);
+----
+false	quick_compile	E_COMPILE_FAILED
+
+# Recursive type syntax is bounded before it can exhaust the C stack.
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'codegen_preview',
+  source := 'int deep_type(int x){ return x; }',
+  symbol := 'deep_type',
+  sql_name := 'deep_type',
+  return_type := 'list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<list<i32>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>',
+  arg_types := ['i32']
+);
+----
+false	codegen_preview	E_BAD_SIGNATURE

@@ -35,7 +35,7 @@ static const char help[] =
     "General options:\n"
     "  -c           compile only - generate an object file\n"
     "  -o outfile   set output filename\n"
-    "  -run         run compiled source [with custom stdin: -rstdin FILE]\n"
+    "  -run         run compiled source\n"
     "  -fflag       set or reset (with 'no-' prefix) 'flag' (see tcc -hh)\n"
     "  -Wwarning    set or reset (with 'no-' prefix) 'warning' (see tcc -hh)\n"
     "  -w           disable all warnings\n"
@@ -105,6 +105,7 @@ static const char help2[] =
     "  -static                       link to static libraries (not recommended)\n"
     "  -dumpversion                  print version\n"
     "  -print-search-dirs            print search paths\n"
+    "  -rstdin file                  with -run: use 'file' as custom stdin\n"
     "  -dt                           with -run/-E: auto-define 'test_...' macros\n"
     "Ignored options:\n"
     "  -arch -C --param -pedantic -pipe -s -traditional\n"
@@ -225,7 +226,7 @@ static void print_search_dirs(TCCState *s)
     printf("libtcc1:\n  %s/%s\n", s->library_paths[0], CONFIG_TCC_CROSSPREFIX TCC_LIBTCC1);
 #ifdef TCC_TARGET_UNIX
     print_dirs("crt", s->crt_paths, s->nb_crt_paths);
-    printf("elfinterp:\n  %s\n",  DEFAULT_ELFINTERP(s));
+    printf("elfinterp:\n  %s\n",  s->elfint);
 #endif
 }
 
@@ -293,7 +294,7 @@ int main(int argc, char **argv)
     const char *first_file;
     int argc0 = argc;
     char **argv0 = argv;
-    FILE *ppfp = stdout;
+    FILE *ppfp = NULL;
 
 redo:
     argc = argc0, argv = argv0;
@@ -335,7 +336,7 @@ redo:
             tcc_error_noabort("no input files");
         } else if (s->output_type == TCC_OUTPUT_PREPROCESS) {
             if (s->outfile && 0!=strcmp("-",s->outfile)) {
-                ppfp = fopen(s->outfile, "wb");
+                ppfp = tcc_fopen(s->outfile, "wb");
                 if (!ppfp)
                     tcc_error_noabort("could not write '%s'", s->outfile);
             }
@@ -354,8 +355,9 @@ redo:
     set_environment(s);
     if (s->output_type == 0)
         s->output_type = TCC_OUTPUT_EXE;
-    tcc_set_output_type(s, s->output_type);
-    s->ppfp = ppfp;
+    ret = tcc_set_output_type(s, s->output_type);
+    if (ppfp)
+        s->ppfp = ppfp;
 
     if ((s->output_type == TCC_OUTPUT_MEMORY
       || s->output_type == TCC_OUTPUT_PREPROCESS)
@@ -369,7 +371,7 @@ redo:
 
     /* compile or add each files or library */
     first_file = NULL;
-    do {
+    while (0 == ret) {
         struct filespec *f = s->files[n];
         s->filetype = f->type;
         if (f->type & AFF_TYPE_LIB) {
@@ -381,9 +383,11 @@ redo:
                 first_file = f->name;
             ret = tcc_add_file(s, f->name);
         }
-    } while (++n < s->nb_files
-            && 0 == ret
-            && (s->output_type != TCC_OUTPUT_OBJ || s->option_r));
+        if (++n == s->nb_files)
+            break;
+        if (s->output_type == TCC_OUTPUT_OBJ && !s->option_r)
+            break;
+    }
 
     if (s->do_bench)
         end_time = getclock_ms();
@@ -422,7 +426,7 @@ redo:
     tcc_delete(s);
     if (!done)
         goto redo;
-    if (ppfp && ppfp != stdout)
-        fclose(ppfp);
+    if (ppfp)
+        tcc_fclose(ppfp);
     return ret;
 }

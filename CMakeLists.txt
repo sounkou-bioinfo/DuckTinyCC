@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5...3.29)
 option(DUCKDB_WASM_EXTENSION "Whether compiling for Wasm target" OFF)
 option(DUCKTINYCC_PRUNE_TINYCC_BUILD_DIR "Remove tinycc_build after linking to validate embedded runtime-only execution" OFF)
+set(DUCKTINYCC_TINYCC_EXTRA_CFLAGS "" CACHE STRING "Additional C flags for the vendored TinyCC build")
+set(DUCKTINYCC_TINYCC_EXTRA_LDFLAGS "" CACHE STRING "Additional linker flags for the vendored TinyCC build")
 
 ###
 # Configuration
@@ -101,8 +103,19 @@ if (NOT DUCKDB_WASM_EXTENSION)
     set(TINYCC_CONFIGURE_ARGS
         --source-path=${TINYCC_SOURCE_PATH}
     )
+    set(TINYCC_EXTRA_CFLAGS "")
     if (NOT WIN32)
-        list(APPEND TINYCC_CONFIGURE_ARGS --extra-cflags=-fPIC)
+        set(TINYCC_EXTRA_CFLAGS "-fPIC")
+    endif()
+    if (DUCKTINYCC_TINYCC_EXTRA_CFLAGS)
+        string(APPEND TINYCC_EXTRA_CFLAGS " ${DUCKTINYCC_TINYCC_EXTRA_CFLAGS}")
+        string(STRIP "${TINYCC_EXTRA_CFLAGS}" TINYCC_EXTRA_CFLAGS)
+    endif()
+    if (TINYCC_EXTRA_CFLAGS)
+        list(APPEND TINYCC_CONFIGURE_ARGS "--extra-cflags=${TINYCC_EXTRA_CFLAGS}")
+    endif()
+    if (DUCKTINYCC_TINYCC_EXTRA_LDFLAGS)
+        list(APPEND TINYCC_CONFIGURE_ARGS "--extra-ldflags=${DUCKTINYCC_TINYCC_EXTRA_LDFLAGS}")
     endif()
     if (MINGW)
         # Match TinyCC's documented Windows configure mode.

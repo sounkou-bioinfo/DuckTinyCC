@@ -11,7 +11,7 @@ undefined behaviour.
 | Domain | Allocator / Deallocator | Used By |
 |--------|------------------------|---------|
 | **DuckDB heap** | `duckdb_malloc` / `duckdb_free` | Extension state, bind/init payloads, parsed metadata, bridge scratch buffers, generated source text, compiled UDF extra-info. |
-| **libc heap** | `malloc` / `free` | Pointer-registry payloads (`tcc_alloc` → `tcc_free_ptr`), generated helper `*_new` / `*_free` functions. |
+| **libc heap** | `malloc` / `free` | Pointer-registry payloads (`tcc_alloc` → `tcc_free_ptr`); generated helper `*_new` / `*_free` functions call host-injected wrappers around the same allocator domain. |
 
 **Rule:** never `duckdb_free` a pointer returned by `malloc`, and vice versa.
 
@@ -44,9 +44,9 @@ returns.
 
 | Field | Type | Ownership | Notes |
 |-------|------|-----------|-------|
-| `ptr` | `const void *` | **Borrowed** from DuckDB list child vector data buffer. | Points to flat element data; index with `offset + i` × element size. |
-| `validity` | `const uint64_t *` | **Borrowed** from DuckDB list child validity buffer. | May be `NULL` (all-valid). |
-| `offset` | `uint64_t` | Value | Global start offset into child vector for this row's slice. |
+| `ptr` | `const void *` | **Borrowed** from DuckDB list child vector data buffer. | Row-sliced pointer to element zero; index with `i` × element size. |
+| `validity` | `const uint64_t *` | **Borrowed** from DuckDB list child validity buffer. | May be `NULL` (all-valid); index with `offset + i`. |
+| `offset` | `uint64_t` | Value | Global start offset used only for the child validity bitmap. |
 | `len` | `uint64_t` | Value | Number of elements in this row's list. |
 
 Access helpers: `ducktinycc_list_elem_ptr(list, idx, elem_size)`,
@@ -58,9 +58,9 @@ Layout-identical to `ducktinycc_list_t`.  Same ownership rules apply.
 
 | Field | Type | Ownership | Notes |
 |-------|------|-----------|-------|
-| `ptr` | `const void *` | **Borrowed** | Flat element data. |
-| `validity` | `const uint64_t *` | **Borrowed** | May be `NULL`. |
-| `offset` | `uint64_t` | Value | Global child-vector start offset. |
+| `ptr` | `const void *` | **Borrowed** | Row-sliced pointer to element zero. |
+| `validity` | `const uint64_t *` | **Borrowed** | May be `NULL`; index with `offset + i`. |
+| `offset` | `uint64_t` | Value | Global child-vector start offset used for validity only. |
 | `len` | `uint64_t` | Value | Fixed array size (from type metadata). |
 
 Access helpers: `ducktinycc_array_elem_ptr(arr, idx, elem_size)`,
@@ -85,11 +85,11 @@ the row index into each field's validity bitmap (not element-within-field).
 
 | Field | Type | Ownership | Notes |
 |-------|------|-----------|-------|
-| `key_ptr` | `const void *` | **Borrowed** from list-child key vector. | Flat key data. |
-| `key_validity` | `const uint64_t *` | **Borrowed** | May be `NULL`. |
-| `value_ptr` | `const void *` | **Borrowed** from list-child value vector. | Flat value data. |
-| `value_validity` | `const uint64_t *` | **Borrowed** | May be `NULL`. |
-| `offset` | `uint64_t` | Value | Global child-vector start offset. |
+| `key_ptr` | `const void *` | **Borrowed** from list-child key vector. | Row-sliced pointer to key zero. |
+| `key_validity` | `const uint64_t *` | **Borrowed** | May be `NULL`; index with `offset + i`. |
+| `value_ptr` | `const void *` | **Borrowed** from list-child value vector. | Row-sliced pointer to value zero. |
+| `value_validity` | `const uint64_t *` | **Borrowed** | May be `NULL`; index with `offset + i`. |
+| `offset` | `uint64_t` | Value | Global child-vector start offset used for validity only. |
 | `len` | `uint64_t` | Value | Number of key/value pairs in this row's map. |
 
 Access helpers: `ducktinycc_map_key_ptr(m, idx, key_size)`,
@@ -162,8 +162,8 @@ mutable pointer-backed fields are volatile so DuckDB re-runs them per row.
 
 | Helper | Heap | Contract |
 |--------|------|----------|
-| `{prefix}_new()` | `malloc` | Returns owned pointer; caller must call `{prefix}_free`. |
-| `{prefix}_free(p)` | `free` | Frees pointer from `{prefix}_new`. NULL-safe. |
+| `{prefix}_new()` | host `ducktinycc_helper_malloc` → `malloc` | Returns owned pointer; caller must call `{prefix}_free`. |
+| `{prefix}_free(p)` | host `ducktinycc_helper_free` → `free` | Frees pointer from `{prefix}_new` in the same CRT domain. NULL-safe. |
 | `{prefix}_sizeof()` | — | Returns `sizeof` the underlying C type. |
 | `{prefix}_alignof()` | — | Returns alignment of the underlying C type. |
 | `{prefix}_get_{field}(p)` | — | Reads field; `p` is **borrowed** (not freed). |

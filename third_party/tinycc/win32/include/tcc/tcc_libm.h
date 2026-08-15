@@ -311,8 +311,79 @@ __CRT_INLINE long double __cdecl frexpl (long double x, int* y) {
 }
 
 
+#ifdef __aarch64__
+
 __CRT_INLINE double __cdecl rint(double x) {
-double retval;
+  const double toint = 4503599627370496.0;
+  double y;
+
+  if (x <= -toint || x >= toint)
+    return x;
+  if (x < 0)
+    y = x - toint + toint;
+  else
+    y = x + toint - toint;
+  return y == 0 ? 0.0 * x : y;
+}
+
+__CRT_INLINE float __cdecl rintf(float x) {
+  const float toint = 8388608.0f;
+  float y;
+
+  if (x <= -toint || x >= toint)
+    return x;
+  if (x < 0)
+    y = x - toint + toint;
+  else
+    y = x + toint - toint;
+  return y == 0 ? 0.0f * x : y;
+}
+
+__CRT_INLINE long double __cdecl rintl(long double x) {
+  return rint(x);
+}
+
+/* 7.12.9.5 */
+__CRT_INLINE long __cdecl lrint(double x) {
+  return (long) rint(x);
+}
+
+__CRT_INLINE long __cdecl lrintf(float x) {
+  return (long) rintf(x);
+}
+
+__CRT_INLINE long __cdecl lrintl(long double x) {
+  return (long) rintl(x);
+}
+
+__CRT_INLINE long long __cdecl llrint(double x) {
+  return (long long) rint(x);
+}
+
+__CRT_INLINE long long __cdecl llrintf(float x) {
+  return (long long) rintf(x);
+}
+
+__CRT_INLINE long long __cdecl llrintl(long double x) {
+  return (long long) rintl(x);
+}
+
+__CRT_INLINE double __cdecl trunc(double x) {
+  return x < 0 ? ceil(x) : floor(x);
+}
+
+__CRT_INLINE float __cdecl truncf(float x) {
+  return x < 0 ? ceilf(x) : floorf(x);
+}
+
+__CRT_INLINE long double __cdecl truncl(long double x) {
+  return trunc(x);
+}
+
+#else
+
+__CRT_INLINE double __cdecl rint(double x) {
+  double retval;
   __asm__ (
     "fldl    %1\n"
     "frndint   \n"
@@ -326,12 +397,12 @@ __CRT_INLINE float __cdecl rintf(float x) {
     "flds    %1\n"
     "frndint   \n"
     "fstps    %0\n" : "=m" (retval) : "m" (x));
-   return retval;
-}
-__CRT_INLINE long double __cdecl rintl (long double x) {
-  return rint(x);
+  return retval;
 }
 
+__CRT_INLINE long double __cdecl rintl(long double x) {
+  return rint(x);
+}
 
 /* 7.12.9.5 */
 __CRT_INLINE long __cdecl lrint(double x) {
@@ -350,13 +421,12 @@ __CRT_INLINE long __cdecl lrintf(float x) {
   return retval;
 }
 
-__CRT_INLINE long __cdecl lrintl (long double x) {
+__CRT_INLINE long __cdecl lrintl(long double x) {
   return lrint(x);
 }
 
-
 __CRT_INLINE long long __cdecl llrint(double x) {
-long long retval;
+  long long retval;
   __asm__ __volatile__
     ("fldl    %1\n"
      "fistpll %0"  : "=m" (retval) : "m" (x));
@@ -371,12 +441,11 @@ __CRT_INLINE long long __cdecl llrintf(float x) {
   return retval;
 }
 
-__CRT_INLINE long long __cdecl llrintl (long double x) {
+__CRT_INLINE long long __cdecl llrintl(long double x) {
   return llrint(x);
 }
 
-
-__CRT_INLINE double __cdecl trunc(double _x) {
+__CRT_INLINE double __cdecl trunc(double x) {
   double retval;
   unsigned short saved_cw;
   unsigned short tmp_cw;
@@ -386,17 +455,20 @@ __CRT_INLINE double __cdecl trunc(double _x) {
   __asm__ ("fldcw %0;" : : "m" (tmp_cw));
   __asm__ ("fldl  %1;"
            "frndint;"
-           "fstpl  %0;" : "=m" (retval)  : "m" (_x)); /* round towards zero */
-  __asm__ ("fldcw %0;" : : "m" (saved_cw) ); /* restore saved control word */
+           "fstpl  %0;" : "=m" (retval) : "m" (x)); /* round towards zero */
+  __asm__ ("fldcw %0;" : : "m" (saved_cw)); /* restore saved control word */
   return retval;
 }
 
 __CRT_INLINE float __cdecl truncf(float x) {
   return (float) ((intptr_t) x);
 }
+
 __CRT_INLINE long double __cdecl truncl(long double x) {
   return trunc(x);
 }
+
+#endif
 
 
 __CRT_INLINE long double __cdecl nextafterl(long double x, long double to) {

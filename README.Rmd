@@ -157,6 +157,13 @@ FROM tcc_module(
 
 Be careful with process-control APIs such as `exit`, `_Exit`, `abort`, `setjmp`, and `longjmp`: when explicitly resolved, they execute inside the DuckDB process. DuckTinyCC does not currently sandbox or catch native control-flow escapes from generated UDFs. Generated UDFs are trusted in-process native code; if you explicitly link libc, inject process-control symbols, or use inline assembly/syscalls, you are responsible for keeping that code inside the normal function-return contract.
 
+## Documentation
+
+The design, ownership model, fuzzing discipline, and roadmap are published at
+<https://sounkou-bioinfo.github.io/DuckTinyCC/>. `docs/DESIGN.md` is the
+conceptual authority: it records the invariants the implementation and tests
+must preserve, including the trusted-native-code boundary.
+
 ## Build and Test during development
 
 README rendering uses `rmarkdown` and [`duckknit`](https://github.com/rundel/duckknit) so SQL examples share one DuckDB CLI session during `make rdm`.
@@ -172,6 +179,15 @@ make test_release
 # Verify the embedded runtime (hides the build-dir and runs the full test suite)
 make test_embedded_debug
 make test_embedded_release
+
+# Native parser/codegen fuzzing under ASan and UBSan
+make fuzz
+
+# Deterministic C-generated SQL mutations
+make fuzz-sql
+
+# Rebuild the complete extension and TinyCC under both sanitizers
+make test-sanitizers
 ```
 
 

@@ -30,6 +30,10 @@
 
 #define CHAR_IS_UNSIGNED
 
+/* define if return values need to be extended explicitely
+   at caller side (for interfacing with non-TCC compilers) */
+#define PROMOTE_RET
+
 #else
 #define USING_GLOBALS
 #include "tcc.h"
@@ -175,6 +179,19 @@ static int load_symofs(int r, SValue *sv, int forstore, int *new_fc)
     if (sv->r & VT_SYM) {
         Sym label = {0};
         assert(v == VT_CONST);
+        if (sv->sym->type.t & VT_TLS) {
+            /* TLS Local Exec model: lui + addi + add tp */
+            rr = is_ireg(r) ? ireg(r) : 5;
+            greloca(cur_text_section, sv->sym, ind,
+                    R_RISCV_TPREL_HI20, sv->c.i);
+            o(0x37 | (rr << 7));  // lui RR, 0 %tprel_hi(sym)
+            greloca(cur_text_section, sv->sym, ind,
+                    R_RISCV_TPREL_LO12_I, sv->c.i);
+            EI(0x13, 0, rr, rr, 0); // addi RR, RR, 0 %tprel_lo(sym)
+            ER(0x33, 0, rr, rr, 4, 0); // add RR, RR, tp
+            *new_fc = 0;
+            return rr;
+        }
         if (sv->sym->type.t & VT_STATIC) { // XXX do this per linker relax
             greloca(cur_text_section, sv->sym, ind,
                     R_RISCV_PCREL_HI20, sv->c.i);
@@ -277,13 +294,29 @@ ST_FUNC void load(int r, SValue *sv)
         EI(opcode, func3, rr, br, fc); // l[bhwd][u] / fl[wd] RR, fc(BR)
     } else if (v == VT_CONST) {
         int rb = 0, do32bit = 8, zext = 0;
-        assert((!is_float(sv->type.t) && is_ireg(r)) || bt == VT_LDOUBLE);
+        if (is_float(sv->type.t) && bt != VT_LDOUBLE) {
+            /* load float/double constant: move bit pattern from int reg */
+            uint64_t val = sv->c.i;
+            int is_dbl = bt == VT_DOUBLE;
+            if (val == 0) {
+                o(0x53 | (rr << 7) | ((unsigned)(0x78 | is_dbl) << 25));
+                return;
+            }
+            if (is_dbl) {
+                load_large_constant(6, (int)val, (int)(val >> 32));
+            } else {
+                if (LOW_OVERFLOW(fc))
+                    o(0x37 | (6 << 7) | UPPER(fc)); // lui t1, upper
+                EI(0x13 | 8, 0, 6, LOW_OVERFLOW(fc) ? 6 : 0, SIGN11(fc)); // addiw t1,...
+            }
+            o(0x53 | (rr << 7) | (6 << 15) | ((unsigned)(0x78 | is_dbl) << 25));
+            return;
+        }
+        assert(is_ireg(r) || bt == VT_LDOUBLE);
         if (fr & VT_SYM) {
             rb = load_symofs(r, sv, 0, &fc);
             do32bit = 0;
         }
-        if (is_float(sv->type.t) && bt != VT_LDOUBLE)
-          tcc_error("unimp: load(float)");
         if (do32bit && fc != sv->c.i) {
             int64_t si = sv->c.i;
             si >>= 32;
@@ -1110,6 +1143,7 @@ static void gen_opil(int op, int ll)
         ER(0x33 | ll, 0, d, a, b, 1); // mul d, a, b
         break;
     case '/':
+    case TOK_PDIV:
         ER(0x33 | ll, 4, d, a, b, 1); // div d, a, b
         break;
     case '&':
@@ -1127,7 +1161,6 @@ static void gen_opil(int op, int ll)
     case TOK_UMOD:
         ER(0x33 | ll, 7, d, a, b, 1); // remu d, a, b
         break;
-    case TOK_PDIV:
     case TOK_UDIV:
         ER(0x33 | ll, 5, d, a, b, 1); // divu d, a, b
         break;
@@ -1241,10 +1274,31 @@ ST_FUNC void gen_opf(int op)
     }
 }
 
+ST_FUNC void gen_cvt_csti(int t)
+{
+    int r = ireg(gv(RC_INT));
+    if ((t & VT_BTYPE) == VT_SHORT) {
+        if (t & VT_UNSIGNED) {
+            EI(0x13, 1, r, r, 48); // slli r, r, 48
+            EI(0x13, 5, r, r, 48); // srli r, r, 48
+        } else {
+            EI(0x13, 1, r, r, 48); // slli r, r, 48
+            EIu(0x13, 5, r, r, 0x400 | 48); // srai r, r, 48
+        }
+    } else {
+        if (t & VT_UNSIGNED) {
+            EI(0x13, 7, r, r, 0xff); // andi r, r, 0xff
+        } else {
+            EI(0x13, 1, r, r, 56); // slli r, r, 56
+            EIu(0x13, 5, r, r, 0x400 | 56); // srai r, r, 56
+        }
+    }
+}
+
 ST_FUNC void gen_cvt_sxtw(void)
 {
-    /* XXX on risc-v the registers are usually sign-extended already.
-       Let's try to not do anything here.  */
+    int r = ireg(gv(RC_INT));
+    EI(0x1b, 0, r, r, 0); // addiw r, r, 0
 }
 
 ST_FUNC void gen_cvt_itof(int t)
@@ -1430,5 +1484,13 @@ ST_FUNC void gen_vla_alloc(CType *type, int align)
         func_bound_add_epilog = 1;
     }
 #endif
+}
+
+ST_FUNC void gen_clear_cache(void)
+{
+    /* Zifencei extension: fence + fence.i for I/D synchronization.
+       Required by RISC-V Linux ABI, present on all Linux-capable cores. */
+    o(0x0ff0000f); // fence iorw, iorw
+    o(0x0000100f); // fence.i
 }
 #endif

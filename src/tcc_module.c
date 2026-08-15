@@ -90,6 +90,8 @@ DUCKDB_EXTENSION_EXTERN
 /* - destroy_tcc_module_state: Destructor callback for bind/init/state allocations owned by DuckDB function/table contexts. */
 /* - ducktinycc_array_elem_ptr: ARRAY descriptor accessor helper for generated wrappers. */
 /* - ducktinycc_array_is_valid: ARRAY descriptor accessor helper for generated wrappers. */
+/* - ducktinycc_helper_malloc: Host libc allocator wrapper for generated composite helpers. */
+/* - ducktinycc_helper_free: Host libc deallocator wrapper for generated composite helpers. */
 /* - ducktinycc_buf_ptr_at: Range-checked pointer lookup inside raw byte buffers. */
 /* - ducktinycc_buf_ptr_at_mut: Range-checked pointer lookup inside raw byte buffers. */
 /* - ducktinycc_list_elem_ptr: LIST descriptor accessor helper for generated wrappers. */
@@ -308,6 +310,7 @@ DUCKDB_EXTENSION_EXTERN
 /* - tcc_typedesc_destroy: Recursive typedesc parser/converter used for nested SQL/C type bridging. */
 /* - tcc_typedesc_is_composite: Recursive typedesc parser/converter used for nested SQL/C type bridging. */
 /* - tcc_typedesc_parse_token: Recursive typedesc parser/converter used for nested SQL/C type bridging. */
+/* - tcc_typedesc_parse_token_depth: Bounded recursive implementation for descriptor parsing. */
 /* - tcc_union_meta_array_destroy: UNION metadata lifecycle helper for parsed signatures. */
 /* - tcc_union_meta_destroy: UNION metadata lifecycle helper for parsed signatures. */
 /* - tcc_valid_input_row: Utility/helper function supporting parsing, diagnostics, paths, locking, or runtime configuration. */
@@ -982,7 +985,7 @@ static void tcc_rwlock_write_unlock(tcc_rwlock_t *lock) {
 	atomic_store_explicit(&lock->writer, false, memory_order_release);
 }
 
-#include "tcc_module_pointer.inc"
+#include "tcc_module_pointer.c"
 
 static char *tcc_strdup(const char *value) {
 	size_t len;
@@ -1288,13 +1291,13 @@ static bool tcc_path_exists(const char *path) {
 	return path && path[0] != '\0' && TCC_ACCESS(path, TCC_ACCESS_FOK) == 0;
 }
 
-#include "tcc_module_embedded_runtime.inc"
+#include "tcc_module_embedded_runtime.c"
 
-#include "tcc_module_support.inc"
+#include "tcc_module_support.c"
 
-#include "tcc_module_types.inc"
+#include "tcc_module_types.c"
 
-#include "tcc_module_exec.inc"
+#include "tcc_module_exec.c"
 
 /**
  * @function ducktinycc_register_signature
@@ -1502,12 +1505,12 @@ fail:
 }
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
-#include "tcc_module_host.inc"
+#include "tcc_module_host.c"
 #endif
 
-#include "tcc_module_lifecycle.inc"
+#include "tcc_module_lifecycle.c"
 
-#include "tcc_module_parse.inc"
+#include "tcc_module_parse.c"
 
 /* tcc_codegen_signature_ctx_init: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static void tcc_codegen_signature_ctx_init(tcc_codegen_signature_ctx_t *ctx) {
@@ -1809,11 +1812,11 @@ static const char *tcc_ffi_type_to_c_type_name(tcc_ffi_type_t type) {
 }
 #undef TCC_FFI_SCALAR_ROWS
 
-#include "tcc_module_codegen.inc"
+#include "tcc_module_codegen.c"
 
-#include "tcc_module_modes.inc"
+#include "tcc_module_modes.c"
 
-#include "tcc_module_diag.inc"
+#include "tcc_module_diag.c"
 
 /* Public extension registration entrypoint for module and helper SQL surfaces. */
 bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database database) {

@@ -171,6 +171,14 @@ process-control symbols, or use inline assembly/syscalls, you are
 responsible for keeping that code inside the normal function-return
 contract.
 
+## Documentation
+
+The design, ownership model, fuzzing discipline, and roadmap are
+published at <https://sounkou-bioinfo.github.io/DuckTinyCC/>.
+`docs/DESIGN.md` is the conceptual authority: it records the invariants
+the implementation and tests must preserve, including the
+trusted-native-code boundary.
+
 ## Build and Test during development
 
 README rendering uses `rmarkdown` and
@@ -188,6 +196,15 @@ make test_release
 # Verify the embedded runtime (hides the build-dir and runs the full test suite)
 make test_embedded_debug
 make test_embedded_release
+
+# Native parser/codegen fuzzing under ASan and UBSan
+make fuzz
+
+# Deterministic C-generated SQL mutations
+make fuzz-sql
+
+# Rebuild the complete extension and TinyCC under both sanitizers
+make test-sanitizers
 ```
 
 ## Examples
@@ -282,7 +299,7 @@ SELECT times2(21) AS value;
     +------+---------+-------+------+--------------------------------------------------+--------------------------+----------+--------+--------------------+------------------+
     |  ok  |  mode   | phase | code |                     message                      |          detail          | sql_name | symbol |    artifact_id     | connection_scope |
     +------+---------+-------+------+--------------------------------------------------+--------------------------+----------+--------+--------------------+------------------+
-    | true | compile | load  | OK   | compiled and registered SQL function via codegen | /tmp/ducktinycc_c28a9bb2 | times2   | times2 | times2@ffi_state_1 | database         |
+    | true | compile | load  | OK   | compiled and registered SQL function via codegen | /tmp/ducktinycc_646b2c49 | times2   | times2 | times2@ffi_state_1 | database         |
     +------+---------+-------+------+--------------------------------------------------+--------------------------+----------+--------+--------------------+------------------+
     +-------+
     | value |
@@ -452,12 +469,12 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     +--------------+--------------+------------------------------------------+--------+
     |     kind     |     key      |                  value                   | exists |
     +--------------+--------------+------------------------------------------+--------+
-    | runtime      | runtime_path | /tmp/ducktinycc_c28a9bb2                 | true   |
-    | include_path | path         | /tmp/ducktinycc_c28a9bb2/include         | false  |
-    | include_path | path         | /tmp/ducktinycc_c28a9bb2/lib/tcc/include | false  |
-    | library_path | path         | /tmp/ducktinycc_c28a9bb2                 | true   |
-    | library_path | path         | /tmp/ducktinycc_c28a9bb2/lib             | false  |
-    | library_path | path         | /tmp/ducktinycc_c28a9bb2/lib/tcc         | false  |
+    | runtime      | runtime_path | /tmp/ducktinycc_646b2c49                 | true   |
+    | include_path | path         | /tmp/ducktinycc_646b2c49/include         | true   |
+    | include_path | path         | /tmp/ducktinycc_646b2c49/lib/tcc/include | false  |
+    | library_path | path         | /tmp/ducktinycc_646b2c49                 | true   |
+    | library_path | path         | /tmp/ducktinycc_646b2c49/lib             | false  |
+    | library_path | path         | /tmp/ducktinycc_646b2c49/lib/tcc         | false  |
     | library_path | path         | /usr/lib                                 | true   |
     | library_path | path         | /usr/lib64                               | true   |
     | library_path | path         | /usr/local/lib                           | true   |
@@ -474,7 +491,7 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     | library_path | path         | /lib/x86_64-linux-musl                   | false  |
     | library_path | path         | /lib32/x86_64-linux-musl                 | false  |
     | library_path | path         | /usr/lib/amd64-linux-gnu                 | false  |
-    | library_path | path         | /usr/lib/aarch64-linux-gnu               | false  |
+    | library_path | path         | /usr/lib/aarch64-linux-gnu               | true   |
     | library_path | path         | /usr/lib/R/lib                           | true   |
     | library_path | path         | /usr/lib/jvm/default-java/lib/server     | true   |
     +--------------+--------------+------------------------------------------+--------+
@@ -482,10 +499,10 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     |    kind     |     key      |                value                 | exists |              detail              |
     +-------------+--------------+--------------------------------------+--------+----------------------------------+
     | input       | library      | libtcc1.a                            | false  | library probe request            |
-    | runtime     | runtime_path | /tmp/ducktinycc_c28a9bb2             | true   | effective runtime path           |
-    | search_path | path         | /tmp/ducktinycc_c28a9bb2             | true   | searched path                    |
-    | search_path | path         | /tmp/ducktinycc_c28a9bb2/lib         | false  | searched path                    |
-    | search_path | path         | /tmp/ducktinycc_c28a9bb2/lib/tcc     | false  | searched path                    |
+    | runtime     | runtime_path | /tmp/ducktinycc_646b2c49             | true   | effective runtime path           |
+    | search_path | path         | /tmp/ducktinycc_646b2c49             | true   | searched path                    |
+    | search_path | path         | /tmp/ducktinycc_646b2c49/lib         | false  | searched path                    |
+    | search_path | path         | /tmp/ducktinycc_646b2c49/lib/tcc     | false  | searched path                    |
     | search_path | path         | /usr/lib                             | true   | searched path                    |
     | search_path | path         | /usr/lib64                           | true   | searched path                    |
     | search_path | path         | /usr/local/lib                       | true   | searched path                    |
@@ -502,11 +519,11 @@ FROM tcc_library_probe(library := 'libtcc1.a');
     | search_path | path         | /lib/x86_64-linux-musl               | false  | searched path                    |
     | search_path | path         | /lib32/x86_64-linux-musl             | false  | searched path                    |
     | search_path | path         | /usr/lib/amd64-linux-gnu             | false  | searched path                    |
-    | search_path | path         | /usr/lib/aarch64-linux-gnu           | false  | searched path                    |
+    | search_path | path         | /usr/lib/aarch64-linux-gnu           | true   | searched path                    |
     | search_path | path         | /usr/lib/R/lib                       | true   | searched path                    |
     | search_path | path         | /usr/lib/jvm/default-java/lib/server | true   | searched path                    |
-    | candidate   | libtcc1.a    | /tmp/ducktinycc_c28a9bb2/libtcc1.a   | true   | resolved                         |
-    | resolved    | path         | /tmp/ducktinycc_c28a9bb2/libtcc1.a   | true   | resolved library path            |
+    | candidate   | libtcc1.a    | /tmp/ducktinycc_646b2c49/libtcc1.a   | true   | resolved                         |
+    | resolved    | path         | /tmp/ducktinycc_646b2c49/libtcc1.a   | true   | resolved library path            |
     | resolved    | link_name    | tcc1                                 | true   | normalized tcc_add_library value |
     +-------------+--------------+--------------------------------------+--------+----------------------------------+
 

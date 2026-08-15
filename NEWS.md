@@ -1,5 +1,14 @@
 # DuckTinyCC Extension News
 
+## ducktinycc 0.2.0.9000 (2026-08-15)
+
+- **TinyCC provenance / WebAssembly groundwork**: rebased the vendored compiler onto our `sounkou-bioinfo/tinycc` fork at commit `76cbba947bf8f635adfe52ec858496139ebd1eb7` and recorded the exact origin/revision in `third_party/tinycc/DUCKTINYCC_VENDOR`. This brings in the experimental `wasm32-emscripten` backend while preserving DuckTinyCC's self-contained `stdint.h`. DuckTinyCC's WASM extension targets remain excluded: the backend is alpha, does not yet support the full generated-wrapper C subset, and emits Emscripten side modules rather than supporting the native `tcc_relocate` lifecycle used by DuckTinyCC.
+- **bugfix (composite descriptor offsets)**: corrected `ducktinycc_list_elem_ptr`, `ducktinycc_array_elem_ptr`, and MAP key/value pointer helpers so row-sliced data pointers are indexed locally while `offset` remains the global validity-bitmap index. Previously, the helpers added a nonzero child offset twice, producing wrong values from the second and later LIST/ARRAY/MAP rows. Added multi-row regressions and randomized SQL properties.
+- **bugfix (generated helper allocator domain)**: generated `c_struct`/`c_union`/`c_bitfield` allocation helpers now call injected `ducktinycc_helper_malloc/free` host symbols instead of leaving ordinary `malloc/free` unresolved under the default `-nostdlib` policy. Helper compilation no longer depends accidentally on an earlier staged library, and allocation/free remain in one host CRT domain on Windows.
+- **parser hardening**: recursive SQL-visible type descriptors now reject nesting deeper than 64 levels with a normal diagnostic instead of allowing hostile syntax to consume an unbounded C stack.
+- **fuzzing and sanitizer discipline**: added tracked native libFuzzer corpora/dictionary for signature, helper, and wrapper-codegen boundaries under ASan/UBSan; a deterministic C-generated SQL mutation campaign that proves connection recovery and compile/call properties without a Python driver; complete-extension sanitizer builds that also instrument vendored TinyCC; and scheduled GitHub CI. Minimized failures must become named seeds and semantic SQL regressions.
+- **documentation and source organization**: established `docs/DESIGN.md` as the conceptual architecture/invariant authority, added fuzzing and 1.0/WASM roadmap pages, and added a GitHub Pages deployment. Renamed the amalgamated `tcc_module_*.inc` implementation fragments to `.c`; they remain textually included under one private static namespace and are not separately compiled translation units. Split the monolithic SQLLogicTest into focused, independently runnable files.
+
 ## ducktinycc 0.1.0.9000 (2026-04-29)
 
 - **breaking change (wrapper mode naming)**: renamed public `wrapper_mode := 'batch'` to `wrapper_mode := 'chunk_scalar_loop'` to make clear that this mode is a chunk-local scalar loop, not an Arrow or whole-table batch ABI.

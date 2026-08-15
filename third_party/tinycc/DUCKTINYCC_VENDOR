@@ -1,0 +1,6 @@
+origin=https://github.com/sounkou-bioinfo/tinycc.git
+revision=76cbba947bf8f635adfe52ec858496139ebd1eb7
+
+DuckTinyCC additionally supplies include/stdint.h for self-contained runtime
+compilation on hosts without system development headers. The only other local
+change is non-semantic trailing-whitespace cleanup.

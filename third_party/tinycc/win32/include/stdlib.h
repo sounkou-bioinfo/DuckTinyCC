@@ -207,6 +207,21 @@ extern "C" {
 #endif
 #endif
 #endif
+
+#if defined __aarch64__
+/* something does not work using those from msvcrt.dll */
+# undef __argc
+# undef __argv
+# undef __wargv
+# undef _wenviron
+# undef _environ
+extern int __argc;
+extern char **__argv;
+extern wchar_t **__wargv;
+extern char **_environ;
+extern wchar_t **_wenviron;
+#endif
+
 #ifndef _pgmptr
 #ifdef _MSVCRT_
   extern char *_pgmptr;

@@ -972,7 +972,9 @@ extern "C" {
   LONG WINAPI InterlockedDecrement(LONG volatile *lpAddend);
   LONG WINAPI InterlockedExchange(LONG volatile *Target,LONG Value);
 
+#ifndef InterlockedExchangePointer
 #define InterlockedExchangePointer(Target,Value) (PVOID)InterlockedExchange((PLONG)(Target),(LONG)(Value))
+#endif
 
   LONG WINAPI InterlockedExchangeAdd(LONG volatile *Addend,LONG Value);
   LONG WINAPI InterlockedCompareExchange(LONG volatile *Destination,LONG Exchange,LONG Comperand);
@@ -1035,6 +1037,7 @@ extern "C" {
     return Old;
   }
 
+#ifndef InterlockedCompareExchangePointer
 #ifdef __cplusplus
   __CRT_INLINE PVOID __cdecl __InlineInterlockedCompareExchangePointer(PVOID volatile *Destination,PVOID ExChange,PVOID Comperand) {
     return((PVOID)(LONG_PTR)InterlockedCompareExchange((LONG volatile *)Destination,(LONG)(LONG_PTR)ExChange,(LONG)(LONG_PTR)Comperand));
@@ -1042,6 +1045,7 @@ extern "C" {
 #define InterlockedCompareExchangePointer __InlineInterlockedCompareExchangePointer
 #else
 #define InterlockedCompareExchangePointer(Destination,ExChange,Comperand)(PVOID)(LONG_PTR)InterlockedCompareExchange((LONG volatile *)(Destination),(LONG)(LONG_PTR)(ExChange),(LONG)(LONG_PTR)(Comperand))
+#endif
 #endif
 
 #define InterlockedIncrementAcquire InterlockedIncrement
@@ -1054,8 +1058,12 @@ extern "C" {
 #define InterlockedCompareExchangeRelease InterlockedCompareExchange
 #define InterlockedCompareExchangeAcquire64 InterlockedCompareExchange64
 #define InterlockedCompareExchangeRelease64 InterlockedCompareExchange64
+#ifndef InterlockedCompareExchangePointerAcquire
 #define InterlockedCompareExchangePointerAcquire InterlockedCompareExchangePointer
+#endif
+#ifndef InterlockedCompareExchangePointerRelease
 #define InterlockedCompareExchangePointerRelease InterlockedCompareExchangePointer
+#endif
 #endif
 
 #if defined(_SLIST_HEADER_) && !defined(_NTOSP_)

@@ -421,7 +421,7 @@ int f() { return v(); }
 #elif defined test_switch_W4
 #pragma comment(option, "-Wunsupported -Wno-error=implicit-function-declaration -Werror")
 #endif
-void func()
+void func(void)
 {
     char *ccp = "123";
     fink();
@@ -549,6 +549,116 @@ int main(int argc, char **argv)
     enum ee e = b;
     bar(13 + e, 0);
 
+}
+
+#elif defined test_const_array_member_addr_ok
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+int_array const *get_array(const my_struct *s)
+{
+    return &(s->arr);
+}
+
+#elif defined test_const_array_member_decay_ok
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+const int *good_decay(const my_struct *s)
+{
+    return s->arr;
+}
+
+#elif defined test_const_array_member_addr_bad
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+int_array *bad_array_addr(const my_struct *s)
+{
+    return &(s->arr);
+}
+
+#elif defined test_const_array_member_decay_bad
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+int *bad_decay(const my_struct *s)
+{
+    return s->arr;
+}
+
+#elif defined test_const_array_member_write_bad
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+void bad_write(const my_struct *s)
+{
+    s->arr[0] = 1;
+}
+
+#elif defined test_const_struct_array_member_write_bad
+
+typedef struct { int x; } inner;
+typedef struct { inner arr[1]; } outer;
+
+void bad_inner_write(const outer *s)
+{
+    s->arr[0].x = 1;
+}
+
+#elif defined test_volatile_array_member_addr_ok
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+int_array volatile *get_volatile_array(volatile my_struct *s)
+{
+    return &(s->arr);
+}
+
+#elif defined test_volatile_array_member_decay_ok
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+volatile int *good_volatile_decay(volatile my_struct *s)
+{
+    return s->arr;
+}
+
+#elif defined test_volatile_array_member_addr_bad
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+int_array *bad_volatile_array_addr(volatile my_struct *s)
+{
+    return &(s->arr);
+}
+
+#elif defined test_volatile_array_member_decay_bad
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+int *bad_volatile_decay(volatile my_struct *s)
+{
+    return s->arr;
+}
+
+#elif defined test_volatile_array_member_write_ok
+
+typedef int int_array[1];
+typedef struct { int_array arr; } my_struct;
+
+void good_volatile_write(volatile my_struct *s)
+{
+    s->arr[0] = 1;
 }
 
 #endif
