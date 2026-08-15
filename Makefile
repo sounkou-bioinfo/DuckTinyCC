@@ -1,4 +1,5 @@
-.PHONY: clean clean_all rdm test_embedded_debug test_embedded_release \
+.PHONY: clean clean_all rdm site site-clean \
+	test_embedded_debug test_embedded_release \
 	community_sim_build community_sim_run community_sim \
 	fuzz fuzz-asan fuzz-ubsan fuzz-sql fuzz-all fuzz-clean \
 	test-sanitized-extension test-sanitizers
@@ -136,5 +137,11 @@ update_duckdb_headers_custom:
 clean: clean_build clean_cmake
 clean_all: clean clean_configure
 
-rdm: release
-	R -e "rmarkdown::render('README.Rmd')"
+rdm:
+	Rscript -e "rmarkdown::render('README.Rmd', quiet = TRUE)"
+
+site:
+	Rscript scripts/build_docs_site.R
+
+site-clean:
+	rm -rf _site

@@ -8,3 +8,5 @@ duckdb_unittest_tempdir
 /test/bin
 venv
 \.sync
+/_site/
+/README.html
