@@ -1,6 +1,6 @@
 # DuckTinyCC Extension News
 
-## ducktinycc 0.3.0.9000 (2026-08-15)
+## ducktinycc 0.2.0.9000 (2026-08-15)
 
 - **0.3.0 release target**: make callbacks from compiled C into DuckDB scalar functions a managed public API and reach full transferable feature parity with Rtinycc. Release requires an audited parity matrix and regressions for callback signatures, NULL/errors, lifetime, invalidation, reentrancy, and threading; R-specific facilities must be marked not applicable rather than silently omitted.
 - **TinyCC provenance / WebAssembly groundwork**: rebased the vendored compiler onto our `sounkou-bioinfo/tinycc` fork at commit `54062ef0` and recorded the exact origin/revision in `third_party/tinycc/DUCKTINYCC_VENDOR`. This brings in the experimental `wasm32-emscripten` backend and the sanitizer-discovered fix for signed overflow while packing long multi-character constants, while preserving DuckTinyCC's self-contained `stdint.h`. DuckTinyCC's WASM extension targets remain excluded: the backend is alpha, does not yet support the full generated-wrapper C subset, and emits Emscripten side modules rather than supporting the native `tcc_relocate` lifecycle used by DuckTinyCC.
