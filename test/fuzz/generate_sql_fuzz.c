@@ -182,6 +182,13 @@ static void emit_composite_properties(void) {
 	sql_string(map_source);
 	printf(", symbol := 'fuzz_map_sum', sql_name := 'fuzz_map_sum', return_type := 'i64', arg_types := ['map<i64;i64>']);\n");
 	printf("SELECT CASE WHEN list(g ORDER BY n) = [3,7] THEN 1 ELSE error('MAP offset property failed') END FROM (SELECT n, fuzz_map_sum(v) g FROM (VALUES (1,MAP([1::BIGINT],[2::BIGINT])),(2,MAP([3::BIGINT],[4::BIGINT]))) t(n,v));\n");
+
+	/* Five packed bytes force the TinyCC character parser through unsigned
+	 * wrapping instead of undefined signed left shift. */
+	printf("SELECT count(*) FROM tcc_module(mode := 'quick_compile', source := ");
+	sql_string("long long fuzz_multichar(void){ return 'ABCDE'; }");
+	printf(", symbol := 'fuzz_multichar', sql_name := 'fuzz_multichar', return_type := 'i64', arg_types := []);\n");
+	printf("SELECT fuzz_multichar();\n");
 	printf("SELECT 4242;\n");
 }
 

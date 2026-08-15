@@ -2185,6 +2185,7 @@ static void parse_string(const char *s, int len)
 
     if (sep == '\'') {
         int char_size, i, n, c;
+        unsigned int packed = 0;
         /* XXX: make it portable */
         if (!is_long)
             tok = TOK_CCHAR, char_size = 1;
@@ -2199,9 +2200,9 @@ static void parse_string(const char *s, int len)
             if (is_long)
                 c = ((nwchar_t *)tokcstr.data)[i];
             else
-                c = (c << 8) | ((char *)tokcstr.data)[i];
+                packed = (packed << 8) | ((unsigned char *)tokcstr.data)[i];
         }
-        tokc.i = c;
+        tokc.i = is_long ? c : (int)packed;
     } else {
         tokc.str.size = tokcstr.size;
         tokc.str.data = tokcstr.data;
