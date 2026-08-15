@@ -18,6 +18,21 @@ static void ducktinycc_helper_free(void *ptr) {
 	free(ptr);
 }
 
+/* TinyCC may lower aggregate arguments and assignments to these libc
+ * primitives.  Keep them available under -nostdlib without making generated
+ * modules discover or link a platform C library. */
+static void *ducktinycc_helper_memcpy(void *dst, const void *src, size_t size) {
+	return memcpy(dst, src, size);
+}
+
+static void *ducktinycc_helper_memmove(void *dst, const void *src, size_t size) {
+	return memmove(dst, src, size);
+}
+
+static void *ducktinycc_helper_memset(void *dst, int byte, size_t size) {
+	return memset(dst, byte, size);
+}
+
 /* ducktinycc_valid_is_set: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_valid_is_set(const uint64_t *validity, uint64_t idx) {
 	if (!validity) {
@@ -287,6 +302,9 @@ static int ducktinycc_union_member_is_valid(const ducktinycc_union_t *u, uint64_
 	X("ducktinycc_register_signature", ducktinycc_register_signature)                                                    \
 	X("ducktinycc_helper_malloc", ducktinycc_helper_malloc)                                                              \
 	X("ducktinycc_helper_free", ducktinycc_helper_free)                                                                  \
+	X("memcpy", ducktinycc_helper_memcpy)                                                                                \
+	X("memmove", ducktinycc_helper_memmove)                                                                              \
+	X("memset", ducktinycc_helper_memset)                                                                                \
 	X("ducktinycc_valid_is_set", ducktinycc_valid_is_set)                                                                \
 	X("ducktinycc_valid_set", ducktinycc_valid_set)                                                                      \
 	X("ducktinycc_span_contains", ducktinycc_span_contains)                                                              \
