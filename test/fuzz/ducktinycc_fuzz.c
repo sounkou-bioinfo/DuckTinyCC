@@ -2,7 +2,7 @@
 DUCKDB_EXTENSION_GLOBAL
 
 /* The harness owns only extension-side parsing/codegen.  It neither links nor
- * executes TinyCC modules; the SQL boundary campaign covers that path. */
+ * executes TinyCC modules; the complete-extension SQL campaign covers that path. */
 #define DUCKTINYCC_WASM_UNSUPPORTED 1
 #include "../../src/tcc_module.c"
 

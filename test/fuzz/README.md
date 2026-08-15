@@ -42,7 +42,7 @@ Tracked seeds are copied into a temporary writable corpus. A minimized failure
 must be added as a named seed and, when it exposes a semantic invariant, as an
 ordinary SQL regression too.
 
-## C-generated SQL boundary campaign
+## C-generated complete-extension SQL campaign
 
 `generate_sql_fuzz.c` is a deterministic C program that emits a complete SQL
 campaign. `scripts/test_sql_fuzz.sh` pipes it into one DuckDB CLI process and

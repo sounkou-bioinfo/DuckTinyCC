@@ -5,8 +5,8 @@
  * They are intentionally small, bounds-checked, and operate only on borrowed spans/descriptors.
  */
 
-/* Generated composite helpers allocate in the host libc domain so allocation
- * and release always cross the same CRT boundary, including Windows UCRT. */
+/* Generated composite helpers allocate and release through the same host
+ * libc/CRT, including Windows UCRT. */
 static void *ducktinycc_helper_malloc(uint64_t size) {
 	if (size > (uint64_t)SIZE_MAX) {
 		return NULL;

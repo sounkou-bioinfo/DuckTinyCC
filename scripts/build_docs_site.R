@@ -74,16 +74,6 @@ for (name in names(pages)) {
     output = destination,
     meta = list("plain-title" = titles[[name]])
   )
-
-  # litedown has already emitted highlighted token spans. Loading Prism again
-  # can reprocess large C/SQL examples and has crashed headless Chromium.
-  html <- readLines(destination, warn = FALSE, encoding = "UTF-8")
-  prism_script <- grepl(
-    "<script src=\"https://cdn.jsdelivr.net/npm/prismjs@",
-    html,
-    fixed = TRUE
-  )
-  writeLines(html[!prism_script], destination, useBytes = TRUE)
 }
 
 required <- c(
