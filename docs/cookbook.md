@@ -1,6 +1,7 @@
 # Cookbook
 
-Worked examples of C scalar UDFs. They assume the extension is loaded:
+Worked examples of C scalar, aggregate, and table functions. They assume the
+extension is loaded:
 
 ```sql
 INSTALL ducktinycc FROM community;
@@ -24,7 +25,9 @@ the results.
 
 Generated modules are compiled with `-nostdlib`. libc and other libraries are
 linked only when requested with `library := 'c'`, `'m'`, `'z'`, and so on.
-TinyCC's compiler-support routines (`libtcc1.a`) are always linked.
+TinyCC's compiler-support routines (`libtcc1.a`) are always linked, and
+`ducktinycc_malloc`, `ducktinycc_realloc`, and `ducktinycc_free` give heap
+memory without linking libc.
 
 The compiled code runs in the DuckDB process with no isolation. Anyone who can
 call `tcc_module` can run arbitrary native code.
@@ -485,6 +488,144 @@ SELECT tcc_free_ptr(getvariable('hist')) AS freed;
 ├───────┤
 │ true  │
 └───────┘
+```
+
+## N50 of contig lengths (aggregate)
+
+With `kind := 'aggregate'`, `tcc_module` builds an aggregate from C functions
+named after `symbol`: a `n50_state` type, `n50_step` for each row,
+`n50_combine` to merge the partial states that DuckDB builds on separate
+threads, and `n50_final` for the result. `n50_final` returns 0 for SQL `NULL`.
+The state here grows with `ducktinycc_realloc`, so the optional `n50_destroy`
+frees it. N50 is the length at which the longest contigs first cover half of
+the assembly.
+
+```sql
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'aggregate',
+  source := '
+typedef struct { int64_t *v; uint64_t n, cap; } n50_state;
+void n50_step(n50_state *st, int64_t len) {
+  if (st->n == st->cap) {
+    uint64_t cap = st->cap ? 2 * st->cap : 256;
+    int64_t *v = ducktinycc_realloc(st->v, cap * sizeof(int64_t));
+    if (!v) return;
+    st->v = v;
+    st->cap = cap;
+  }
+  st->v[st->n++] = len;
+}
+void n50_combine(n50_state *into, n50_state *from) {
+  for (uint64_t i = 0; i < from->n; i++) n50_step(into, from->v[i]);
+}
+int n50_final(n50_state *st, int64_t *out) {
+  int64_t total = 0, acc = 0;
+  uint64_t gap, i, j;
+  if (st->n == 0) return 0;
+  for (i = 0; i < st->n; i++) total += st->v[i];
+  for (gap = st->n / 2; gap > 0; gap /= 2) {
+    for (i = gap; i < st->n; i++) {
+      int64_t t = st->v[i];
+      for (j = i; j >= gap && st->v[j - gap] < t; j -= gap) st->v[j] = st->v[j - gap];
+      st->v[j] = t;
+    }
+  }
+  for (i = 0; i < st->n; i++) {
+    acc += st->v[i];
+    if (2 * acc >= total) break;
+  }
+  *out = st->v[i];
+  return 1;
+}
+void n50_destroy(n50_state *st) { ducktinycc_free(st->v); }',
+  symbol := 'n50', sql_name := 'n50',
+  return_type := 'i64', arg_types := ['i64']
+);
+```
+```text
+┌──────┬──────┐
+│  ok  │ code │
+├──────┼──────┤
+│ true │ OK   │
+└──────┴──────┘
+```
+
+```sql
+SELECT n50(len) AS n50
+FROM (VALUES (2), (3), (4), (5), (6), (7), (8), (9), (10)) t(len);
+```
+```text
+┌─────┐
+│ n50 │
+├─────┤
+│ 8   │
+└─────┘
+```
+
+It works with `GROUP BY`, `DISTINCT`, `FILTER`, and sliding window frames. Do
+not put `ORDER BY` inside the call or use a frame over the whole partition,
+such as `OVER ()`: DuckDB crashes every aggregate registered through its C API
+in those two cases
+([duckdb/duckdb#26109](https://github.com/duckdb/duckdb/issues/26109)).
+
+## K-mers of a sequence (table function)
+
+With `kind := 'table'`, `kmers_init` receives the arguments and `kmers_next`
+fills one row per call, returning 0 when it is done. The columns are the
+fields of the `struct` return type. Argument strings stay valid for the whole
+scan, so the state can keep a pointer to `seq`.
+
+```sql
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'table',
+  source := '
+typedef struct { const char *seq; int64_t n, k, pos; } kmers_state;
+void kmers_init(kmers_state *st, const char *seq, int64_t k) {
+  st->seq = seq;
+  st->k = k;
+  while (seq[st->n]) st->n++;
+}
+int kmers_next(kmers_state *st, int64_t *pos, const char **kmer) {
+  char *out;
+  if (st->k <= 0 || st->pos + st->k > st->n) return 0;
+  out = ducktinycc_result_alloc((uint64_t)st->k + 1);
+  if (!out) return 0;
+  for (int64_t i = 0; i < st->k; i++) out[i] = st->seq[st->pos + i];
+  out[st->k] = 0;
+  *pos = st->pos++;
+  *kmer = out;
+  return 1;
+}',
+  symbol := 'kmers', sql_name := 'kmers',
+  return_type := 'struct<pos:i64;kmer:varchar>', arg_types := ['varchar', 'i64']
+);
+```
+```text
+┌──────┬──────┐
+│  ok  │ code │
+├──────┼──────┤
+│ true │ OK   │
+└──────┴──────┘
+```
+
+```sql
+SELECT kmer, count(*) AS n
+FROM kmers('GATTACAGATTACA', 3)
+GROUP BY kmer
+ORDER BY n DESC, kmer
+LIMIT 4;
+```
+```text
+┌──────┬───┐
+│ kmer │ n │
+├──────┼───┤
+│ ACA  │ 2 │
+│ ATT  │ 2 │
+│ GAT  │ 2 │
+│ TAC  │ 2 │
+└──────┴───┘
 ```
 
 ## Row and chunk wrappers

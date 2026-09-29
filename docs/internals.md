@@ -93,6 +93,28 @@ after storing each `varchar`, `blob`, or composite result, and the host copies
 that row into the output vector before the loop advances. Result pointers are
 therefore consumed per row in both wrapper modes.
 
+Aggregate finalize and table fills use the same mechanism through a per-call
+`emit_row` hook: finalize writes result rows at `offset + row` and records
+`NULL` rows in a private bitmap that is applied to the vector afterwards; a
+table fill writes fixed-width columns straight into the output vectors and
+copies `varchar`, `blob`, and composite columns row by row. No current call is
+set during `S_step` and `S_combine`, so result memory is unavailable there.
+
+## Aggregate and table kinds
+
+Generated adapters for `kind := 'aggregate'` and `'table'` are appended to the
+user's compilation unit and registered by `module_init` through
+`ducktinycc_register_aggregate` and `ducktinycc_register_table`. Optional
+hooks (`S_init`, `S_destroy`) are declared `__attribute__((weak))`; TinyCC
+resolves an undefined weak symbol to 0 during relocation.
+
+DuckDB's aggregate destructor callback receives states but no function info,
+so every aggregate state begins with a 16-byte header holding its context
+pointer, and the adapters address the user's `S_state` after it.
+
+Table functions read their constant arguments at bind into owned 16-byte slots
+(strings are copied), allocate `S_state` at init, and set a single thread.
+
 DuckDB reads STRUCT fields and UNION members through the child vectors' own
 validity. Whenever a STRUCT/UNION output row is `NULL`, the bridge marks every
 child row `NULL`, recursively and including the UNION tag, so field access on a

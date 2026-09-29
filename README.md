@@ -4,12 +4,12 @@
 # DuckTinyCC
 
 `DuckTinyCC` is a DuckDB C extension that lets us compile C code at
-runtime and register SQL scalar UDFs in-process through TinyCC. We use
-`tcc_module(...)` as the control plane for staging inputs, generating
-wrappers, compiling, and registering functions. We use
-`tcc_system_paths(...)` and `tcc_library_probe(...)` when we need to
-debug include/library resolution, and `tcc_help()` to list every
-function, mode, type token, and C helper from SQL.
+runtime and register SQL scalar, aggregate, and table functions
+in-process through TinyCC. We use `tcc_module(...)` as the control plane
+for staging inputs, generating wrappers, compiling, and registering
+functions. We use `tcc_system_paths(...)` and `tcc_library_probe(...)`
+when we need to debug include/library resolution, and `tcc_help()` to
+list every function, mode, type token, and C helper from SQL.
 
 The TinyCC runtime is embedded in the extension, so the target machine
 needs no compiler or TinyCC installation. Compiling and registering a
@@ -55,6 +55,12 @@ SELECT hello_from_c() AS msg;
 `tcc_module(...)` defaults to `mode := 'config_get'` and returns one
 diagnostics row with these columns:
 `ok, mode, phase, code, message, detail, sql_name, symbol, artifact_id, connection_scope`.
+
+`kind := 'scalar'` (the default), `'aggregate'`, or `'table'` on
+`quick_compile`, `compile`, and `codegen_preview` selects what is
+registered; the
+[reference](https://sounkou-bioinfo.github.io/DuckTinyCC/reference.html#sec:function-kinds)
+gives the C function contract for each.
 
 In practice, we use session/config modes first (`config_get`,
 `config_set`, `config_reset`, `list`, `tcc_new_state`), then staging
@@ -261,6 +267,88 @@ SELECT CAST(qpow(2.0, 5.0) AS BIGINT) AS value;
     +-------+
     | 32    |
     +-------+
+
+### Aggregate and Table Functions
+
+With `kind := 'aggregate'`, the C functions `gmean_step`,
+`gmean_combine`, and `gmean_final` over a `gmean_state` become the
+aggregate `gmean`. `gmean_final` returns 0 for SQL `NULL`.
+
+``` sql
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'aggregate',
+  source := 'extern double log(double);
+extern double exp(double);
+typedef struct { double sum_log; int64_t n; } gmean_state;
+void gmean_step(gmean_state *st, double x) { if (x > 0) { st->sum_log += log(x); st->n++; } }
+void gmean_combine(gmean_state *into, gmean_state *from) { into->sum_log += from->sum_log; into->n += from->n; }
+int gmean_final(gmean_state *st, double *out) {
+  if (st->n == 0) return 0;
+  *out = exp(st->sum_log / (double)st->n);
+  return 1;
+}',
+  symbol := 'gmean',
+  sql_name := 'gmean',
+  return_type := 'f64',
+  arg_types := ['f64'],
+  library := 'm'
+);
+
+SELECT round(gmean(x), 6) AS geometric_mean FROM (VALUES (1.0), (2.0), (4.0), (8.0)) t(x);
+```
+
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +----------------+
+    | geometric_mean |
+    +----------------+
+    | 2.828427       |
+    +----------------+
+
+With `kind := 'table'`, `countdown_init` receives the arguments and
+`countdown_next` fills one row per call until it returns 0.
+
+``` sql
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'table',
+  source := 'typedef struct { int64_t left; } countdown_state;
+void countdown_init(countdown_state *st, int64_t from) { st->left = from; }
+int countdown_next(countdown_state *st, int64_t *n, _Bool *even) {
+  if (st->left < 0) return 0;
+  *n = st->left;
+  *even = st->left % 2 == 0;
+  st->left--;
+  return 1;
+}',
+  symbol := 'countdown',
+  sql_name := 'countdown',
+  return_type := 'struct<n:i64;even:bool>',
+  arg_types := ['i64']
+);
+
+SELECT * FROM countdown(3);
+```
+
+    +------+---------------+------+
+    |  ok  |     mode      | code |
+    +------+---------------+------+
+    | true | quick_compile | OK   |
+    +------+---------------+------+
+    +---+-------+
+    | n | even  |
+    +---+-------+
+    | 3 | false |
+    | 2 | true  |
+    | 1 | false |
+    | 0 | true  |
+    +---+-------+
 
 ### Stage Then Compile
 
@@ -814,10 +902,10 @@ SQL
     │ hello from embedded R 4.6.0 │
     └─────────────────────────────┘
 
-## Target for 0.3.0
+## Target for 0.4.0
 
-The next release adds managed callbacks from compiled C into DuckDB
-scalar functions and reaches full transferable feature parity with
+Version 0.4.0 is planned to add managed callbacks from compiled C into
+DuckDB scalar functions and reach full transferable feature parity with
 Rtinycc. A callback must have an exact C signature, a managed handle and
 pointer, deterministic close/invalidation, SQL NULL/error behavior, and
 defined reentrancy and threading rules.
@@ -825,16 +913,18 @@ defined reentrancy and threading rules.
 Parity is a release gate, not a slogan: every Rtinycc capability group
 must have a tested DuckTinyCC equivalent or an explicit not-applicable
 decision for R-specific facilities. The live [development
-page](https://sounkou-bioinfo.github.io/DuckTinyCC/development.html#target-for-0-3-0)
+page](https://sounkou-bioinfo.github.io/DuckTinyCC/development.html#sec:target-for-0-4-0)
 tracks that audit.
 
 ## Notes
 
-Generated and helper functions are SQL scalar UDFs; only
-`tcc_module(...)`, `tcc_system_paths(...)`, and `tcc_library_probe(...)`
-are table functions. For library linking, we can pass short names (`m`,
-`z`, `c`), explicit filenames (`libfoo.so`, `foo.dll`, `.a`, `.lib`), or
-path-like values. Because DuckTinyCC uses `-nostdlib` by default, use
-`library := 'c'` when generated code needs libc symbols that are not
-otherwise injected. Pointer helpers are low-level interop tools; for
-most workflows, handle-based access is safer than raw `tcc_dataptr`.
+Generated and helper functions are SQL scalar UDFs unless compiled with
+`kind := 'aggregate'` or `kind := 'table'`. The extension’s own table
+functions are `tcc_module(...)`, `tcc_system_paths(...)`,
+`tcc_library_probe(...)`, and `tcc_help()`. For library linking, we can
+pass short names (`m`, `z`, `c`), explicit filenames (`libfoo.so`,
+`foo.dll`, `.a`, `.lib`), or path-like values. Because DuckTinyCC uses
+`-nostdlib` by default, use `library := 'c'` when generated code needs
+libc symbols that are not otherwise injected. Pointer helpers are
+low-level interop tools; for most workflows, handle-based access is
+safer than raw `tcc_dataptr`.

@@ -2,7 +2,8 @@
 
 DuckTinyCC exposes four table functions and a set of scalar memory helpers.
 Functions compiled by `tcc_module(...)` are registered as ordinary DuckDB
-scalar UDFs. Worked examples live in the [cookbook](cookbook.html).
+scalar, aggregate, or table functions. Worked examples live in the
+[cookbook](cookbook.html).
 
 ## Table functions
 
@@ -67,8 +68,8 @@ operational diagnostics.
 | `c_enum` | Generate/register enum constant helpers. |
 
 Common compile inputs are `source`, `symbol`, `sql_name`, `return_type`,
-`arg_types`, `wrapper_mode`, `stability`, and `library`. Named table-function
-arguments must be constants.
+`arg_types`, `kind`, `wrapper_mode`, `stability`, and `library`. Named
+table-function arguments must be constants.
 
 `wrapper_mode` accepts:
 
@@ -79,6 +80,51 @@ arguments must be constants.
 `stability` accepts `consistent` or `volatile`. Use `volatile` for random
 values, clocks, counters, allocation, I/O, callbacks, or reads from mutable
 external memory.
+
+## Function kinds
+
+`kind` selects what `compile`, `quick_compile`, and `codegen_preview` build
+from the C functions named after `symbol` (written `S` below). The default is
+`scalar`. For `aggregate` and `table`, `source` must be given in the same call,
+because the generated adapters use `sizeof(S_state)`, and `wrapper_mode` and
+`stability` do not apply. `S_init` and `S_destroy` are optional and must not be
+`static`.
+
+`kind := 'scalar'` calls `R S(args...)` once per row, or from a C loop over
+each data chunk with `wrapper_mode := 'chunk_scalar_loop'`.
+
+`kind := 'aggregate'`:
+
+```c
+typedef struct { ... } S_state;               /* starts zeroed */
+void S_init(S_state *st);                     /* optional */
+void S_step(S_state *st, T1 a1, ..., Tn an);  /* rows with a NULL argument are skipped */
+void S_combine(S_state *into, S_state *from); /* merge partial states from other threads */
+int  S_final(S_state *st, R *out);            /* return 0 for SQL NULL */
+void S_destroy(S_state *st);                  /* optional; free memory the state owns */
+```
+
+Aggregates work with `GROUP BY`, `DISTINCT`, `FILTER`, and window frames that
+move with the row. Do not call them with `ORDER BY` inside the parentheses or
+over a frame covering the whole partition (`OVER ()`, or `PARTITION BY` without
+`ORDER BY`): DuckDB, through at least 1.5, passes those calls a state array with
+one entry and crashes every aggregate registered through its C API
+([duckdb/duckdb#26109](https://github.com/duckdb/duckdb/issues/26109)).
+
+`kind := 'table'`, with columns `C1..Cm` taken from the fields of a
+`struct<...>` return type, or one column named `value` otherwise:
+
+```c
+typedef struct { ... } S_state;                  /* starts zeroed */
+void S_init(S_state *st, T1 a1, ..., Tn an);     /* required when there are arguments */
+int  S_next(S_state *st, C1 *c1, ..., Cm *cm);   /* fill one row and return 1, or return 0 */
+void S_destroy(S_state *st);                     /* optional */
+```
+
+Table function arguments are constants of `bool`, integer, float, or `varchar`
+type, and a `NULL` argument is an error. Argument strings stay valid for the
+whole scan. Output cells start zeroed; a `varchar` column left `NULL` is SQL
+`NULL`. A scan runs on one thread.
 
 ## Signature grammar
 
@@ -106,7 +152,7 @@ uses `ducktinycc_decimal_t`, a signed 128-bit scaled value plus width and scale
 metadata.
 
 Composite inputs are borrowed descriptor views. Their C layouts and offset
-rules are documented under [descriptor views](internals.html#descriptor-views).
+rules are documented under [descriptor views](internals.html#sec:descriptor-views).
 
 DuckDB does not implicitly cast `BIGINT` to `UBIGINT`; declare `i64` for
 ordinary integer columns.
@@ -119,8 +165,13 @@ vector immediately after each call, in both wrapper modes.
 
 - A string literal or other static constant is always safe to return.
 - Build run-time text, bytes, and LIST/ARRAY/MAP/STRUCT payloads in
-  `ducktinycc_result_alloc(size)`. The memory is private to the executing chunk
-  and thread and is released after DuckDB has copied the chunk's results.
+  `ducktinycc_result_alloc(size)`, from a scalar function, `S_final`, or
+  `S_next`. The memory is private to the executing chunk and thread and is
+  released after DuckDB has copied the chunk's results. It returns `NULL` in
+  `S_step` and `S_combine`, because a state must not keep it.
+- For memory that outlives a call, such as a growing aggregate state, use
+  `ducktinycc_malloc`, `ducktinycc_realloc`, and `ducktinycc_free`. They use
+  the host C runtime and need no `library := 'c'`.
 - Do not return a mutable `static` buffer. DuckDB calls the function from
   several threads at once, and they would share it.
 - `NULL` (`varchar`), `len > 0 && ptr == NULL` (`blob`, `list`, `array`,

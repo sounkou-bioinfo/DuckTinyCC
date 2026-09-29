@@ -77,13 +77,19 @@ reference pages: `reference`, `internals`, and `development`. Add information
 to the page that owns it rather than creating another status, roadmap, or
 implementation-note document.
 
-## Target for 0.3.0
+## Release 0.3.0
 
-Version `0.3.0` is the callbacks and Rtinycc-parity release. "Parity" means
+Version `0.3.0` adds `kind := 'aggregate'` and `kind := 'table'`, with
+result memory, per-row result copies in chunk loops, and the fixes listed in
+`NEWS.md`. Callbacks and Rtinycc parity moved to `0.4.0`.
+
+## Target for 0.4.0
+
+Version `0.4.0` is the callbacks and Rtinycc-parity release. "Parity" means
 every transferable Rtinycc capability has a tested DuckTinyCC equivalent;
 R-only facilities receive an explicit not-applicable decision.
 
-| Rtinycc capability group | DuckTinyCC 0.3.0 gate |
+| Rtinycc capability group | DuckTinyCC 0.4.0 gate |
 |---|---|
 | State creation; include, library, option, source, header, and symbol inputs | Existing staged SQL API retained and covered independently. |
 | Memory compilation, relocation, symbol lifetime, and typed calls | Existing generated-UDF path plus direct symbol/introspection parity where missing. |
