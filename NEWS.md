@@ -1,5 +1,9 @@
 # DuckTinyCC Extension News
 
+## ducktinycc 0.3.0.9000 (2026-09-29)
+
+- **0.4.0 release target**: make callbacks from compiled C into DuckDB scalar functions a managed public API and reach full transferable feature parity with Rtinycc. Release requires an audited parity matrix and regressions for callback signatures, NULL/errors, lifetime, invalidation, reentrancy, and threading; R-specific facilities must be marked not applicable rather than silently omitted.
+
 ## ducktinycc 0.3.0 (2026-09-29)
 
 - **feature (aggregate functions)**: `tcc_module(..., kind := 'aggregate')` on `quick_compile`, `compile`, and `codegen_preview` builds a DuckDB aggregate from C functions named after `symbol`: a `<symbol>_state` type, `_step` (rows with a `NULL` argument are skipped), `_combine`, `_final(state, R *out)` returning 0 for SQL `NULL`, and optional weak `_init` and `_destroy`. States live in DuckDB-managed memory behind a 16-byte header, because DuckDB's aggregate destructor receives no function info. Arguments use the same recursive type bridge as scalar functions; results may be any return type, with `varchar`/`blob`/composites built in `ducktinycc_result_alloc` memory. Verified against DuckDB's `avg`, `arg_max`, and `string_agg` across `GROUP BY` and multi-threaded combine.
