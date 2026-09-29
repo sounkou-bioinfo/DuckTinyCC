@@ -5,6 +5,17 @@
  * then writes scalar/composite results back to DuckDB vectors.  All storage here is per-call.
  */
 
+/* Result arena block.  Payload starts TCC_RESULT_HDR bytes past the header. */
+typedef struct tcc_result_block {
+	struct tcc_result_block *next;
+	size_t cap;
+	size_t used;
+} tcc_result_block_t;
+
+#define TCC_RESULT_ALIGN     ((size_t)16)
+#define TCC_RESULT_HDR       ((sizeof(tcc_result_block_t) + TCC_RESULT_ALIGN - 1) & ~(TCC_RESULT_ALIGN - 1))
+#define TCC_RESULT_BLOCK_MIN ((size_t)64 * 1024)
+
 typedef struct {
 	duckdb_function_info info;
 	duckdb_data_chunk input;
@@ -50,8 +61,24 @@ typedef struct {
 	ducktinycc_map_t out_map_value;
 	ducktinycc_union_t out_union_value;
 
+	tcc_result_block_t *result_blocks;
+
 	const char *error;
 } tcc_exec_call_t;
+
+#if defined(_MSC_VER)
+#define TCC_THREAD_LOCAL __declspec(thread)
+#else
+#define TCC_THREAD_LOCAL _Thread_local
+#endif
+
+/*
+ * The call currently executing generated code on this thread.  Host symbols
+ * called from TinyCC code (ducktinycc_result_alloc, ducktinycc_batch_emit)
+ * find their chunk through it.  Saved and restored around each chunk so a UDF
+ * that re-enters DuckDB sees its own call again afterwards.
+ */
+static TCC_THREAD_LOCAL tcc_exec_call_t *tcc_exec_current;
 
 /* True for descriptor-backed values passed through the recursive value bridge. */
 static bool tcc_ffi_type_is_any_composite(tcc_ffi_type_t type) {
@@ -324,53 +351,38 @@ static bool tcc_exec_alloc_batch_output(tcc_exec_call_t *call) {
 	return true;
 }
 
-static bool tcc_exec_write_batch_output(tcc_exec_call_t *call) {
+/*
+ * Copy one chunk_scalar_loop result into the output vector.  Generated
+ * wrappers call this (via ducktinycc_batch_emit) immediately after storing
+ * row's VARCHAR, BLOB, or composite result, before the next row's call, so a
+ * function that returns a reused buffer is copied exactly as in row mode.
+ */
+static bool tcc_exec_emit_batch_row(tcc_exec_call_t *call, idx_t row) {
 	tcc_ffi_type_t type = call->sig->return_type;
-	idx_t row;
 
-	if (type == TCC_FFI_VOID) {
-		tcc_validity_set_all(call->out_validity, call->n, false);
-		return true;
-	}
 	if (type == TCC_FFI_VARCHAR) {
-		for (row = 0; row < call->n; row++) {
-			if (!duckdb_validity_row_is_valid(call->out_validity, row)) {
-				continue;
-			}
-			if (!call->batch_out_varchar || !call->batch_out_varchar[row]) {
-				duckdb_validity_set_row_validity(call->out_validity, row, false);
-				continue;
-			}
-			duckdb_vector_assign_string_element(call->output, row, call->batch_out_varchar[row]);
+		if (!call->batch_out_varchar[row]) {
+			duckdb_validity_set_row_validity(call->out_validity, row, false);
+			return true;
 		}
+		duckdb_vector_assign_string_element(call->output, row, call->batch_out_varchar[row]);
 		return true;
 	}
 	if (type == TCC_FFI_BLOB) {
-		for (row = 0; row < call->n; row++) {
-			if (!duckdb_validity_row_is_valid(call->out_validity, row)) {
-				continue;
-			}
-			if (!call->batch_out_blob || (call->batch_out_blob[row].len > 0 && !call->batch_out_blob[row].ptr)) {
-				duckdb_validity_set_row_validity(call->out_validity, row, false);
-				continue;
-			}
-			duckdb_vector_assign_string_element_len(call->output, row, (const char *)call->batch_out_blob[row].ptr,
-			                                        (idx_t)call->batch_out_blob[row].len);
+		if (call->batch_out_blob[row].len > 0 && !call->batch_out_blob[row].ptr) {
+			duckdb_validity_set_row_validity(call->out_validity, row, false);
+			return true;
 		}
+		duckdb_vector_assign_string_element_len(call->output, row, (const char *)call->batch_out_blob[row].ptr,
+		                                        (idx_t)call->batch_out_blob[row].len);
 		return true;
 	}
 	if (tcc_typedesc_is_composite(call->sig->return_desc)) {
-		for (row = 0; row < call->n; row++) {
-			if (!duckdb_validity_row_is_valid(call->out_validity, row)) {
-				continue;
-			}
-			if (!tcc_write_value_to_vector(call->output, call->sig->return_desc, row, call->batch_out_ptr,
-			                               (uint64_t)row, NULL, &call->error)) {
-				return false;
-			}
-		}
+		return tcc_write_value_to_vector(call->output, call->sig->return_desc, row, call->batch_out_ptr,
+		                                 (uint64_t)row, NULL, &call->error);
 	}
-	return true;
+	call->error = "ducktinycc batch emit for a by-value return type";
+	return false;
 }
 
 static bool tcc_exec_run_batch(tcc_exec_call_t *call) {
@@ -383,10 +395,15 @@ static bool tcc_exec_run_batch(tcc_exec_call_t *call) {
 	tcc_validity_set_all(call->out_validity, call->n, call->sig->return_type != TCC_FFI_VOID);
 	if (!call->sig->batch_wrapper(call->batch_arg_data, call->in_validity, (uint64_t)call->n, call->batch_out_ptr,
 	                              call->out_validity)) {
-		call->error = "ducktinycc invoke failed";
+		if (!call->error) {
+			call->error = "ducktinycc invoke failed";
+		}
 		return false;
 	}
-	return tcc_exec_write_batch_output(call);
+	if (call->sig->return_type == TCC_FFI_VOID) {
+		tcc_validity_set_all(call->out_validity, call->n, false);
+	}
+	return true;
 }
 
 static bool tcc_exec_keep_row_cstr(tcc_exec_call_t *call, char *value) {
@@ -632,6 +649,82 @@ static void tcc_exec_free_value_bridges(tcc_value_bridge_t **bridges, int count)
 	duckdb_free((void *)bridges);
 }
 
+/* Rows never handed to the writer (NULL inputs, NULL returns) still need NULL
+ * STRUCT/UNION children; see tcc_vector_null_children. */
+static void tcc_exec_null_composite_children(tcc_exec_call_t *call) {
+	const tcc_typedesc_t *desc = call->sig->return_desc;
+	idx_t row;
+
+	if (!desc || !call->out_validity || (desc->kind != TCC_TYPEDESC_STRUCT && desc->kind != TCC_TYPEDESC_UNION)) {
+		return;
+	}
+	for (row = 0; row < call->n; row++) {
+		if (!duckdb_validity_row_is_valid(call->out_validity, row)) {
+			tcc_vector_null_children(call->output, desc, row);
+		}
+	}
+}
+
+/* Bump-allocate from the chunk's result arena; NULL on zero size or OOM. */
+static void *tcc_exec_result_alloc(tcc_exec_call_t *call, uint64_t size) {
+	tcc_result_block_t *block = call->result_blocks;
+	size_t need;
+	size_t cap;
+	void *p;
+
+	if (size == 0 || size > (uint64_t)(SIZE_MAX - TCC_RESULT_HDR - TCC_RESULT_ALIGN)) {
+		return NULL;
+	}
+	need = ((size_t)size + TCC_RESULT_ALIGN - 1) & ~(TCC_RESULT_ALIGN - 1);
+	if (!block || block->cap - block->used < need) {
+		cap = need > TCC_RESULT_BLOCK_MIN ? need : TCC_RESULT_BLOCK_MIN;
+		block = (tcc_result_block_t *)duckdb_malloc(TCC_RESULT_HDR + cap);
+		if (!block) {
+			return NULL;
+		}
+		block->next = call->result_blocks;
+		block->cap = cap;
+		block->used = 0;
+		call->result_blocks = block;
+	}
+	p = (uint8_t *)block + TCC_RESULT_HDR + block->used;
+	block->used += need;
+	return p;
+}
+
+static void tcc_exec_free_result_blocks(tcc_result_block_t *block) {
+	tcc_result_block_t *next;
+
+	while (block) {
+		next = block->next;
+		duckdb_free(block);
+		block = next;
+	}
+}
+
+/*
+ * Host symbol: scratch memory for building a UDF result (VARCHAR text, BLOB
+ * bytes, LIST/ARRAY/MAP/STRUCT payloads).  Valid until DuckDB has copied the
+ * current chunk's results; released automatically.  NULL outside a UDF call,
+ * for size 0, or on OOM.  Each thread executes its own chunks, so the memory
+ * is never shared with a concurrent call.
+ */
+static void *ducktinycc_result_alloc(uint64_t size) {
+	tcc_exec_call_t *call = tcc_exec_current;
+
+	return call ? tcc_exec_result_alloc(call, size) : NULL;
+}
+
+/* Host symbol: called by generated chunk_scalar_loop wrappers; see tcc_exec_emit_batch_row. */
+static int ducktinycc_batch_emit(uint64_t row) {
+	tcc_exec_call_t *call = tcc_exec_current;
+
+	if (!call || call->sig->wrapper_mode != TCC_WRAPPER_MODE_BATCH || row >= (uint64_t)call->n) {
+		return 0;
+	}
+	return tcc_exec_emit_batch_row(call, (idx_t)row) ? 1 : 0;
+}
+
 static void tcc_exec_cleanup(tcc_exec_call_t *call) {
 	int arg_count = call->sig ? call->sig->arg_count : 0;
 
@@ -660,6 +753,7 @@ static void tcc_exec_cleanup(tcc_exec_call_t *call) {
 	TCC_EXEC_FREE_MEMBER(row_varchar_values);
 	TCC_EXEC_FREE_MEMBER(row_blob_values);
 	tcc_exec_free_value_bridges(call->arg_value_bridges, arg_count);
+	tcc_exec_free_result_blocks(call->result_blocks);
 
 #undef TCC_EXEC_FREE_MEMBER
 }
@@ -679,6 +773,7 @@ static void tcc_exec_cleanup(tcc_exec_call_t *call) {
  */
 static void tcc_execute_compiled_scalar_udf(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	tcc_exec_call_t call;
+	tcc_exec_call_t *prev_call;
 
 	tcc_exec_call_init(&call, info, input, output);
 	if (!tcc_exec_validate(&call)) {
@@ -693,10 +788,16 @@ static void tcc_execute_compiled_scalar_udf(duckdb_function_info info, duckdb_da
 	if (!tcc_exec_prepare_output_validity(&call)) {
 		goto done;
 	}
+	prev_call = tcc_exec_current;
+	tcc_exec_current = &call;
 	if (call.sig->wrapper_mode == TCC_WRAPPER_MODE_BATCH) {
 		(void)tcc_exec_run_batch(&call);
 	} else {
 		(void)tcc_exec_run_rows(&call);
+	}
+	tcc_exec_current = prev_call;
+	if (!call.error) {
+		tcc_exec_null_composite_children(&call);
 	}
 
 done:

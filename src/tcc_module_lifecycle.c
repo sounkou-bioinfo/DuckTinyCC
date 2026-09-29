@@ -58,8 +58,20 @@ static int tcc_apply_session_to_state(TCCState *s, const tcc_session_t *session,
 			return -1;
 		}
 	}
+	/* Each staged source gets the same UDF ABI prelude as quick_compile, so
+	 * <stdint.h> types, descriptor structs, and ducktinycc_* helpers resolve
+	 * identically in both paths. */
 	for (i = 0; i < session->sources.count; i++) {
-		if (tcc_compile_string(s, session->sources.items[i]) != 0) {
+		char *unit = tcc_codegen_build_compilation_unit(session->sources.items[i], "");
+		int rc;
+
+		if (!unit) {
+			tcc_set_error(error_buf, "out of memory");
+			return -1;
+		}
+		rc = tcc_compile_string(s, unit);
+		duckdb_free(unit);
+		if (rc != 0) {
 			if (error_buf->message[0] == '\0') {
 				tcc_set_error(error_buf, "source compile failed");
 			}
@@ -130,6 +142,36 @@ static int tcc_apply_bind_overrides_to_state(TCCState *s, const tcc_module_bind_
 	return 0;
 }
 
+/*
+ * -nostdlib also drops TinyCC's implicit libtcc1.a: the compiler-support
+ * routines that plain C lowers to (double <-> 64-bit integer conversion,
+ * va_arg, __atomic_*, alloca).  Link it explicitly, after every source, so
+ * the archive contributes only members those sources reference.  libc stays
+ * opt-in through add_library.  A runtime directory without libtcc1.a (an
+ * explicit config_set override) keeps the previous behaviour.
+ */
+static int tcc_add_compiler_runtime(TCCState *s, const char *runtime_path, tcc_error_buffer_t *error_buf) {
+	char *path;
+	int rc = 0;
+
+	if (!runtime_path || runtime_path[0] == '\0') {
+		return 0;
+	}
+	path = tcc_path_join(runtime_path, "libtcc1.a");
+	if (!path) {
+		tcc_set_error(error_buf, "out of memory");
+		return -1;
+	}
+	if (tcc_path_exists(path)) {
+		rc = tcc_add_file(s, path);
+	}
+	duckdb_free(path);
+	if (rc != 0 && error_buf->message[0] == '\0') {
+		tcc_set_error(error_buf, "libtcc1.a load failed");
+	}
+	return rc;
+}
+
 /* Builds and relocates one TinyCC module artifact, returning its init symbol wrapper. */
 static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_t *state,
                                      const tcc_module_bind_data_t *bind, const char *module_symbol,
@@ -197,6 +239,10 @@ static int tcc_build_module_artifact(const char *runtime_path, tcc_module_state_
 			tcc_delete(s);
 			return -1;
 		}
+	}
+	if (tcc_add_compiler_runtime(s, runtime_path, error_buf) != 0) {
+		tcc_delete(s);
+		return -1;
 	}
 	if (tcc_relocate(s) != 0) {
 		if (error_buf->message[0] == '\0') {

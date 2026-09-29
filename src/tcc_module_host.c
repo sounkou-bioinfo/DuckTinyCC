@@ -33,6 +33,11 @@ static void *ducktinycc_helper_memset(void *dst, int byte, size_t size) {
 	return memset(dst, byte, size);
 }
 
+/* libtcc1's va_arg helper (va_list.o) aborts on an impossible argument class. */
+static void ducktinycc_helper_abort(void) {
+	abort();
+}
+
 /* ducktinycc_valid_is_set: Host-exported bridge/accessor helper for generated wrappers. Allocation/Lifetime: operates on DuckDB/vector memory and bridge descriptors; treat pointers as borrowed unless explicitly allocated. */
 static int ducktinycc_valid_is_set(const uint64_t *validity, uint64_t idx) {
 	if (!validity) {
@@ -302,9 +307,12 @@ static int ducktinycc_union_member_is_valid(const ducktinycc_union_t *u, uint64_
 	X("ducktinycc_register_signature", ducktinycc_register_signature)                                                    \
 	X("ducktinycc_helper_malloc", ducktinycc_helper_malloc)                                                              \
 	X("ducktinycc_helper_free", ducktinycc_helper_free)                                                                  \
+	X("ducktinycc_result_alloc", ducktinycc_result_alloc)                                                                \
+	X("ducktinycc_batch_emit", ducktinycc_batch_emit)                                                                    \
 	X("memcpy", ducktinycc_helper_memcpy)                                                                                \
 	X("memmove", ducktinycc_helper_memmove)                                                                              \
 	X("memset", ducktinycc_helper_memset)                                                                                \
+	X("abort", ducktinycc_helper_abort)                                                                                  \
 	X("ducktinycc_valid_is_set", ducktinycc_valid_is_set)                                                                \
 	X("ducktinycc_valid_set", ducktinycc_valid_set)                                                                      \
 	X("ducktinycc_span_contains", ducktinycc_span_contains)                                                              \
