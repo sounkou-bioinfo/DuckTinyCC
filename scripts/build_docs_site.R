@@ -6,12 +6,14 @@ if (!requireNamespace("litedown", quietly = TRUE)) {
 
 pages <- c(
   index = "README.md",
+  cookbook = "docs/cookbook.md",
   reference = "docs/reference.md",
   internals = "docs/internals.md",
   development = "docs/development.md"
 )
 titles <- c(
   index = "DuckTinyCC",
+  cookbook = "Cookbook · DuckTinyCC",
   reference = "SQL reference · DuckTinyCC",
   internals = "Internals and ownership · DuckTinyCC",
   development = "Development · DuckTinyCC"
@@ -22,7 +24,7 @@ expected <- sort(unname(pages[names(pages) != "index"]))
 if (!identical(actual, expected)) {
   stop(
     paste0(
-      "Documentation sources must remain the three-page curated reference set.\nExpected: ",
+      "Documentation sources must remain the curated page set.\nExpected: ",
       paste(expected, collapse = ", "),
       "\nActual: ",
       paste(actual, collapse = ", ")

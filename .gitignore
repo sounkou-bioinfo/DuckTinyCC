@@ -10,3 +10,5 @@ venv
 \.sync
 /_site/
 /README.html
+.property
+/community-extensions/

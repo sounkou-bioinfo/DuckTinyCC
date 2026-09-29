@@ -1,0 +1,391 @@
+# name: test/sql/tcc_cookbook.test
+# description: Every recipe in docs/cookbook.md except the zlib one, verbatim, with its documented result
+# group: [ducktinycc]
+
+require ducktinycc
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+_Bool luhn_ok(const char *s) {
+  const char *p = s;
+  int sum = 0, dbl = 0, digits = 0;
+  while (*p) p++;
+  while (p > s) {
+    char c = *--p;
+    int d;
+    if (c == '' '' || c == ''-'') continue;
+    if (c < ''0'' || c > ''9'') return 0;
+    d = c - ''0'';
+    if (dbl) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+    dbl = !dbl;
+    digits++;
+  }
+  return digits > 1 && sum % 10 == 0;
+}',
+  symbol := 'luhn_ok', sql_name := 'luhn_ok',
+  return_type := 'bool', arg_types := ['varchar']
+)
+----
+true	OK
+
+query TT
+SELECT n, luhn_ok(n) AS valid
+FROM (VALUES ('4111 1111 1111 1111'), ('4111 1111 1111 1112'),
+             ('490154203237518'), ('79927398713'), ('12a4')) t(n)
+----
+4111 1111 1111 1111	true
+4111 1111 1111 1112	false
+490154203237518	true
+79927398713	true
+12a4	false
+
+statement ok
+CREATE MACRO luhn_sql(n) AS (
+  list_sum(list_transform(string_split(reverse(n), ''), lambda c, i:
+    CASE WHEN i % 2 = 0
+         THEN CASE WHEN c::INT * 2 > 9 THEN c::INT * 2 - 9 ELSE c::INT * 2 END
+         ELSE c::INT END)) % 10 = 0)
+
+query I
+SELECT count(*) FILTER (WHERE luhn_ok(n) <> luhn_sql(n)) FROM (SELECT printf('%016d', (hash(range) % 10000000000000000)::BIGINT) AS n FROM range(200000))
+----
+0
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+const char *geohash(double lat, double lon, int32_t precision) {
+  static const char base32[] = "0123456789bcdefghjkmnpqrstuvwxyz";
+  double la[2] = { -90.0, 90.0 }, lo[2] = { -180.0, 180.0 };
+  int i = 0, bit = 0, ch = 0, even = 1;
+  char *out;
+  if (precision < 1 || precision > 12) return 0;
+  out = ducktinycc_result_alloc((uint64_t)precision + 1);
+  if (!out) return 0;
+  while (i < precision) {
+    double *r = even ? lo : la;
+    double v = even ? lon : lat;
+    double mid = (r[0] + r[1]) / 2;
+    ch <<= 1;
+    if (v >= mid) { ch |= 1; r[0] = mid; } else { r[1] = mid; }
+    even = !even;
+    if (++bit == 5) { out[i++] = base32[ch]; bit = 0; ch = 0; }
+  }
+  out[i] = 0;
+  return out;
+}',
+  symbol := 'geohash', sql_name := 'geohash',
+  return_type := 'varchar', arg_types := ['f64', 'f64', 'i32']
+)
+----
+true	OK
+
+query TTT
+SELECT geohash(57.64911, 10.40744, 11) AS jutland,
+       geohash(48.8584, 2.2945, 7) AS eiffel_tower,
+       geohash(0, 0, 13) AS too_long
+----
+u4pruydqqvj	u09tunq	NULL
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+int64_t simhash64(const char *s) {
+  int32_t acc[64] = { 0 };
+  uint64_t h = 0, out = 0;
+  int in_word = 0, b;
+  const unsigned char *p = (const unsigned char *)s;
+  for (;; p++) {
+    unsigned char c = *p;
+    int word = (c >= ''a'' && c <= ''z'') || (c >= ''A'' && c <= ''Z'') || (c >= ''0'' && c <= ''9'');
+    if (word) {
+      if (!in_word) { h = 1469598103934665603ULL; in_word = 1; }
+      if (c >= ''A'' && c <= ''Z'') c = (unsigned char)(c + 32);
+      h = (h ^ c) * 1099511628211ULL;
+    } else if (in_word) {
+      for (b = 0; b < 64; b++) acc[b] += (h >> b) & 1 ? 1 : -1;
+      in_word = 0;
+    }
+    if (!c) break;
+  }
+  for (b = 0; b < 64; b++) if (acc[b] > 0) out |= 1ULL << b;
+  return (int64_t)out;
+}',
+  symbol := 'simhash64', sql_name := 'simhash64',
+  return_type := 'i64', arg_types := ['varchar']
+)
+----
+true	OK
+
+query III
+WITH docs(id, body) AS (VALUES
+  (1, 'DuckDB is an in-process analytical database'),
+  (2, 'DuckDB is an in process analytical database!'),
+  (3, 'duckdb is an in-process ANALYTICAL database system'),
+  (4, 'TinyCC compiles C code very quickly')),
+h AS (SELECT id, simhash64(body) AS sh FROM docs)
+SELECT a.id AS a, b.id AS b, bit_count(xor(a.sh, b.sh)) AS distance
+FROM h a JOIN h b ON a.id < b.id
+ORDER BY distance, a, b
+----
+1	2	0
+1	3	6
+2	3	6
+3	4	26
+1	4	32
+2	4	32
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+extern double erfc(double);
+double pnorm(double z) { return 0.5 * erfc(-z / 1.4142135623730951); }',
+  symbol := 'pnorm', sql_name := 'pnorm',
+  return_type := 'f64', arg_types := ['f64'],
+  library := 'm'
+)
+----
+true	OK
+
+query RR
+SELECT round(pnorm(1.959964), 6) AS p_975,
+       round(2 * (1 - pnorm(abs(-3.2))), 6) AS two_sided_p
+----
+0.975000	0.001374
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+ducktinycc_list_t uvarints(ducktinycc_blob_t b) {
+  ducktinycc_list_t out = { 0, 0, 0, 0 };
+  const unsigned char *p = (const unsigned char *)b.ptr;
+  uint64_t acc = 0, n = 0, i;
+  int shift = 0;
+  int64_t *vals;
+  if (b.len == 0) return out;
+  vals = ducktinycc_result_alloc(b.len * sizeof(int64_t));
+  if (!vals) { out.len = 1; return out; }
+  for (i = 0; i < b.len; i++) {
+    if (shift > 63) { out.len = 1; return out; }
+    acc |= (uint64_t)(p[i] & 0x7f) << shift;
+    if (p[i] & 0x80) { shift += 7; continue; }
+    vals[n++] = (int64_t)acc;
+    acc = 0;
+    shift = 0;
+  }
+  if (shift) { out.len = 1; return out; }
+  out.ptr = vals;
+  out.len = n;
+  return out;
+}',
+  symbol := 'uvarints', sql_name := 'uvarints',
+  return_type := 'i64[]', arg_types := ['blob']
+)
+----
+true	OK
+
+query TTT
+SELECT uvarints(unhex('01ac029601')) AS values,
+       uvarints(unhex('ff')) AS truncated,
+       uvarints(''::BLOB) AS empty
+----
+[1, 300, 150]	NULL	[]
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  source := '
+static const char *read_part(const char *p, int32_t *out) {
+  int32_t v = 0;
+  if (*p < ''0'' || *p > ''9'') return 0;
+  while (*p >= ''0'' && *p <= ''9'') {
+    if (v > 214748364) return 0;
+    v = v * 10 + (*p++ - ''0'');
+  }
+  *out = v;
+  return p;
+}
+ducktinycc_struct_t semver(const char *s) {
+  ducktinycc_struct_t out = { 0, 0, 0, 0 };
+  int32_t *v = ducktinycc_result_alloc(3 * sizeof(int32_t));
+  const void **f = ducktinycc_result_alloc(3 * sizeof(void *));
+  const char *p = s;
+  int i;
+  if (!v || !f) return out;
+  if (*p == ''v'') p++;
+  for (i = 0; i < 3; i++) {
+    p = read_part(p, &v[i]);
+    if (!p) return out;
+    if (i < 2 && *p++ != ''.'') return out;
+    f[i] = &v[i];
+  }
+  if (*p && *p != ''-'' && *p != ''+'') return out;
+  out.field_ptrs = f;
+  out.field_count = 3;
+  return out;
+}',
+  symbol := 'semver', sql_name := 'semver',
+  return_type := 'struct<major:i32;minor:i32;patch:i32>', arg_types := ['varchar']
+)
+----
+true	OK
+
+query TTT
+SELECT v, semver(v) AS parsed, semver(v).minor AS minor
+FROM (VALUES ('1.4.3'), ('v2.10.0-rc1'), ('1.4'), ('x.y.z')) t(v)
+----
+1.4.3	{'major': 1, 'minor': 4, 'patch': 3}	4
+v2.10.0-rc1	{'major': 2, 'minor': 10, 'patch': 0}	10
+1.4	NULL	NULL
+x.y.z	NULL	NULL
+
+statement ok
+SET VARIABLE hist = tcc_alloc(128)
+
+statement ok
+SET VARIABLE hist_addr = tcc_dataptr(getvariable('hist'))
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'add_symbol', symbol_name := 'HIST', symbol_ptr := getvariable('hist_addr'))
+----
+true	OK
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#include <stdatomic.h>
+extern _Atomic int64_t HIST[16];
+int64_t hist_add(int64_t bucket) {
+  if (bucket < 0 || bucket > 15) return -1;
+  return atomic_fetch_add(&HIST[bucket], 1) + 1;
+}',
+  symbol := 'hist_add', sql_name := 'hist_add',
+  return_type := 'i64', arg_types := ['i64'],
+  stability := 'volatile'
+)
+----
+true	OK
+
+statement ok
+SET threads = 4
+
+statement ok
+CREATE TABLE events AS SELECT (hash(range) % 16)::BIGINT AS bucket FROM range(3000000)
+
+query I
+SELECT count(*) FILTER (WHERE hist_add(bucket) < 0) AS rejected FROM events
+----
+0
+
+query TI
+SELECT list(tcc_read_i64(getvariable('hist'), (8 * k)::UBIGINT) ORDER BY k)
+         = (SELECT list(c ORDER BY bucket) FROM (SELECT bucket, count(*) AS c FROM events GROUP BY bucket))
+         AS matches_group_by,
+       sum(tcc_read_i64(getvariable('hist'), (8 * k)::UBIGINT)) AS total
+FROM range(16) t(k)
+----
+true	3000000
+
+query T
+SELECT tcc_free_ptr(getvariable('hist')) AS freed
+----
+true
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'aggregate',
+  source := '
+typedef struct { int64_t *v; uint64_t n, cap; } n50_state;
+void n50_step(n50_state *st, int64_t len) {
+  if (st->n == st->cap) {
+    uint64_t cap = st->cap ? 2 * st->cap : 256;
+    int64_t *v = ducktinycc_realloc(st->v, cap * sizeof(int64_t));
+    if (!v) return;
+    st->v = v;
+    st->cap = cap;
+  }
+  st->v[st->n++] = len;
+}
+void n50_combine(n50_state *into, n50_state *from) {
+  for (uint64_t i = 0; i < from->n; i++) n50_step(into, from->v[i]);
+}
+int n50_final(n50_state *st, int64_t *out) {
+  int64_t total = 0, acc = 0;
+  uint64_t gap, i, j;
+  if (st->n == 0) return 0;
+  for (i = 0; i < st->n; i++) total += st->v[i];
+  for (gap = st->n / 2; gap > 0; gap /= 2) {
+    for (i = gap; i < st->n; i++) {
+      int64_t t = st->v[i];
+      for (j = i; j >= gap && st->v[j - gap] < t; j -= gap) st->v[j] = st->v[j - gap];
+      st->v[j] = t;
+    }
+  }
+  for (i = 0; i < st->n; i++) {
+    acc += st->v[i];
+    if (2 * acc >= total) break;
+  }
+  *out = st->v[i];
+  return 1;
+}
+void n50_destroy(n50_state *st) { ducktinycc_free(st->v); }',
+  symbol := 'n50', sql_name := 'n50',
+  return_type := 'i64', arg_types := ['i64']
+)
+----
+true	OK
+
+query I
+SELECT n50(len) AS n50
+FROM (VALUES (2), (3), (4), (5), (6), (7), (8), (9), (10)) t(len)
+----
+8
+
+query TT
+SELECT ok, code FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'table',
+  source := '
+typedef struct { const char *seq; int64_t n, k, pos; } kmers_state;
+void kmers_init(kmers_state *st, const char *seq, int64_t k) {
+  st->seq = seq;
+  st->k = k;
+  while (seq[st->n]) st->n++;
+}
+int kmers_next(kmers_state *st, int64_t *pos, const char **kmer) {
+  char *out;
+  if (st->k <= 0 || st->pos + st->k > st->n) return 0;
+  out = ducktinycc_result_alloc((uint64_t)st->k + 1);
+  if (!out) return 0;
+  for (int64_t i = 0; i < st->k; i++) out[i] = st->seq[st->pos + i];
+  out[st->k] = 0;
+  *pos = st->pos++;
+  *kmer = out;
+  return 1;
+}',
+  symbol := 'kmers', sql_name := 'kmers',
+  return_type := 'struct<pos:i64;kmer:varchar>', arg_types := ['varchar', 'i64']
+)
+----
+true	OK
+
+query TI
+SELECT kmer, count(*) AS n
+FROM kmers('GATTACAGATTACA', 3)
+GROUP BY kmer
+ORDER BY n DESC, kmer
+LIMIT 4
+----
+ACA	2
+ATT	2
+GAT	2
+TAC	2

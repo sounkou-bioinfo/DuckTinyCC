@@ -593,6 +593,7 @@ typedef struct {
 	char *return_type;
 	char *wrapper_mode;
 	char *stability;
+	char *kind;
 	char *include_path;
 	char *sysinclude_path;
 	char *library_path;
@@ -828,6 +829,7 @@ typedef struct {
 /* Codegen source context (wrapper source + compilation unit + module symbol). */
 typedef struct {
 	tcc_codegen_signature_ctx_t signature;
+	int kind; /* tcc_function_kind_t */
 	char module_symbol[128];
 	char *wrapper_loader_source;
 	char *compilation_unit_source;
@@ -1299,6 +1301,88 @@ static bool tcc_path_exists(const char *path) {
 
 #include "tcc_module_exec.c"
 
+/*
+ * Parse return/argument tokens into a runtime signature context shared by
+ * scalar, aggregate, and table registrations.  Returns NULL with err set on a
+ * bad signature or OOM.  The caller owns the result (tcc_host_sig_ctx_destroy).
+ */
+static tcc_host_sig_ctx_t *tcc_host_sig_ctx_create(const char *return_type, const char *arg_types_csv,
+                                                  tcc_error_buffer_t *err) {
+	tcc_host_sig_ctx_t *ctx;
+	tcc_string_list_t arg_tokens;
+	int i;
+
+	memset(&arg_tokens, 0, sizeof(arg_tokens));
+	ctx = (tcc_host_sig_ctx_t *)duckdb_malloc(sizeof(tcc_host_sig_ctx_t));
+	if (!ctx) {
+		tcc_set_error(err, "out of memory");
+		return NULL;
+	}
+	memset(ctx, 0, sizeof(tcc_host_sig_ctx_t));
+	if (!tcc_parse_signature(return_type, arg_types_csv, &ctx->return_type, &ctx->return_array_size,
+	                         &ctx->arg_types, &ctx->arg_array_sizes, &ctx->return_struct_meta, &ctx->return_map_meta,
+	                         &ctx->return_union_meta, &ctx->arg_struct_metas, &ctx->arg_map_metas,
+	                         &ctx->arg_union_metas, &ctx->arg_count, err)) {
+		duckdb_free(ctx);
+		return NULL;
+	}
+	if (!tcc_typedesc_parse_token(return_type, true, &ctx->return_desc, err) ||
+	    !tcc_split_csv_tokens(arg_types_csv, &arg_tokens, err)) {
+		goto fail;
+	}
+	if ((int)arg_tokens.count != ctx->arg_count) {
+		tcc_set_error(err, "arg_types count mismatch");
+		goto fail;
+	}
+	if (ctx->arg_count > 0) {
+		ctx->arg_descs = (tcc_typedesc_t **)duckdb_malloc(sizeof(tcc_typedesc_t *) * (size_t)ctx->arg_count);
+		ctx->arg_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)ctx->arg_count);
+		if (!ctx->arg_descs || !ctx->arg_sizes) {
+			tcc_set_error(err, "out of memory");
+			goto fail;
+		}
+		memset(ctx->arg_descs, 0, sizeof(tcc_typedesc_t *) * (size_t)ctx->arg_count);
+		for (i = 0; i < ctx->arg_count; i++) {
+			if (!tcc_typedesc_parse_token(arg_tokens.items[i], false, &ctx->arg_descs[i], err)) {
+				goto fail;
+			}
+			ctx->arg_sizes[i] = tcc_ffi_type_size(ctx->arg_types[i]);
+			if (ctx->arg_sizes[i] == 0) {
+				tcc_set_error(err, "arg_types contains a zero-width type");
+				goto fail;
+			}
+		}
+	}
+	tcc_string_list_destroy(&arg_tokens);
+	return ctx;
+
+fail:
+	tcc_string_list_destroy(&arg_tokens);
+	tcc_host_sig_ctx_destroy(ctx);
+	return NULL;
+}
+
+/* Build DuckDB logical types for every argument; false on failure. */
+static bool tcc_host_sig_add_parameters(const tcc_host_sig_ctx_t *ctx, void *fn,
+                                        void (*add)(void *fn, duckdb_logical_type type)) {
+	int i;
+
+	for (i = 0; i < ctx->arg_count; i++) {
+		duckdb_logical_type t = tcc_typedesc_create_logical_type(ctx->arg_descs ? ctx->arg_descs[i] : NULL);
+
+		if (!t) {
+			return false;
+		}
+		add(fn, t);
+		duckdb_destroy_logical_type(&t);
+	}
+	return true;
+}
+
+static void tcc_scalar_add_parameter(void *fn, duckdb_logical_type type) {
+	duckdb_scalar_function_add_parameter((duckdb_scalar_function)fn, type);
+}
+
 /**
  * @function ducktinycc_register_signature
  * @brief Register one generated wrapper symbol as a DuckDB scalar UDF.
@@ -1320,144 +1404,37 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
                                           const char *return_type, const char *arg_types_csv,
                                           const char *wrapper_mode, const char *stability) {
 	duckdb_scalar_function fn = NULL;
-	tcc_host_sig_ctx_t *ctx = NULL;
-	duckdb_state rc;
-	tcc_ffi_type_t ret_type = TCC_FFI_I64;
-	size_t ret_array_size = 0;
-	tcc_ffi_type_t *arg_types = NULL;
-	size_t *arg_array_sizes = NULL;
-	tcc_ffi_struct_meta_t ret_struct_meta;
-	tcc_ffi_map_meta_t ret_map_meta;
-	tcc_ffi_union_meta_t ret_union_meta;
-	tcc_ffi_struct_meta_t *arg_struct_metas = NULL;
-	tcc_ffi_map_meta_t *arg_map_metas = NULL;
-	tcc_ffi_union_meta_t *arg_union_metas = NULL;
-	tcc_wrapper_mode_t mode = TCC_WRAPPER_MODE_ROW;
+	duckdb_logical_type ret = NULL;
+	tcc_host_sig_ctx_t *ctx;
 	tcc_function_stability_t function_stability = TCC_FUNCTION_STABILITY_CONSISTENT;
-	int arg_count = 0;
 	tcc_error_buffer_t err;
-	tcc_typedesc_t *return_desc = NULL;
-	tcc_typedesc_t **arg_descs = NULL;
-	tcc_string_list_t arg_tokens;
-	int i;
+	duckdb_state rc;
+
 	memset(&err, 0, sizeof(err));
-	memset(&arg_tokens, 0, sizeof(arg_tokens));
-	memset(&ret_struct_meta, 0, sizeof(ret_struct_meta));
-	memset(&ret_map_meta, 0, sizeof(ret_map_meta));
-	memset(&ret_union_meta, 0, sizeof(ret_union_meta));
 	if (!con || !name || name[0] == '\0' || !fn_ptr) {
 		return false;
 	}
-	if (!tcc_parse_signature(return_type, arg_types_csv, &ret_type, &ret_array_size, &arg_types, &arg_array_sizes,
-	                         &ret_struct_meta, &ret_map_meta, &ret_union_meta, &arg_struct_metas, &arg_map_metas,
-	                         &arg_union_metas, &arg_count, &err)) {
+	ctx = tcc_host_sig_ctx_create(return_type, arg_types_csv, &err);
+	if (!ctx) {
 		return false;
 	}
-	if (!tcc_parse_wrapper_mode(wrapper_mode, &mode, &err)) {
+	if (!tcc_parse_wrapper_mode(wrapper_mode, &ctx->wrapper_mode, &err) ||
+	    !tcc_parse_function_stability(stability, &function_stability, &err)) {
 		goto fail;
 	}
-	if (!tcc_parse_function_stability(stability, &function_stability, &err)) {
-		goto fail;
-	}
-	if (!tcc_typedesc_parse_token(return_type, true, &return_desc, &err)) {
-		goto fail;
-	}
-	if (!tcc_split_csv_tokens(arg_types_csv, &arg_tokens, &err)) {
-		goto fail;
-	}
-	if ((int)arg_tokens.count != arg_count) {
-		goto fail;
-	}
-	if (arg_count > 0) {
-		arg_descs = (tcc_typedesc_t **)duckdb_malloc(sizeof(tcc_typedesc_t *) * (size_t)arg_count);
-		if (!arg_descs) {
-			goto fail;
-		}
-		memset(arg_descs, 0, sizeof(tcc_typedesc_t *) * (size_t)arg_count);
-		for (i = 0; i < arg_count; i++) {
-			if (!tcc_typedesc_parse_token(arg_tokens.items[i], false, &arg_descs[i], &err)) {
-				goto fail;
-			}
-		}
-	}
-	tcc_string_list_destroy(&arg_tokens);
-
-	fn = duckdb_create_scalar_function();
-	if (!fn) {
-		goto fail;
-	}
-	ctx = (tcc_host_sig_ctx_t *)duckdb_malloc(sizeof(tcc_host_sig_ctx_t));
-	if (!ctx) {
-		goto fail;
-	}
-	memset(ctx, 0, sizeof(tcc_host_sig_ctx_t));
-	ctx->wrapper_mode = mode;
-	if (mode == TCC_WRAPPER_MODE_BATCH) {
+	if (ctx->wrapper_mode == TCC_WRAPPER_MODE_BATCH) {
 		ctx->batch_wrapper = (tcc_host_batch_wrapper_fn_t)fn_ptr;
 	} else {
 		ctx->row_wrapper = (tcc_host_row_wrapper_fn_t)fn_ptr;
 	}
-	ctx->arg_count = arg_count;
-	ctx->return_type = ret_type;
-	ctx->return_array_size = ret_array_size;
-	ctx->arg_types = arg_types;
-	ctx->arg_array_sizes = arg_array_sizes;
-	ctx->return_struct_meta = ret_struct_meta;
-	ctx->return_map_meta = ret_map_meta;
-	ctx->return_union_meta = ret_union_meta;
-	ctx->arg_struct_metas = arg_struct_metas;
-	ctx->arg_map_metas = arg_map_metas;
-	ctx->arg_union_metas = arg_union_metas;
-	ctx->return_desc = return_desc;
-	ctx->arg_descs = arg_descs;
-	arg_types = NULL;
-	arg_array_sizes = NULL;
-	return_desc = NULL;
-	arg_descs = NULL;
-	memset(&ret_struct_meta, 0, sizeof(ret_struct_meta));
-	memset(&ret_map_meta, 0, sizeof(ret_map_meta));
-	memset(&ret_union_meta, 0, sizeof(ret_union_meta));
-	arg_struct_metas = NULL;
-	arg_map_metas = NULL;
-	arg_union_metas = NULL;
-	if (ctx->arg_count > 0) {
-		ctx->arg_sizes = (size_t *)duckdb_malloc(sizeof(size_t) * (size_t)ctx->arg_count);
-		if (!ctx->arg_sizes) {
-			tcc_host_sig_ctx_destroy(ctx);
-			duckdb_destroy_scalar_function(&fn);
-			return false;
-		}
-		for (i = 0; i < ctx->arg_count; i++) {
-			ctx->arg_sizes[i] = tcc_ffi_type_size(ctx->arg_types[i]);
-			if (ctx->arg_sizes[i] == 0) {
-				tcc_host_sig_ctx_destroy(ctx);
-				duckdb_destroy_scalar_function(&fn);
-				return false;
-			}
-		}
+	fn = duckdb_create_scalar_function();
+	ret = tcc_typedesc_create_logical_type(ctx->return_desc);
+	if (!fn || !ret || !tcc_host_sig_add_parameters(ctx, fn, tcc_scalar_add_parameter)) {
+		goto fail;
 	}
-
 	duckdb_scalar_function_set_name(fn, name);
-	for (i = 0; i < arg_count; i++) {
-		duckdb_logical_type arg_type = tcc_typedesc_create_logical_type(ctx->arg_descs ? ctx->arg_descs[i] : NULL);
-		if (!arg_type) {
-			tcc_host_sig_ctx_destroy(ctx);
-			duckdb_destroy_scalar_function(&fn);
-			return false;
-		}
-		duckdb_scalar_function_add_parameter(fn, arg_type);
-		duckdb_destroy_logical_type(&arg_type);
-	}
-	{
-		duckdb_logical_type ret_type_obj = tcc_typedesc_create_logical_type(ctx->return_desc);
-		if (!ret_type_obj) {
-			tcc_host_sig_ctx_destroy(ctx);
-			duckdb_destroy_scalar_function(&fn);
-			return false;
-		}
-		duckdb_scalar_function_set_return_type(fn, ret_type_obj);
-		duckdb_destroy_logical_type(&ret_type_obj);
-	}
+	duckdb_scalar_function_set_return_type(fn, ret);
+	duckdb_destroy_logical_type(&ret);
 	if (function_stability == TCC_FUNCTION_STABILITY_VOLATILE) {
 		duckdb_scalar_function_set_volatile(fn);
 	}
@@ -1468,41 +1445,17 @@ static bool ducktinycc_register_signature(duckdb_connection con, const char *nam
 	return rc == DuckDBSuccess;
 
 fail:
-	tcc_string_list_destroy(&arg_tokens);
-	if (arg_descs) {
-		for (i = 0; i < arg_count; i++) {
-			if (arg_descs[i]) {
-				tcc_typedesc_destroy(arg_descs[i]);
-			}
-		}
-		duckdb_free(arg_descs);
+	if (ret) {
+		duckdb_destroy_logical_type(&ret);
 	}
-	if (return_desc) {
-		tcc_typedesc_destroy(return_desc);
-	}
-	if (arg_types) {
-		duckdb_free(arg_types);
-	}
-	if (arg_array_sizes) {
-		duckdb_free(arg_array_sizes);
-	}
-	if (arg_struct_metas) {
-		tcc_struct_meta_array_destroy(arg_struct_metas, arg_count);
-	}
-	if (arg_map_metas) {
-		tcc_map_meta_array_destroy(arg_map_metas, arg_count);
-	}
-	if (arg_union_metas) {
-		tcc_union_meta_array_destroy(arg_union_metas, arg_count);
-	}
-	tcc_struct_meta_destroy(&ret_struct_meta);
-	tcc_map_meta_destroy(&ret_map_meta);
-	tcc_union_meta_destroy(&ret_union_meta);
 	if (fn) {
 		duckdb_destroy_scalar_function(&fn);
 	}
+	tcc_host_sig_ctx_destroy(ctx);
 	return false;
 }
+
+#include "tcc_module_kinds.c"
 
 #ifndef DUCKTINYCC_WASM_UNSUPPORTED
 #include "tcc_module_host.c"
@@ -1618,6 +1571,69 @@ static void tcc_codegen_source_ctx_destroy(tcc_codegen_source_ctx_t *ctx) {
 	memset(ctx->module_symbol, 0, sizeof(ctx->module_symbol));
 }
 
+/*
+ * Aggregate and table adapters use sizeof(<symbol>_state) and call the
+ * user's functions directly, so the source must share their compilation unit.
+ * wrapper_mode and stability describe scalar wrappers only.
+ */
+static bool tcc_codegen_prepare_kind_sources(const tcc_module_bind_data_t *bind, const char *sql_name,
+                                             const char *target_symbol, tcc_codegen_source_ctx_t *ctx,
+                                             tcc_error_buffer_t *error_buf) {
+	const tcc_codegen_signature_ctx_t *sig = &ctx->signature;
+	const char *return_type = bind->return_type ? bind->return_type : "i64";
+	const char *arg_types = bind->arg_types ? bind->arg_types : "";
+	int i;
+
+	if (!bind->source || bind->source[0] == '\0') {
+		tcc_set_error(error_buf, "source is required for kind aggregate and table");
+		return false;
+	}
+	if (sig->wrapper_mode != TCC_WRAPPER_MODE_ROW) {
+		tcc_set_error(error_buf, "wrapper_mode applies only to kind scalar");
+		return false;
+	}
+	if (bind->stability && bind->stability[0] != '\0') {
+		tcc_set_error(error_buf, "stability applies only to kind scalar");
+		return false;
+	}
+	if (sig->return_type == TCC_FFI_VOID) {
+		tcc_set_error(error_buf, "return_type void is not valid for kind aggregate or table");
+		return false;
+	}
+	if (ctx->kind == TCC_FUNCTION_KIND_AGGREGATE) {
+		ctx->wrapper_loader_source = tcc_codegen_generate_aggregate_source(
+		    ctx->module_symbol, target_symbol, sql_name, return_type, arg_types, sig->return_type, sig->arg_types,
+		    sig->arg_count);
+	} else {
+		const tcc_ffi_type_t *col_types = &sig->return_type;
+		int col_count = 1;
+
+		for (i = 0; i < sig->arg_count; i++) {
+			if (!tcc_ffi_type_is_table_arg(sig->arg_types[i])) {
+				tcc_set_error(error_buf, "arg_types for kind table support bool, integer, float, and varchar tokens");
+				return false;
+			}
+		}
+		if (sig->return_type == TCC_FFI_STRUCT) {
+			col_types = sig->return_struct_meta.field_types;
+			col_count = sig->return_struct_meta.field_count;
+		}
+		ctx->wrapper_loader_source =
+		    tcc_codegen_generate_table_source(ctx->module_symbol, target_symbol, sql_name, return_type, arg_types,
+		                                      col_types, col_count, sig->arg_types, sig->arg_count);
+	}
+	if (!ctx->wrapper_loader_source) {
+		tcc_set_error(error_buf, "failed to generate codegen wrapper");
+		return false;
+	}
+	ctx->compilation_unit_source = tcc_codegen_build_compilation_unit(bind->source, ctx->wrapper_loader_source);
+	if (!ctx->compilation_unit_source) {
+		tcc_set_error(error_buf, "out of memory");
+		return false;
+	}
+	return true;
+}
+
 /* tcc_codegen_prepare_sources: Codegen helper for wrapper source assembly and compile/load orchestration. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
 static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_module_bind_data_t *bind,
                                         const char *sql_name, const char *target_symbol,
@@ -1642,6 +1658,17 @@ static bool tcc_codegen_prepare_sources(tcc_module_state_t *state, const tcc_mod
 	}
 	snprintf(ctx->module_symbol, sizeof(ctx->module_symbol), "__ducktinycc_ffi_init_%llu_%llu",
 	         (unsigned long long)state->session.state_id, (unsigned long long)state->session.config_version);
+	{
+		tcc_function_kind_t kind;
+
+		if (!tcc_parse_function_kind(bind->kind, &kind, error_buf)) {
+			return false;
+		}
+		ctx->kind = (int)kind;
+	}
+	if (ctx->kind != TCC_FUNCTION_KIND_SCALAR) {
+		return tcc_codegen_prepare_kind_sources(bind, sql_name, target_symbol, ctx, error_buf);
+	}
 	ctx->wrapper_loader_source =
 	    tcc_codegen_generate_wrapper_source(ctx->module_symbol, target_symbol, sql_name,
 	                                        bind->return_type ? bind->return_type : "i64",
@@ -1674,7 +1701,15 @@ static void tcc_codegen_classify_error_message(const char *error_message, const 
 	if (!error_message || !phase || !code || !message) {
 		return;
 	}
-	if (strstr(error_message, "wrapper_mode")) {
+	if (strstr(error_message, "function kind")) {
+		*phase = "bind";
+		*code = "E_BAD_KIND";
+		*message = "invalid kind";
+	} else if (strstr(error_message, "source is required")) {
+		*phase = "bind";
+		*code = "E_MISSING_ARGS";
+		*message = "source is required";
+	} else if (strstr(error_message, "wrapper_mode")) {
 		*phase = "bind";
 		*code = "E_BAD_WRAPPER_MODE";
 		*message = "invalid wrapper_mode";
@@ -1756,6 +1791,18 @@ static const char *tcc_ffi_type_to_token(tcc_ffi_type_t type) {
 		return "varchar";
 	case TCC_FFI_BLOB:
 		return "blob";
+	case TCC_FFI_UUID:
+		return "uuid";
+	case TCC_FFI_DATE:
+		return "date";
+	case TCC_FFI_TIME:
+		return "time";
+	case TCC_FFI_TIMESTAMP:
+		return "timestamp";
+	case TCC_FFI_INTERVAL:
+		return "interval";
+	case TCC_FFI_DECIMAL:
+		return "decimal";
 	case TCC_FFI_STRUCT:
 		return "struct";
 	case TCC_FFI_MAP:
@@ -1856,6 +1903,7 @@ bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 	duckdb_table_function_add_named_parameter(tf, "return_type", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "wrapper_mode", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "stability", varchar_type);
+	duckdb_table_function_add_named_parameter(tf, "kind", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "include_path", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "sysinclude_path", varchar_type);
 	duckdb_table_function_add_named_parameter(tf, "library_path", varchar_type);
@@ -1880,6 +1928,7 @@ bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 	rc = duckdb_register_table_function(connection, tf);
 	if (rc == DuckDBSuccess) {
 		rc = register_tcc_system_paths_function(connection) && register_tcc_library_probe_function(connection) &&
+		             register_tcc_help_function(connection) &&
 		             register_tcc_pointer_helper_functions(connection, state->ptr_registry)
 		         ? DuckDBSuccess
 		         : DuckDBError;

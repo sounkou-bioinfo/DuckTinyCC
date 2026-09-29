@@ -1,0 +1,54 @@
+# name: test/sql/tcc_module_help.test
+# description: tcc_help() catalogue coverage and staged-source prelude parity
+# group: [ducktinycc]
+
+require ducktinycc
+
+# Every registered tcc_* function must be documented in tcc_help().
+query T
+SELECT coalesce(list(DISTINCT function_name ORDER BY function_name), [])
+FROM duckdb_functions()
+WHERE function_name LIKE 'tcc\_%' ESCAPE '\'
+  AND function_name NOT IN (SELECT name FROM tcc_help());
+----
+[]
+
+query I
+SELECT count(DISTINCT kind) FROM tcc_help() WHERE kind IN ('table', 'mode', 'scalar', 'type', 'c_helper');
+----
+5
+
+query I
+SELECT count(*) FROM tcc_help() WHERE description IS NULL OR example IS NULL OR signature IS NULL;
+----
+0
+
+# tcc_help() spans more than one output vector without losing rows.
+query I
+SELECT count(*) = count(DISTINCT kind || '/' || name) FROM tcc_help();
+----
+true
+
+# Staged sources see the same prelude as quick_compile (int64_t, ducktinycc_* helpers).
+statement ok
+SELECT * FROM tcc_module(mode := 'tcc_new_state');
+
+query T
+SELECT ok FROM tcc_module(mode := 'add_source', source := 'int64_t help_half(int64_t x){ return x / 2; }');
+----
+true
+
+query T
+SELECT ok FROM tcc_module(mode := 'tinycc_bind', symbol := 'help_half', sql_name := 'help_half');
+----
+true
+
+query TT
+SELECT ok, code FROM tcc_module(mode := 'compile', return_type := 'i64', arg_types := ['i64']);
+----
+true	OK
+
+query I
+SELECT help_half(42);
+----
+21

@@ -1,0 +1,80 @@
+# name: test/sql/tcc_module_runtime.test
+# description: Compiler-support routines from libtcc1.a resolve under the default -nostdlib policy
+# group: [ducktinycc]
+
+require ducktinycc
+
+# double -> uint64_t lowers to __fixunsdfdi on x86_64.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'uint64_t rt_d2u(double x){ return (uint64_t)x; }',
+  symbol := 'rt_d2u',
+  sql_name := 'rt_d2u',
+  return_type := 'u64',
+  arg_types := ['f64']
+);
+----
+true	OK
+
+query I
+SELECT rt_d2u(1e19);
+----
+10000000000000000000
+
+# va_arg lowers to __va_arg, whose error path needs abort().
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#include <stdarg.h>
+static int64_t rt_sumv(int n, ...) {
+  va_list ap;
+  int64_t s = 0;
+  va_start(ap, n);
+  while (n--) s += va_arg(ap, int64_t);
+  va_end(ap);
+  return s;
+}
+int64_t rt_sum3(int64_t a, int64_t b, int64_t c) { return rt_sumv(3, a, b, c); }',
+  symbol := 'rt_sum3',
+  sql_name := 'rt_sum3',
+  return_type := 'i64',
+  arg_types := ['i64', 'i64', 'i64']
+);
+----
+true	OK
+
+query I
+SELECT rt_sum3(1, 20, 300);
+----
+321
+
+# C11 atomics lower to __atomic_* in libtcc1.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := '#include <stdatomic.h>
+static _Atomic int64_t rt_ctr;
+int64_t rt_bump(int64_t x) { return atomic_fetch_add(&rt_ctr, x) + x; }',
+  symbol := 'rt_bump',
+  sql_name := 'rt_bump',
+  return_type := 'i64',
+  arg_types := ['i64'],
+  stability := 'volatile'
+);
+----
+true	OK
+
+statement ok
+SET threads = 4;
+
+statement ok
+CREATE TABLE rt_ones AS SELECT 1::BIGINT AS x FROM range(1000000);
+
+query I
+SELECT max(rt_bump(x)) FROM rt_ones;
+----
+1000000

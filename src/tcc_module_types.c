@@ -1676,10 +1676,68 @@ static bool tcc_set_vector_row_validity(duckdb_vector vector, idx_t row, bool va
 	return true;
 }
 
-/* tcc_write_value_to_vector: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
+/*
+ * DuckDB reads STRUCT fields (struct_extract, s.field) and UNION members from
+ * the child vectors' own validity, so every child of a NULL STRUCT/UNION row
+ * must be NULL too; otherwise field access returns whatever bytes the child
+ * slot held.  UNION child 0 is the tag.
+ */
+static void tcc_vector_null_children(duckdb_vector vector, const tcc_typedesc_t *desc, idx_t row) {
+	const tcc_typedesc_field_t *fields;
+	idx_t count;
+	idx_t base;
+	idx_t i;
+
+	if (!vector || !desc) {
+		return;
+	}
+	if (desc->kind == TCC_TYPEDESC_STRUCT) {
+		fields = desc->as.struct_like.fields;
+		count = desc->as.struct_like.count;
+		base = 0;
+	} else if (desc->kind == TCC_TYPEDESC_UNION) {
+		fields = desc->as.union_like.members;
+		count = desc->as.union_like.count;
+		base = 1;
+		(void)tcc_set_vector_row_validity(duckdb_struct_vector_get_child(vector, 0), row, false);
+	} else {
+		return;
+	}
+	for (i = 0; i < count; i++) {
+		duckdb_vector child = duckdb_struct_vector_get_child(vector, base + i);
+
+		if (!child) {
+			continue;
+		}
+		(void)tcc_set_vector_row_validity(child, row, false);
+		tcc_vector_null_children(child, fields[i].type, row);
+	}
+}
+
+static bool tcc_write_value_to_vector_row(duckdb_vector vector, const tcc_typedesc_t *desc, idx_t row,
+                                          const void *src_base, uint64_t src_offset, const uint64_t *src_validity,
+                                          const char **out_error);
+
+/* Write one value; a STRUCT/UNION row that ends up NULL gets NULL children. */
 static bool tcc_write_value_to_vector(duckdb_vector vector, const tcc_typedesc_t *desc, idx_t row,
                                       const void *src_base, uint64_t src_offset, const uint64_t *src_validity,
                                       const char **out_error) {
+	uint64_t *validity;
+
+	if (!tcc_write_value_to_vector_row(vector, desc, row, src_base, src_offset, src_validity, out_error)) {
+		return false;
+	}
+	validity = duckdb_vector_get_validity(vector);
+	if (validity && !duckdb_validity_row_is_valid(validity, row)) {
+		tcc_vector_null_children(vector, desc, row);
+	}
+	return true;
+}
+
+/* tcc_write_value_to_vector_row: Internal helper in the TinyCC module/runtime pipeline. Allocation/Lifetime: borrows caller-owned inputs; no ownership transfer. */
+static bool tcc_write_value_to_vector_row(duckdb_vector vector, const tcc_typedesc_t *desc, idx_t row,
+                                          const void *src_base, uint64_t src_offset, const uint64_t *src_validity,
+                                          const char **out_error) {
 	const uint8_t *src_ptr = NULL;
 	size_t src_size;
 	bool row_valid = true;

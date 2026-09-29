@@ -1,0 +1,223 @@
+# name: test/sql/tcc_module_results.test
+# description: Returned VARCHAR/BLOB/LIST memory: ducktinycc_result_alloc and per-row copy in chunk_scalar_loop
+# group: [ducktinycc]
+
+require ducktinycc
+
+# A physical table scans in parallel; range() alone would run on one thread.
+statement ok
+SET threads = 4;
+
+statement ok
+CREATE TABLE res_src AS SELECT range::BIGINT AS i FROM range(1000000);
+
+# Decimal rendering into result scratch, both wrapper modes.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *res_dec_row(long long v){
+  char t[24]; int n = 0, i = 0; unsigned long long u = (unsigned long long)v; char *b;
+  do { t[n++] = (char)(48 + u % 10); u /= 10; } while (u);
+  b = (char *)ducktinycc_result_alloc((uint64_t)n + 1);
+  if (!b) return 0;
+  while (n) b[i++] = t[--n];
+  b[i] = 0;
+  return b;
+}',
+  symbol := 'res_dec_row',
+  sql_name := 'res_dec_row',
+  return_type := 'varchar',
+  arg_types := ['i64']
+);
+----
+true	OK
+
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *res_dec_chunk(long long v){
+  char t[24]; int n = 0, i = 0; unsigned long long u = (unsigned long long)v; char *b;
+  do { t[n++] = (char)(48 + u % 10); u /= 10; } while (u);
+  b = (char *)ducktinycc_result_alloc((uint64_t)n + 1);
+  if (!b) return 0;
+  while (n) b[i++] = t[--n];
+  b[i] = 0;
+  return b;
+}',
+  symbol := 'res_dec_chunk',
+  sql_name := 'res_dec_chunk',
+  return_type := 'varchar',
+  arg_types := ['i64'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	OK
+
+query II
+SELECT count(*) FILTER (WHERE res_dec_row(i) <> i::VARCHAR),
+       count(*) FILTER (WHERE res_dec_chunk(i) <> i::VARCHAR)
+FROM res_src;
+----
+0	0
+
+# chunk_scalar_loop copies each row before the next call, so a reused buffer
+# behaves as in row mode (single thread: a shared static is otherwise a race).
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'const char *res_static_chunk(long long v){
+  static char b[24]; char t[24]; int n = 0, i = 0; unsigned long long u = (unsigned long long)v;
+  do { t[n++] = (char)(48 + u % 10); u /= 10; } while (u);
+  while (n) b[i++] = t[--n];
+  b[i] = 0;
+  return b;
+}',
+  symbol := 'res_static_chunk',
+  sql_name := 'res_static_chunk',
+  return_type := 'varchar',
+  arg_types := ['i64'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	OK
+
+statement ok
+SET threads = 1;
+
+query I
+SELECT count(*) FILTER (WHERE res_static_chunk(i) <> i::VARCHAR) FROM (SELECT * FROM res_src LIMIT 100000);
+----
+0
+
+query T
+SELECT list(res_static_chunk(i) ORDER BY i) FROM (VALUES (7::BIGINT), (42), (1000)) t(i);
+----
+[7, 42, 1000]
+
+statement ok
+SET threads = 4;
+
+# BLOB built in scratch: little-endian bytes of v.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_blob_t res_le64(long long v){
+  ducktinycc_blob_t out = {0, 0};
+  unsigned char *b = (unsigned char *)ducktinycc_result_alloc(8);
+  unsigned long long u = (unsigned long long)v;
+  int k;
+  if (!b) return out;
+  for (k = 0; k < 8; k++) { b[k] = (unsigned char)(u >> (8 * k)); }
+  out.ptr = b;
+  out.len = 8;
+  return out;
+}',
+  symbol := 'res_le64',
+  sql_name := 'res_le64',
+  return_type := 'blob',
+  arg_types := ['i64'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	OK
+
+query T
+SELECT res_le64(258);
+----
+\x02\x01\x00\x00\x00\x00\x00\x00
+
+query I
+SELECT count(*) FILTER (WHERE res_le64(i) <> unhex(printf('%016x', i))[8:8] || unhex(printf('%016x', i))[7:7]
+                            || unhex(printf('%016x', i))[6:6] || unhex(printf('%016x', i))[5:5]
+                            || unhex(printf('%016x', i))[4:4] || unhex(printf('%016x', i))[3:3]
+                            || unhex(printf('%016x', i))[2:2] || unhex(printf('%016x', i))[1:1])
+FROM res_src;
+----
+0
+
+# LIST built in scratch: [v, v+1, ..., v+len-1] with len = v % 5.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_list_t res_seq(long long v){
+  ducktinycc_list_t out = {0, 0, 0, 0};
+  unsigned long long n = (unsigned long long)(v % 5), k;
+  long long *p;
+  if (n == 0) return out;
+  p = (long long *)ducktinycc_result_alloc(n * sizeof(long long));
+  if (!p) return out;
+  for (k = 0; k < n; k++) p[k] = v + (long long)k;
+  out.ptr = p;
+  out.len = n;
+  return out;
+}',
+  symbol := 'res_seq',
+  sql_name := 'res_seq',
+  return_type := 'i64[]',
+  arg_types := ['i64'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	OK
+
+query T
+SELECT res_seq(8);
+----
+[8, 9, 10]
+
+query I
+SELECT count(*) FILTER (WHERE res_seq(i) <> CASE WHEN i % 5 = 0 THEN []::BIGINT[] ELSE range(i, i + i % 5) END) FROM res_src;
+----
+0
+
+# A NULL STRUCT/UNION result has NULL children: field access must not read stale child slots.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_struct_t res_null_struct(int64_t x){
+  ducktinycc_struct_t out = {0, 0, 0, 0};
+  (void)x;
+  return out;
+}',
+  symbol := 'res_null_struct',
+  sql_name := 'res_null_struct',
+  return_type := 'struct<a:i64;b:struct<c:i64>>',
+  arg_types := ['i64']
+);
+----
+true	OK
+
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_union_t res_null_union(int64_t x){
+  ducktinycc_union_t out = {0, 0, 0, 0, 0};
+  (void)x;
+  return out;
+}',
+  symbol := 'res_null_union',
+  sql_name := 'res_null_union',
+  return_type := 'union<i:i64;s:varchar>',
+  arg_types := ['i64'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	OK
+
+query IIIIII
+SELECT count(*) FILTER (WHERE res_null_struct(i) IS NOT NULL),
+       count(*) FILTER (WHERE res_null_struct(i).a IS NOT NULL),
+       count(*) FILTER (WHERE res_null_struct(i).b.c IS NOT NULL),
+       count(*) FILTER (WHERE res_null_struct(NULL::BIGINT).a IS NOT NULL),
+       count(*) FILTER (WHERE union_tag(res_null_union(i)) IS NOT NULL),
+       count(*) FILTER (WHERE union_extract(res_null_union(i), 'i') IS NOT NULL)
+FROM res_src;
+----
+0	0	0	0	0	0

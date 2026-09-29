@@ -153,7 +153,36 @@ static void emit_compile(unsigned long trial) {
 	printf("SELECT 4242;\n");
 }
 
-static void emit_composite_properties(void) {
+static void emit_scalar_properties(unsigned long seed, unsigned long rows) {
+	const char *row_source =
+	    "long long fuzz_prop_row(long long x,long long y){ return x*3-y+17; }";
+	const char *chunk_source =
+	    "long long fuzz_prop_chunk(long long x,long long y){ return x*3-y+17; }";
+
+	printf("SELECT count(*) FROM tcc_module(mode := 'quick_compile', source := ");
+	sql_string(row_source);
+	printf(", symbol := 'fuzz_prop_row', sql_name := 'fuzz_prop_row', return_type := 'i64', "
+	       "arg_types := ['i64','i64'], wrapper_mode := 'row');\n");
+	printf("SELECT count(*) FROM tcc_module(mode := 'quick_compile', source := ");
+	sql_string(chunk_source);
+	printf(", symbol := 'fuzz_prop_chunk', sql_name := 'fuzz_prop_chunk', return_type := 'i64', "
+	       "arg_types := ['i64','i64'], wrapper_mode := 'chunk_scalar_loop');\n");
+	printf("WITH inputs AS (SELECT i, CAST(hash(i,%lu) %% 2000001 AS BIGINT)-1000000 x, "
+	       "CAST(hash(%lu,i) %% 2000001 AS BIGINT)-1000000 y FROM range(%lu) t(i)), "
+	       "got AS (SELECT x,y,fuzz_prop_row(x,y) r,fuzz_prop_chunk(x,y) c FROM inputs) "
+	       "SELECT CASE WHEN count(*)=%lu AND bool_and(r=x*3-y+17 AND c=x*3-y+17 AND r=c) "
+	       "THEN 1 ELSE error('scalar row/chunk property failed') END FROM got;\n",
+	       seed, seed, rows, rows);
+	printf("SELECT CASE WHEN fuzz_prop_row(NULL,1) IS NULL AND fuzz_prop_row(1,NULL) IS NULL AND "
+	       "fuzz_prop_chunk(NULL,1) IS NULL AND fuzz_prop_chunk(1,NULL) IS NULL "
+	       "THEN 1 ELSE error('scalar NULL property failed') END;\n");
+	printf("SELECT CASE WHEN count(*)=%lu AND min(v)=17 AND max(v)=17 "
+	       "THEN 1 ELSE error('constant-vector property failed') END "
+	       "FROM (SELECT fuzz_prop_chunk(7,21) v FROM range(%lu));\n",
+	       rows, rows);
+}
+
+static void emit_composite_properties(unsigned long seed, unsigned long rows) {
 	const char *list_source =
 	    "long long fuzz_list_sum(ducktinycc_list_t a){ unsigned long long i; long long out=0; for(i=0;i<a.len;i++){ "
 	    "const long long *p=(const long long *)ducktinycc_list_elem_ptr(&a,i,sizeof(long long)); if(p && "
@@ -167,21 +196,52 @@ static void emit_composite_properties(void) {
 	    "const long long *k=(const long long *)ducktinycc_map_key_ptr(&m,i,sizeof(long long)); const long long "
 	    "*v=(const long long *)ducktinycc_map_value_ptr(&m,i,sizeof(long long)); if(k && v && "
 	    "ducktinycc_map_key_is_valid(&m,i) && ducktinycc_map_value_is_valid(&m,i)) out+=*k+*v; } return out; }";
+	const char *struct_source =
+	    "long long fuzz_struct_sum(ducktinycc_struct_t s){ const long long *a=(const long long *)"
+	    "ducktinycc_struct_field_ptr(&s,0); const long long *b=(const long long *)"
+	    "ducktinycc_struct_field_ptr(&s,1); long long out=0; if(a && ducktinycc_struct_field_is_valid(&s,0)) "
+	    "out+=a[s.offset]; if(b && ducktinycc_struct_field_is_valid(&s,1)) out+=b[s.offset]; return out; }";
 
 	printf("SELECT count(*) FROM tcc_module(mode := 'quick_compile', source := ");
 	sql_string(list_source);
 	printf(", symbol := 'fuzz_list_sum', sql_name := 'fuzz_list_sum', return_type := 'i64', arg_types := ['i64[]']);\n");
 	printf("SELECT CASE WHEN list(g ORDER BY n) = [3,7] THEN 1 ELSE error('LIST offset property failed') END FROM (SELECT n, fuzz_list_sum(v) g FROM (VALUES (1,[1::BIGINT,2]),(2,[3::BIGINT,4])) t(n,v));\n");
+	printf("WITH inputs AS (SELECT i, CAST(hash(i,%lu) %% 1000001 AS BIGINT)-500000 x FROM range(%lu) t(i)) "
+	       "SELECT CASE WHEN count(*)=%lu AND bool_and(fuzz_list_sum([x,x+1,NULL,-x])=x+1) "
+	       "THEN 1 ELSE error('LIST generated property failed') END FROM inputs;\n",
+	       seed, rows, rows);
 
 	printf("SELECT count(*) FROM tcc_module(mode := 'quick_compile', source := ");
 	sql_string(array_source);
 	printf(", symbol := 'fuzz_array_sum', sql_name := 'fuzz_array_sum', return_type := 'i64', arg_types := ['i64[2]']);\n");
 	printf("SELECT CASE WHEN list(g ORDER BY n) = [3,7] THEN 1 ELSE error('ARRAY offset property failed') END FROM (SELECT n, fuzz_array_sum(v) g FROM (VALUES (1,[1::BIGINT,2]::BIGINT[2]),(2,[3::BIGINT,4]::BIGINT[2])) t(n,v));\n");
+	printf("WITH inputs AS (SELECT i, CAST(hash(%lu,i) %% 1000001 AS BIGINT)-500000 x FROM range(%lu) t(i)) "
+	       "SELECT CASE WHEN count(*)=%lu AND bool_and(fuzz_array_sum([x*2+1,CASE WHEN i%%3=0 THEN NULL ELSE -x END]"
+	       "::BIGINT[2])=CASE WHEN i%%3=0 THEN x*2+1 ELSE x+1 END) "
+	       "THEN 1 ELSE error('ARRAY generated property failed') END FROM inputs;\n",
+	       seed, rows, rows);
 
 	printf("SELECT count(*) FROM tcc_module(mode := 'quick_compile', source := ");
 	sql_string(map_source);
 	printf(", symbol := 'fuzz_map_sum', sql_name := 'fuzz_map_sum', return_type := 'i64', arg_types := ['map<i64;i64>']);\n");
 	printf("SELECT CASE WHEN list(g ORDER BY n) = [3,7] THEN 1 ELSE error('MAP offset property failed') END FROM (SELECT n, fuzz_map_sum(v) g FROM (VALUES (1,MAP([1::BIGINT],[2::BIGINT])),(2,MAP([3::BIGINT],[4::BIGINT]))) t(n,v));\n");
+	printf("WITH inputs AS (SELECT i, CAST(hash(i,%lu) %% 1000001 AS BIGINT)-500000 x FROM range(%lu) t(i)) "
+	       "SELECT CASE WHEN count(*)=%lu AND bool_and(fuzz_map_sum(MAP([x,x+1],[x*2,NULL]))=x*3) "
+	       "THEN 1 ELSE error('MAP generated property failed') END FROM inputs;\n",
+	       seed, rows, rows);
+
+	printf("SELECT count(*) FROM tcc_module(mode := 'quick_compile', source := ");
+	sql_string(struct_source);
+	printf(", symbol := 'fuzz_struct_sum', sql_name := 'fuzz_struct_sum', return_type := 'i64', "
+	       "arg_types := ['struct<a:i64;b:i64>']);\n");
+	printf("WITH inputs AS (SELECT i, CAST(hash(i,%lu) %% 1000001 AS BIGINT)-500000 x, "
+	       "CAST(hash(%lu,i) %% 1000001 AS BIGINT)-500000 y FROM range(%lu) t(i)) "
+	       "SELECT CASE WHEN count(*)=%lu AND bool_and(fuzz_struct_sum(struct_pack(a := x,b := y))=x+y) "
+	       "THEN 1 ELSE error('STRUCT generated property failed') END FROM inputs;\n",
+	       seed, seed, rows, rows);
+	printf("SELECT CASE WHEN fuzz_list_sum([]::BIGINT[])=0 AND fuzz_map_sum(MAP([]::BIGINT[],[]::BIGINT[]))=0 "
+	       "AND fuzz_list_sum(NULL) IS NULL AND fuzz_map_sum(NULL) IS NULL "
+	       "THEN 1 ELSE error('empty/NULL composite property failed') END;\n");
 
 	/* Five packed bytes force the TinyCC character parser through unsigned
 	 * wrapping instead of undefined signed left shift. */
@@ -208,7 +268,8 @@ int main(int argc, char **argv) {
 	printf("LOAD ");
 	sql_string(argv[1]);
 	printf(";\n");
-	emit_composite_properties();
+	emit_scalar_properties(seed, 4097 + trials % 4096);
+	emit_composite_properties(seed, 4097 + trials % 4096);
 	for (trial = 0; trial < trials; trial++) {
 		emit_preview(trial);
 		if (trial % 5 == 0) {

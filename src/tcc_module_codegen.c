@@ -234,13 +234,17 @@ static char *tcc_codegen_generate_wrapper_source(const char *module_symbol, cons
 		} else if (ok) {
 			const char *nc = tcc_codegen_ret_null_check(ret_type);
 			if (nc) {
+				/* Nullable returns (VARCHAR, BLOB, composites) point at memory the
+				 * target may reuse on its next call: the host copies each row out
+				 * before the loop advances. */
 				ok = tcc_text_buf_appendf(&src,
 				                          "    %s result = %s(%s);\n"
 				                          "    if (%s) {\n"
 				                          "      if (out_validity) { out_validity[row >> 6] &= ~(1ULL << (row & 63)); }\n"
 				                          "      continue;\n"
 				                          "    }\n"
-				                          "    out[row] = result;\n",
+				                          "    out[row] = result;\n"
+				                          "    if (!ducktinycc_batch_emit(row)) { return 0; }\n",
 				                          ret_c_type, target_symbol,
 				                          batch_call_args.data ? batch_call_args.data : "", nc);
 			} else {

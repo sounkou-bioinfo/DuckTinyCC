@@ -1,0 +1,254 @@
+# name: test/sql/tcc_module_aggregate.test
+# description: kind := 'aggregate': state lifecycle, NULL handling, grouping, parallel combine, result types
+# group: [ducktinycc]
+
+require ducktinycc
+
+# Mean: optional S_init omitted (state starts zeroed); S_final returning 0 gives NULL.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'aggregate',
+  source := 'typedef struct { double sum; int64_t n; } agg_mean_state;
+void agg_mean_step(agg_mean_state *st, double x) { st->sum += x; st->n++; }
+void agg_mean_combine(agg_mean_state *into, agg_mean_state *from) { into->sum += from->sum; into->n += from->n; }
+int agg_mean_final(agg_mean_state *st, double *out) {
+  if (st->n == 0) return 0;
+  *out = st->sum / (double)st->n;
+  return 1;
+}',
+  symbol := 'agg_mean',
+  sql_name := 'agg_mean',
+  return_type := 'f64',
+  arg_types := ['f64']
+);
+----
+true	OK
+
+query RR
+SELECT agg_mean(x), avg(x) FROM (VALUES (1.0), (2.0), (NULL), (6.0)) t(x);
+----
+3.0	3.0
+
+query R
+SELECT agg_mean(x) FROM (SELECT 1.0 AS x WHERE false);
+----
+NULL
+
+statement ok
+SET threads = 4;
+
+statement ok
+CREATE TABLE agg_src AS SELECT range % 7 AS k, (range * 0.5)::DOUBLE AS v, range::BIGINT AS i FROM range(1000000);
+
+query II
+SELECT count(*) FILTER (WHERE abs(m - a) > 1e-9), count(*)
+FROM (SELECT k, agg_mean(v) AS m, avg(v) AS a FROM agg_src GROUP BY k);
+----
+0	7
+
+query T
+SELECT abs(agg_mean(v) - avg(v)) < 1e-9 FROM agg_src;
+----
+true
+
+# Two arguments and an explicit S_init.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'aggregate',
+  source := 'typedef struct { int64_t best_key; int64_t best_val; int seen; } agg_argmax_state;
+void agg_argmax_init(agg_argmax_state *st) { st->seen = 0; st->best_key = -1; }
+void agg_argmax_step(agg_argmax_state *st, int64_t key, int64_t val) {
+  if (!st->seen || val > st->best_val) { st->best_key = key; st->best_val = val; st->seen = 1; }
+}
+void agg_argmax_combine(agg_argmax_state *into, agg_argmax_state *from) {
+  if (from->seen) agg_argmax_step(into, from->best_key, from->best_val);
+}
+int agg_argmax_final(agg_argmax_state *st, int64_t *out) {
+  if (!st->seen) return 0;
+  *out = st->best_key;
+  return 1;
+}',
+  symbol := 'agg_argmax',
+  sql_name := 'agg_argmax',
+  return_type := 'i64',
+  arg_types := ['i64', 'i64']
+);
+----
+true	OK
+
+query II
+SELECT agg_argmax(i, (i * 7919) % 1000003), arg_max(i, (i * 7919) % 1000003) FROM agg_src;
+----
+341332	341332
+
+query I
+SELECT agg_argmax(i, v::BIGINT) FROM agg_src WHERE false;
+----
+NULL
+
+# State grown with ducktinycc_realloc and freed by the optional S_destroy; VARCHAR result from result memory.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'aggregate',
+  source := 'typedef struct { char *buf; uint64_t len, cap; } agg_cat_state;
+static void agg_cat_append(agg_cat_state *st, const char *s, uint64_t n) {
+  if (st->len + n + 1 > st->cap) {
+    uint64_t cap = st->cap ? st->cap * 2 : 64;
+    while (cap < st->len + n + 1) cap *= 2;
+    st->buf = ducktinycc_realloc(st->buf, cap);
+    st->cap = cap;
+  }
+  for (uint64_t i = 0; i < n; i++) st->buf[st->len + i] = s[i];
+  st->len += n;
+}
+void agg_cat_step(agg_cat_state *st, const char *s) {
+  uint64_t n = 0;
+  while (s[n]) n++;
+  if (st->len) agg_cat_append(st, ",", 1);
+  agg_cat_append(st, s, n);
+}
+void agg_cat_combine(agg_cat_state *into, agg_cat_state *from) {
+  if (!from->len) return;
+  if (into->len) agg_cat_append(into, ",", 1);
+  agg_cat_append(into, from->buf, from->len);
+}
+int agg_cat_final(agg_cat_state *st, const char **out) {
+  char *r;
+  if (!st->len) return 0;
+  r = ducktinycc_result_alloc(st->len + 1);
+  if (!r) return 0;
+  for (uint64_t i = 0; i < st->len; i++) r[i] = st->buf[i];
+  r[st->len] = 0;
+  *out = r;
+  return 1;
+}
+void agg_cat_destroy(agg_cat_state *st) { ducktinycc_free(st->buf); }',
+  symbol := 'agg_cat',
+  sql_name := 'agg_cat',
+  return_type := 'varchar',
+  arg_types := ['varchar']
+);
+----
+true	OK
+
+# ORDER BY inside the call is not used: DuckDB crashes every C-API aggregate there
+# (duckdb/duckdb#26109).
+query T
+SELECT list_sort(string_split(agg_cat(s), ',')) FROM (VALUES ('b'), ('a'), (NULL), ('c')) t(s);
+----
+[a, b, c]
+
+query RRR
+SELECT agg_mean(DISTINCT x), agg_mean(x) FILTER (WHERE x > 1), max(m)
+FROM (SELECT x, agg_mean(x) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS m
+      FROM (VALUES (1.0), (1.0), (4.0)) t(x));
+----
+2.5	4.0	2.5
+
+query II
+SELECT k, length(agg_cat(i::VARCHAR)) = length(string_agg(i::VARCHAR, ',')) FROM agg_src GROUP BY k ORDER BY k LIMIT 2;
+----
+0	true
+1	true
+
+# LIST result built in result memory: [min, max].
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'aggregate',
+  source := 'typedef struct { int64_t lo, hi; int seen; } agg_range_state;
+void agg_range_step(agg_range_state *st, int64_t x) {
+  if (!st->seen || x < st->lo) st->lo = x;
+  if (!st->seen || x > st->hi) st->hi = x;
+  st->seen = 1;
+}
+void agg_range_combine(agg_range_state *into, agg_range_state *from) {
+  if (from->seen) { agg_range_step(into, from->lo); agg_range_step(into, from->hi); }
+}
+int agg_range_final(agg_range_state *st, ducktinycc_list_t *out) {
+  int64_t *p;
+  if (!st->seen) return 0;
+  p = ducktinycc_result_alloc(2 * sizeof(int64_t));
+  if (!p) return 0;
+  p[0] = st->lo;
+  p[1] = st->hi;
+  out->ptr = p;
+  out->len = 2;
+  return 1;
+}',
+  symbol := 'agg_range',
+  sql_name := 'agg_range',
+  return_type := 'i64[]',
+  arg_types := ['i64']
+);
+----
+true	OK
+
+query IT
+SELECT k, agg_range(i) FROM agg_src WHERE i < 20 GROUP BY k ORDER BY k LIMIT 3;
+----
+0	[0, 14]
+1	[1, 15]
+2	[2, 16]
+
+query I
+SELECT count(*) FILTER (WHERE r <> [mn, mx]) FROM (SELECT k, agg_range(i) r, min(i) mn, max(i) mx FROM agg_src GROUP BY k);
+----
+0
+
+# Errors.
+query TT
+SELECT ok, code FROM tcc_module(mode := 'quick_compile', kind := 'window', source := 'int x;', symbol := 'x',
+  return_type := 'i64', arg_types := ['i64']);
+----
+false	E_BAD_KIND
+
+query TT
+SELECT ok, code FROM tcc_module(mode := 'codegen_preview', kind := 'aggregate', symbol := 'nope',
+  return_type := 'i64', arg_types := ['i64']);
+----
+false	E_MISSING_ARGS
+
+query TT
+SELECT ok, code FROM tcc_module(mode := 'quick_compile', kind := 'aggregate', stability := 'volatile',
+  source := 'int x;', symbol := 'nope', return_type := 'i64', arg_types := ['i64']);
+----
+false	E_BAD_STABILITY
+
+query TT
+SELECT ok, code FROM tcc_module(mode := 'quick_compile', kind := 'aggregate', wrapper_mode := 'chunk_scalar_loop',
+  source := 'int x;', symbol := 'nope', return_type := 'i64', arg_types := ['i64']);
+----
+false	E_BAD_WRAPPER_MODE
+
+query TT
+SELECT ok, code FROM tcc_module(mode := 'quick_compile', kind := 'aggregate',
+  source := 'typedef struct { int64_t n; } agg_bad_state;
+void agg_bad_step(agg_bad_state *st, int64_t x) { st->n += x; }
+int agg_bad_final(agg_bad_state *st, int64_t *out) { *out = st->n; return 1; }',
+  symbol := 'agg_bad', return_type := 'i64', arg_types := ['i64']);
+----
+false	E_COMPILE_FAILED
+
+query T
+SELECT detail LIKE '%unresolved reference to %agg_bad2_combine%' FROM tcc_module(mode := 'quick_compile', kind := 'aggregate',
+  source := 'typedef struct { int64_t n; } agg_bad2_state;
+void agg_bad2_step(agg_bad2_state *st, int64_t x) { st->n += x; }
+int agg_bad2_final(agg_bad2_state *st, int64_t *out) { *out = st->n; return 1; }',
+  symbol := 'agg_bad2', return_type := 'i64', arg_types := ['i64']);
+----
+true
+
+query T
+SELECT detail LIKE '%__dtcc_agg_final%' FROM tcc_module(mode := 'codegen_preview', kind := 'aggregate',
+  source := 'typedef struct { int64_t n; } agg_prev_state;', symbol := 'agg_prev', return_type := 'i64',
+  arg_types := ['i64']);
+----
+true

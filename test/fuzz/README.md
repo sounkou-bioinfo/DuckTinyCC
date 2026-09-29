@@ -1,7 +1,7 @@
 # DuckTinyCC fuzzing
 
-DuckTinyCC fuzzes the boundaries it owns and keeps TinyCC execution separate
-from extension parser invariants.
+DuckTinyCC separately tests extension parser/codegen input handling and complete
+TinyCC compile/register/execute behavior.
 
 ## Native parser/codegen campaign
 
@@ -38,17 +38,37 @@ make fuzz-asan FUZZ_RUNS=10000 FUZZ_SEED=1234
 make fuzz-clean
 ```
 
-Tracked seeds are copied into a temporary writable corpus. A minimized failure
+Tracked seeds are copied into a temporary writable corpus. Native failures are
+copied from the temporary libFuzzer directory to `.fuzz/artifacts/` before the
+runner exits, and CI retains that directory for 14 days. A minimized failure
 must be added as a named seed and, when it exposes a semantic invariant, as an
 ordinary SQL regression too.
+
+## Shrinking native properties
+
+`test/property/ducktinycc_prop.c` uses vendored `greatest` and `theft` to
+generate and shrink valid recursive descriptors as well as arbitrary parser
+text. The same properties run normally and under ASan/UBSan:
+
+```sh
+make prop
+make prop-quick
+make prop-sanitize
+```
+
+See [`../property/README.md`](../property/README.md) for properties and replay
+controls.
 
 ## C-generated complete-extension SQL campaign
 
 `generate_sql_fuzz.c` is a deterministic C program that emits a complete SQL
 campaign. `scripts/test_sql_fuzz.sh` pipes it into one DuckDB CLI process and
 requires a final recovery marker. It covers malformed type/codegen requests,
-malformed C compilation, valid compile-and-call cases, and LIST/ARRAY/MAP
-multi-row offset properties. It uses no Python runtime.
+malformed C compilation, and valid compile-and-call cases. Generated runtime
+properties compare row and chunk wrappers with SQL expressions across more than
+one DuckDB vector and check NULL/constant inputs plus randomized
+LIST/ARRAY/STRUCT/MAP values, empty composites, and nonzero child offsets. It
+uses no Python runtime.
 
 ```sh
 make fuzz-sql
