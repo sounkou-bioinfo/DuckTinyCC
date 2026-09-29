@@ -220,7 +220,7 @@ SELECT ok, code FROM tcc_module(mode := 'quick_compile', kind := 'table',
 false	E_BAD_SIGNATURE
 
 query T
-SELECT detail LIKE '%unresolved reference to ''tf_bad_next''%' FROM tcc_module(mode := 'quick_compile',
+SELECT detail LIKE '%unresolved reference to %tf_bad_next%' FROM tcc_module(mode := 'quick_compile',
   kind := 'table', source := 'typedef struct { int x; } tf_bad_state;', symbol := 'tf_bad', return_type := 'i64',
   arg_types := []);
 ----

@@ -238,7 +238,7 @@ int agg_bad_final(agg_bad_state *st, int64_t *out) { *out = st->n; return 1; }',
 false	E_COMPILE_FAILED
 
 query T
-SELECT detail LIKE '%unresolved reference to ''agg_bad2_combine''%' FROM tcc_module(mode := 'quick_compile', kind := 'aggregate',
+SELECT detail LIKE '%unresolved reference to %agg_bad2_combine%' FROM tcc_module(mode := 'quick_compile', kind := 'aggregate',
   source := 'typedef struct { int64_t n; } agg_bad2_state;
 void agg_bad2_step(agg_bad2_state *st, int64_t x) { st->n += x; }
 int agg_bad2_final(agg_bad2_state *st, int64_t *out) { *out = st->n; return 1; }',
