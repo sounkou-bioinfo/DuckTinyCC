@@ -1,8 +1,8 @@
 # SQL reference
 
-DuckTinyCC exposes three table functions and a set of scalar memory helpers.
+DuckTinyCC exposes four table functions and a set of scalar memory helpers.
 Functions compiled by `tcc_module(...)` are registered as ordinary DuckDB
-scalar UDFs.
+scalar UDFs. Worked examples live in the [cookbook](cookbook.html).
 
 ## Table functions
 
@@ -11,6 +11,11 @@ scalar UDFs.
 | `tcc_module(...)` | Configure a session, stage build inputs, compile/register UDFs, and generate C helpers. |
 | `tcc_system_paths(...)` | Report effective embedded runtime, include, and library paths. |
 | `tcc_library_probe(...)` | Show search paths and candidate files for a library request. |
+| `tcc_help()` | List every function, `tcc_module` mode, type token, and C helper with its signature, a description, and an example. |
+
+The DuckDB C API has no way to attach descriptions to functions, so
+`duckdb_functions()` shows none for DuckTinyCC. `tcc_help()` provides them
+from SQL.
 
 `tcc_module(...)` returns one diagnostics row:
 
@@ -103,6 +108,25 @@ metadata.
 Composite inputs are borrowed descriptor views. Their C layouts and offset
 rules are documented under [descriptor views](internals.html#descriptor-views).
 
+DuckDB does not implicitly cast `BIGINT` to `UBIGINT`; declare `i64` for
+ordinary integer columns.
+
+## Returning values
+
+Fixed-width results are returned by value. `varchar`, `blob`, and composite
+results are pointers or descriptors that DuckTinyCC copies into the output
+vector immediately after each call, in both wrapper modes.
+
+- A string literal or other static constant is always safe to return.
+- Build run-time text, bytes, and LIST/ARRAY/MAP/STRUCT payloads in
+  `ducktinycc_result_alloc(size)`. The memory is private to the executing chunk
+  and thread and is released after DuckDB has copied the chunk's results.
+- Do not return a mutable `static` buffer. DuckDB calls the function from
+  several threads at once, and they would share it.
+- `NULL` (`varchar`), `len > 0 && ptr == NULL` (`blob`, `list`, `array`,
+  `map`), and `field_ptrs == NULL` (`struct`) return SQL `NULL`. A `NULL`
+  struct or union has `NULL` fields.
+
 ## Libraries and symbols
 
 `library` and `add_library` accept:
@@ -113,8 +137,11 @@ rules are documented under [descriptor views](internals.html#descriptor-views).
 - relative or absolute path-like values.
 
 DuckTinyCC compiles generated modules with `-nostdlib`. A header or `extern`
-declaration provides C types, not a definition at relocation time. Probe the
-effective candidates before relying on a platform library:
+declaration provides C types, not a definition at relocation time. TinyCC's own
+compiler-support archive, `libtcc1.a`, is always linked from the embedded
+runtime, so floating-point to 64-bit integer conversions, `va_arg`, and
+`<stdatomic.h>` work without linking a library. Probe the effective candidates before relying on a
+platform library:
 
 ```sql
 SELECT * FROM tcc_library_probe(library := 'm');

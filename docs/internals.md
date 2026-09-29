@@ -12,7 +12,8 @@ tcc_new
   → set embedded runtime path
   → set TCC_OUTPUT_MEMORY and -nostdlib
   → replay staged paths/options/defines/symbols
-  → compile source and generated wrapper
+  → compile ABI prelude + staged sources, ABI prelude + source + generated wrapper
+  → add embedded libtcc1.a (compiler support only)
   → tcc_relocate
   → resolve module_init
   → module_init(connection)
@@ -21,6 +22,12 @@ tcc_new
 
 `tcc_new_state` only clears staged session inputs and increments `state_id`.
 Real `TCCState` objects are created by compile/codegen paths.
+
+`-nostdlib` also suppresses TinyCC's implicit `libtcc1.a`, so it is added
+explicitly after every source: its members are pulled in only for the
+compiler-support symbols a module references. Its `va_list.o` needs `abort`,
+which is injected with the other compiler-support host symbols (`memcpy`,
+`memmove`, `memset`).
 
 ## Artifact lifetime
 
@@ -71,6 +78,25 @@ reimplementing bitmap or offset arithmetic.
 
 The row-sliced LIST/ARRAY/MAP rule is deliberate: adding the child offset to a
 data pointer a second time reads the wrong row.
+
+## Result memory
+
+Each scalar-UDF chunk execution owns a bump arena. The host records the active
+call in a thread-local pointer for the duration of the chunk, saving and
+restoring any outer call so re-entrant execution sees its own arena.
+`ducktinycc_result_alloc(size)` allocates 16-byte-aligned memory from that
+arena; outside a chunk it returns `NULL`. The arena is freed in the executor's
+cleanup path, after DuckDB has copied every result.
+
+`chunk_scalar_loop` wrappers call the host symbol `ducktinycc_batch_emit(row)`
+after storing each `varchar`, `blob`, or composite result, and the host copies
+that row into the output vector before the loop advances. Result pointers are
+therefore consumed per row in both wrapper modes.
+
+DuckDB reads STRUCT fields and UNION members through the child vectors' own
+validity. Whenever a STRUCT/UNION output row is `NULL`, the bridge marks every
+child row `NULL`, recursively and including the UNION tag, so field access on a
+`NULL` result is `NULL` rather than stale child data.
 
 ## Pointer registry
 

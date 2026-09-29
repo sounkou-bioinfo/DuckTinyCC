@@ -80,7 +80,9 @@ PRAGMA threads=1;
 
 # DuckTinyCC
 
-`DuckTinyCC` is a DuckDB C extension that lets us compile C code at runtime and register SQL scalar UDFs in-process through TinyCC. We use `tcc_module(...)` as the control plane for staging inputs, generating wrappers, compiling, and registering functions. We use `tcc_system_paths(...)` and `tcc_library_probe(...)` when we need to debug include/library resolution.
+`DuckTinyCC` is a DuckDB C extension that lets us compile C code at runtime and register SQL scalar UDFs in-process through TinyCC. We use `tcc_module(...)` as the control plane for staging inputs, generating wrappers, compiling, and registering functions. We use `tcc_system_paths(...)` and `tcc_library_probe(...)` when we need to debug include/library resolution, and `tcc_help()` to list every function, mode, type token, and C helper from SQL.
+
+The TinyCC runtime is embedded in the extension, so the target machine needs no compiler or TinyCC installation. Compiling and registering a small function takes under a millisecond. The [cookbook](https://sounkou-bioinfo.github.io/DuckTinyCC/cookbook.html) has worked examples, each run by the test suite.
 
 ## Quick Start
 
@@ -122,6 +124,8 @@ Scalar UDF stability defaults to `stability := 'consistent'`. Use `stability := 
 
 `decimal` maps to `ducktinycc_decimal_t`, a 128-bit scaled integer carrying `width` and `scale` metadata. SQL `DECIMAL(18,3)` values are passed through the bridge and round-tripped faithfully.
 
+Strings, blobs, and list or struct payloads returned from C should be allocated with `ducktinycc_result_alloc(size)`. DuckDB calls a UDF from several threads, so a mutable `static` buffer would be shared between concurrent calls. Result memory belongs to the executing chunk and is freed after DuckDB copies the results.
+
 ## How It Works
 
 At compile time, we parse signature tokens into recursive type descriptors, generate wrapper C source around the target symbol, and build one in-memory TinyCC artifact (`tcc_new -> compile -> relocate -> module_init`). No shared library file is emitted.
@@ -140,7 +144,7 @@ Registering the same SQL name twice within the same session is rejected with `E_
 
 DuckTinyCC compiles generated modules with TinyCC's `-nostdlib` option by default. This keeps common UDFs self-contained and avoids requiring system C development files just to compile pure arithmetic or DuckTinyCC-wrapper code. As a result, ordinary libc symbols are **not** linked implicitly.
 
-If your C code calls libc functions that DuckTinyCC has not injected as host symbols, explicitly link libc with `library := 'c'` on `compile`/`quick_compile`, or stage the same setting with `mode := 'add_library', library := 'c'`. Including a header or writing an `extern` declaration only declares the function for C type checking; it does not resolve the symbol at TinyCC relocation time. Use `tcc_library_probe(library := 'c')` to check whether the platform libc import/library is discoverable in your environment.
+TinyCC's compiler-support archive (`libtcc1.a`) is always linked from the embedded runtime, so floating-point to 64-bit integer conversions, `va_arg`, and `<stdatomic.h>` work under `-nostdlib`. If your C code calls libc functions that DuckTinyCC has not injected as host symbols, explicitly link libc with `library := 'c'` on `compile`/`quick_compile`, or stage the same setting with `mode := 'add_library', library := 'c'`. Including a header or writing an `extern` declaration only declares the function for C type checking; it does not resolve the symbol at TinyCC relocation time. Use `tcc_library_probe(library := 'c')` to check whether the platform libc import/library is discoverable in your environment.
 
 ```sql
 SELECT ok, code
