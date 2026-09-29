@@ -137,6 +137,19 @@ FROM tcc_module(
 ----
 OK
 
+query T
+SELECT code
+FROM tcc_module(
+  mode := 'codegen_preview',
+  source := 'ducktinycc_list_t temporal_nested(ducktinycc_list_t x){ return x; }',
+  symbol := 'temporal_nested',
+  sql_name := 'temporal_nested',
+  return_type := 'list<time>',
+  arg_types := ['uuid[]','date[2]','list<timestamp>','interval[3]','list<decimal>']
+);
+----
+OK
+
 query TTT
 SELECT ok, mode, code
 FROM tcc_module(

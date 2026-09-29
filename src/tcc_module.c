@@ -1756,6 +1756,18 @@ static const char *tcc_ffi_type_to_token(tcc_ffi_type_t type) {
 		return "varchar";
 	case TCC_FFI_BLOB:
 		return "blob";
+	case TCC_FFI_UUID:
+		return "uuid";
+	case TCC_FFI_DATE:
+		return "date";
+	case TCC_FFI_TIME:
+		return "time";
+	case TCC_FFI_TIMESTAMP:
+		return "timestamp";
+	case TCC_FFI_INTERVAL:
+		return "interval";
+	case TCC_FFI_DECIMAL:
+		return "decimal";
 	case TCC_FFI_STRUCT:
 		return "struct";
 	case TCC_FFI_MAP:
