@@ -18,6 +18,13 @@ static void ducktinycc_helper_free(void *ptr) {
 	free(ptr);
 }
 
+static void *ducktinycc_helper_realloc(void *ptr, uint64_t size) {
+	if (size > (uint64_t)SIZE_MAX) {
+		return NULL;
+	}
+	return realloc(ptr, (size_t)size);
+}
+
 /* TinyCC may lower aggregate arguments and assignments to these libc
  * primitives.  Keep them available under -nostdlib without making generated
  * modules discover or link a platform C library. */
@@ -305,8 +312,13 @@ static int ducktinycc_union_member_is_valid(const ducktinycc_union_t *u, uint64_
 #define TCC_HOST_SYMBOL_TABLE(X)                                                                                          \
 	X("duckdb_ext_api", &duckdb_ext_api)                                                                                 \
 	X("ducktinycc_register_signature", ducktinycc_register_signature)                                                    \
+	X("ducktinycc_register_aggregate", ducktinycc_register_aggregate)                                                    \
+	X("ducktinycc_register_table", ducktinycc_register_table)                                                            \
 	X("ducktinycc_helper_malloc", ducktinycc_helper_malloc)                                                              \
 	X("ducktinycc_helper_free", ducktinycc_helper_free)                                                                  \
+	X("ducktinycc_malloc", ducktinycc_helper_malloc)                                                                     \
+	X("ducktinycc_realloc", ducktinycc_helper_realloc)                                                                   \
+	X("ducktinycc_free", ducktinycc_helper_free)                                                                         \
 	X("ducktinycc_result_alloc", ducktinycc_result_alloc)                                                                \
 	X("ducktinycc_batch_emit", ducktinycc_batch_emit)                                                                    \
 	X("memcpy", ducktinycc_helper_memcpy)                                                                                \

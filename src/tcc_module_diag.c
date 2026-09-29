@@ -319,11 +319,12 @@ static const tcc_help_row_t tcc_help_rows[] = {
      "SELECT kind, key, value, exists FROM tcc_library_probe(library := 'm');"},
 
     /* tcc_module modes */
-    {"mode", "quick_compile", "tcc_module(mode := 'quick_compile', source, symbol, sql_name, return_type, arg_types, ...)",
+    {"mode", "quick_compile",
+     "tcc_module(mode := 'quick_compile', source, symbol, sql_name, return_type, arg_types, kind := 'scalar', ...)",
      "One call: compile source, generate the wrapper, relocate in memory, and register sql_name.",
      "SELECT ok FROM tcc_module(mode := 'quick_compile', source := 'double sq(double x){ return x*x; }', "
      "symbol := 'sq', sql_name := 'sq', return_type := 'f64', arg_types := ['f64']);"},
-    {"mode", "compile", "tcc_module(mode := 'compile', return_type, arg_types, ...)",
+    {"mode", "compile", "tcc_module(mode := 'compile', return_type, arg_types, kind := 'scalar', ...)",
      "Compile everything staged with add_* modes plus the symbol bound by tinycc_bind, and register it.",
      "SELECT ok FROM tcc_module(mode := 'add_source', source := 'int64_t half(int64_t x){ return x / 2; }'); "
      "SELECT ok FROM tcc_module(mode := 'tinycc_bind', symbol := 'half', sql_name := 'half'); "
@@ -392,6 +393,35 @@ static const tcc_help_row_t tcc_help_rows[] = {
      "SELECT ok FROM tcc_module(mode := 'c_enum', source := 'enum color { RED, GREEN };', symbol := 'color', "
      "arg_types := ['RED', 'GREEN']); SELECT enum_color_GREEN();"},
 
+    /* function kinds; S is the symbol argument */
+    {"kind", "scalar", "R S(args...)",
+     "The default kind. Registers a scalar function that calls S for each row, or loops over each chunk in C with "
+     "wrapper_mode := 'chunk_scalar_loop'.",
+     "SELECT ok FROM tcc_module(mode := 'quick_compile', source := 'int64_t inc(int64_t x){ return x + 1; }', "
+     "symbol := 'inc', sql_name := 'inc', return_type := 'i64', arg_types := ['i64']); SELECT inc(41);"},
+    {"kind", "aggregate",
+     "S_state; void S_init(S_state *) optional; void S_step(S_state *, args...); "
+     "void S_combine(S_state *into, S_state *from); int S_final(S_state *, R *out); void S_destroy(S_state *) optional",
+     "kind := 'aggregate' builds an aggregate from C functions named after S; source must be in the same call. Rows "
+     "with a NULL argument are skipped, and S_final returning 0 gives NULL. Do not call it with ORDER BY inside the "
+     "parentheses or over a whole-partition window frame such as OVER (): DuckDB crashes C-API aggregates there "
+     "(duckdb/duckdb#26109).",
+     "SELECT ok FROM tcc_module(mode := 'quick_compile', kind := 'aggregate', source := 'typedef struct { int64_t n; } "
+     "cnt_state; void cnt_step(cnt_state *s, int64_t x) { (void)x; s->n++; } void cnt_combine(cnt_state *a, "
+     "cnt_state *b) { a->n += b->n; } int cnt_final(cnt_state *s, int64_t *out) { *out = s->n; return 1; }', "
+     "symbol := 'cnt', sql_name := 'cnt', return_type := 'i64', arg_types := ['i64']); SELECT cnt(range) FROM "
+     "range(10);"},
+    {"kind", "table",
+     "S_state; void S_init(S_state *, args...) optional when there are no args; int S_next(S_state *, C1 *, ..., "
+     "Cm *); void S_destroy(S_state *) optional",
+     "kind := 'table' builds a table function; source must be in the same call. Columns are the fields of a "
+     "struct<...> return_type, or one column named value. Arguments are constant bool, integer, float, or varchar "
+     "values. S_next fills one row and returns 1, or returns 0 when done. A scan runs on one thread.",
+     "SELECT ok FROM tcc_module(mode := 'quick_compile', kind := 'table', source := 'typedef struct { int64_t i, n; } "
+     "upto_state; void upto_init(upto_state *s, int64_t n) { s->n = n; } int upto_next(upto_state *s, int64_t *v) { "
+     "if (s->i >= s->n) return 0; *v = s->i++; return 1; }', symbol := 'upto', sql_name := 'upto', "
+     "return_type := 'i64', arg_types := ['i64']); SELECT * FROM upto(3);"},
+
     /* signature tokens */
     {"type", "bool", "bool -> _Bool", "SQL BOOLEAN.", "return_type := 'bool'"},
     {"type", "i8/i16/i32/i64", "i8 -> int8_t ... i64 -> int64_t", "SQL TINYINT, SMALLINT, INTEGER, BIGINT.",
@@ -431,9 +461,20 @@ static const tcc_help_row_t tcc_help_rows[] = {
 
     /* C helpers visible to compiled code */
     {"c_helper", "ducktinycc_result_alloc", "void *ducktinycc_result_alloc(uint64_t size)",
-     "Scratch memory for a returned VARCHAR, BLOB, or LIST/MAP/STRUCT payload. Private to the executing chunk and "
-     "thread, freed after DuckDB copies the results. Use it instead of static buffers, which race across threads.",
+     "Scratch memory for a returned VARCHAR, BLOB, or LIST/MAP/STRUCT payload, in scalar functions, S_final, and "
+     "S_next. Private to the executing chunk and thread, freed after DuckDB copies the results. Returns NULL in "
+     "S_step and S_combine, whose states must not keep it. Use it instead of static buffers, which race across "
+     "threads.",
      "char *b = ducktinycc_result_alloc(n + 1);"},
+    {"c_helper", "ducktinycc_malloc", "void *ducktinycc_malloc(uint64_t size)",
+     "Heap memory from the host C runtime for state that outlives a call, such as a growing aggregate state. "
+     "Needs no library := 'c'. Release it with ducktinycc_free, typically in S_destroy.",
+     "st->v = ducktinycc_malloc(256 * sizeof(int64_t));"},
+    {"c_helper", "ducktinycc_realloc", "void *ducktinycc_realloc(void *ptr, uint64_t size)",
+     "Resize memory from ducktinycc_malloc (NULL ptr allocates). Returns NULL on failure and leaves ptr valid.",
+     "v = ducktinycc_realloc(st->v, cap * sizeof(int64_t));"},
+    {"c_helper", "ducktinycc_free", "void ducktinycc_free(void *ptr)", "Release memory from ducktinycc_malloc or "
+     "ducktinycc_realloc. NULL is ignored.", "void s_destroy(s_state *st) { ducktinycc_free(st->v); }"},
     {"c_helper", "ducktinycc_list_elem_ptr",
      "const void *ducktinycc_list_elem_ptr(const ducktinycc_list_t *l, uint64_t i, uint64_t elem_size)",
      "Bounds-checked pointer to list element i, or NULL.",

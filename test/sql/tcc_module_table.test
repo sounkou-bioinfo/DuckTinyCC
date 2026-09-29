@@ -1,0 +1,227 @@
+# name: test/sql/tcc_module_table.test
+# description: kind := 'table': arguments, columns, multi-chunk output, result memory, S_destroy, errors
+# group: [ducktinycc]
+
+require ducktinycc
+
+# Two columns from a struct<> return_type, one BIGINT argument.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'table',
+  source := 'typedef struct { int64_t i, n, a, b; } tf_fib_state;
+void tf_fib_init(tf_fib_state *st, int64_t n) { st->n = n; st->b = 1; }
+int tf_fib_next(tf_fib_state *st, int64_t *idx, int64_t *val) {
+  int64_t t;
+  if (st->i >= st->n) return 0;
+  *idx = st->i++;
+  *val = st->a;
+  t = st->a + st->b;
+  st->a = st->b;
+  st->b = t;
+  return 1;
+}',
+  symbol := 'tf_fib',
+  sql_name := 'tf_fib',
+  return_type := 'struct<i:i64;fib:i64>',
+  arg_types := ['i64']
+);
+----
+true	OK
+
+query II
+SELECT * FROM tf_fib(8);
+----
+0	0
+1	1
+2	1
+3	2
+4	3
+5	5
+6	8
+7	13
+
+query II
+SELECT count(*), max(fib) FROM tf_fib(90);
+----
+90	1779979416004714189
+
+# Output larger than one vector.
+query II
+SELECT count(*), count(DISTINCT i) FROM tf_fib(5000);
+----
+5000	5000
+
+query I
+SELECT count(*) FROM tf_fib(0);
+----
+0
+
+query III
+SELECT a.i, b.i, a.fib + b.fib FROM tf_fib(3) a, tf_fib(2) b ORDER BY 1, 2;
+----
+0	0	0
+0	1	1
+1	0	1
+1	1	2
+2	0	1
+2	1	2
+
+# No arguments, a single column named value, and an optional S_init left out.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'table',
+  source := 'typedef struct { int32_t k; } tf_digits_state;
+int tf_digits_next(tf_digits_state *st, int32_t *out) {
+  if (st->k > 9) return 0;
+  *out = st->k++;
+  return 1;
+}',
+  symbol := 'tf_digits',
+  sql_name := 'tf_digits',
+  return_type := 'i32',
+  arg_types := []
+);
+----
+true	OK
+
+query TI
+SELECT list(value ORDER BY value), sum(value) FROM tf_digits();
+----
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]	45
+
+# VARCHAR argument; VARCHAR and LIST columns built in result memory; NULL cells.
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'table',
+  source := 'typedef struct { const char *s; int64_t pos, n; } tf_split_state;
+void tf_split_init(tf_split_state *st, const char *s) {
+  st->s = s;
+  while (s[st->n]) st->n++;
+}
+int tf_split_next(tf_split_state *st, int64_t *start, const char **word, ducktinycc_list_t *codes) {
+  int64_t b, e, k;
+  char *w;
+  int64_t *c;
+  while (st->pos < st->n && st->s[st->pos] == 32) st->pos++;
+  if (st->pos >= st->n) return 0;
+  b = st->pos;
+  while (st->pos < st->n && st->s[st->pos] != 32) st->pos++;
+  e = st->pos;
+  *start = b;
+  if (e - b == 1 && st->s[b] == 45) {
+    *word = 0;
+    return 1;
+  }
+  w = ducktinycc_result_alloc((uint64_t)(e - b + 1));
+  c = ducktinycc_result_alloc((uint64_t)(e - b) * sizeof(int64_t));
+  if (!w || !c) return 0;
+  for (k = 0; k < e - b; k++) { w[k] = st->s[b + k]; c[k] = (unsigned char)st->s[b + k]; }
+  w[e - b] = 0;
+  *word = w;
+  codes->ptr = c;
+  codes->len = (uint64_t)(e - b);
+  return 1;
+}',
+  symbol := 'tf_split',
+  sql_name := 'tf_split',
+  return_type := 'struct<start:i64;word:varchar;codes:i64[]>',
+  arg_types := ['varchar']
+);
+----
+true	OK
+
+query ITT
+SELECT * FROM tf_split('duck  tiny - cc');
+----
+0	duck	[100, 117, 99, 107]
+6	tiny	[116, 105, 110, 121]
+11	NULL	[]
+13	cc	[99, 99]
+
+query II
+SELECT count(*), sum(length(word)) FROM tf_split(repeat('ab ', 3000));
+----
+3000	6000
+
+# S_destroy runs once per scan: it bumps a counter in memory allocated from SQL.
+statement ok
+SET VARIABLE tf_ctr = tcc_alloc(8);
+
+statement ok
+SET VARIABLE tf_ctr_addr = tcc_dataptr(getvariable('tf_ctr'));
+
+query TT
+SELECT ok, code FROM tcc_module(mode := 'add_symbol', symbol_name := 'TF_DESTROYED',
+  symbol_ptr := getvariable('tf_ctr_addr'));
+----
+true	OK
+
+query TT
+SELECT ok, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  kind := 'table',
+  source := 'extern int64_t TF_DESTROYED[1];
+typedef struct { int64_t left; } tf_count_state;
+void tf_count_init(tf_count_state *st, int64_t n) { st->left = n; }
+int tf_count_next(tf_count_state *st, int64_t *out) {
+  if (st->left <= 0) return 0;
+  *out = st->left--;
+  return 1;
+}
+void tf_count_destroy(tf_count_state *st) { (void)st; TF_DESTROYED[0]++; }',
+  symbol := 'tf_count',
+  sql_name := 'tf_count',
+  return_type := 'i64',
+  arg_types := ['i64']
+);
+----
+true	OK
+
+query I
+SELECT sum(value) FROM tf_count(100);
+----
+5050
+
+query I
+SELECT count(*) FROM tf_count(3) a, tf_count(4) b;
+----
+12
+
+query I
+SELECT tcc_read_i64(getvariable('tf_ctr'), 0);
+----
+3
+
+# Errors.
+statement error
+SELECT * FROM tf_fib(NULL);
+----
+table function argument 1 is NULL
+
+query TT
+SELECT ok, code FROM tcc_module(mode := 'quick_compile', kind := 'table',
+  source := 'typedef struct { int x; } tf_bad_state;', symbol := 'tf_bad', return_type := 'i64',
+  arg_types := ['i64[]']);
+----
+false	E_BAD_SIGNATURE
+
+query TT
+SELECT ok, code FROM tcc_module(mode := 'quick_compile', kind := 'table',
+  source := 'typedef struct { int x; } tf_bad_state;', symbol := 'tf_bad', return_type := 'void',
+  arg_types := []);
+----
+false	E_BAD_SIGNATURE
+
+query T
+SELECT detail LIKE '%unresolved reference to ''tf_bad_next''%' FROM tcc_module(mode := 'quick_compile',
+  kind := 'table', source := 'typedef struct { int x; } tf_bad_state;', symbol := 'tf_bad', return_type := 'i64',
+  arg_types := []);
+----
+true

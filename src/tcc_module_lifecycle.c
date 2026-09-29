@@ -417,6 +417,7 @@ static void destroy_tcc_module_bind_data(void *ptr) {
 	TCC_FREE_BIND_FIELD(return_type);
 	TCC_FREE_BIND_FIELD(wrapper_mode);
 	TCC_FREE_BIND_FIELD(stability);
+	TCC_FREE_BIND_FIELD(kind);
 	TCC_FREE_BIND_FIELD(include_path);
 	TCC_FREE_BIND_FIELD(sysinclude_path);
 	TCC_FREE_BIND_FIELD(library_path);
@@ -548,6 +549,7 @@ static void tcc_module_bind(duckdb_bind_info info) {
 		bind->wrapper_mode = tcc_strdup("row");
 	}
 	TCC_BIND_READ_VARCHAR(stability);
+	TCC_BIND_READ_VARCHAR(kind);
 	TCC_BIND_READ_VARCHAR(include_path);
 	TCC_BIND_READ_VARCHAR(sysinclude_path);
 	TCC_BIND_READ_VARCHAR(library_path);
