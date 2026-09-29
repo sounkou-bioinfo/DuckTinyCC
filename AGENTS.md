@@ -41,7 +41,7 @@ This repository uses local precedent references under `.sync/` to guide implemen
   - Session/config: `config_get`, `config_set`, `config_reset`, `list`, `tcc_new_state`
   - Build staging: `add_include`, `add_sysinclude`, `add_library_path`, `add_library`, `add_option`, `add_define`, `add_header`, `add_source`, `add_symbol`, `tinycc_bind`
   - Compile/codegen: `compile`, `quick_compile`, `codegen_preview`
-  - Discovery helpers (separate table functions): `tcc_system_paths(...)`, `tcc_library_probe(...)`
+  - Discovery helpers (separate table functions): `tcc_system_paths(...)`, `tcc_library_probe(...)`, `tcc_help()`
 - Wrapper/runtime model (Rtinycc-style API-mode codegen):
   - DuckTinyCC generates C wrappers during compile that unpack typed args, call target C symbols, and re-pack result for DuckDB scalar UDF execution.
   - Wrapper modules are compiled+relocated in-memory via libtcc; no separate shared library artifact is produced.
@@ -111,6 +111,24 @@ This repository uses local precedent references under `.sync/` to guide implemen
 - Cross-platform duplicate SQL name fix:
   - `tcc_mode_compile` now checks `tcc_registry_find_sql_name()` before calling `tcc_codegen_compile_and_load_module`.  If the SQL name is already registered, returns `false`/`E_INIT_FAILED` immediately, bypassing `duckdb_register_scalar_function` whose return value differs by platform (Linux: error, macOS: silent replace).
 - Released as `0.0.4`; current development branch is `0.0.4.9000`.
+
+## Progress Snapshot (2026-09-29) — 0.3.0 release
+- Function kinds: `tcc_module(..., kind := 'scalar' | 'aggregate' | 'table')` on quick_compile/compile/codegen_preview.
+  - Codegen and host runtime for aggregate/table live in `src/tcc_module_kinds.c` (included before `tcc_module_host.c`). Generated adapters are appended to the user's compilation unit; `module_init` calls `ducktinycc_register_aggregate` / `ducktinycc_register_table`.
+  - Optional user hooks (`S_init`, `S_destroy`) are weak declarations; TinyCC resolves undefined weak symbols to 0 in `relocate_syms`.
+  - Aggregate states carry a 16-byte header with the context pointer (`TCC_AGG_STATE_HDR`) because DuckDB's aggregate destructor gets no function info.
+  - DuckDB bug duckdb/duckdb#26109: C-API aggregates crash under `agg(x ORDER BY y)` and whole-partition windows (`OVER ()`); `CAPIAggregateUpdate` does not flatten the constant state vector. No extension-side workaround; documented. Do not add tests that use those forms.
+  - Tests avoid `library := 'c'` (not exercised on macOS CI); use `ducktinycc_malloc/realloc/free` for heap state.
+- Returned-value memory model:
+  - `ducktinycc_result_alloc(size)` (host symbol, declared in the ABI prelude) bump-allocates from a per-chunk arena reached through a host `_Thread_local` current-call pointer; freed in `tcc_exec_cleanup`.
+  - Generated `chunk_scalar_loop` wrappers call `ducktinycc_batch_emit(row)` after each nullable (`varchar`/`blob`/composite) result; the host copies that row immediately. There is no post-loop write for those types anymore.
+  - `NULL` STRUCT/UNION output rows get `NULL` children recursively (`tcc_vector_null_children`), both inside `tcc_write_value_to_vector` and for rows the writer never saw.
+- `-nostdlib` drops TinyCC's implicit `libtcc1.a`; `tcc_add_compiler_runtime` links the extracted archive after all sources. `abort` is injected for `va_list.o`.
+- Staged `add_source` sources are compiled with the ABI prelude (parity with `quick_compile`).
+- `tcc_help()` in `src/tcc_module_diag.c` is the SQL-reachable manual (the C API cannot set function descriptions; `COMMENT ON` is rejected for extension functions). `test/sql/tcc_module_help.test` fails when a registered `tcc_*` function lacks a row.
+- `docs/cookbook.md` recipes run verbatim in `test/sql/tcc_cookbook.test` (except zlib). The docs site is four pages; update `scripts/build_docs_site.R` and `tools/site-header.html` together.
+- Testing trap: DuckDB's `range()` table function scans on one thread. Thread-safety tests must scan a physical table (`CREATE TABLE t AS SELECT ... FROM range(n)`) with `SET threads = N`.
+- TinyCC `__thread`/`_Thread_local` does give per-thread storage in memory-relocated code on linux_amd64; portability to other targets is unverified, so docs recommend `ducktinycc_result_alloc` instead.
 
 ## Embedded Runtime — Architecture Notes
 - `cmake/gen_embedded_runtime.cmake` is a pure-CMake `-P` script (no `objcopy`/`ld`/platform tools):
