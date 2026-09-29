@@ -1892,6 +1892,7 @@ bool RegisterTccModuleFunction(duckdb_connection connection, duckdb_database dat
 	rc = duckdb_register_table_function(connection, tf);
 	if (rc == DuckDBSuccess) {
 		rc = register_tcc_system_paths_function(connection) && register_tcc_library_probe_function(connection) &&
+		             register_tcc_help_function(connection) &&
 		             register_tcc_pointer_helper_functions(connection, state->ptr_registry)
 		         ? DuckDBSuccess
 		         : DuckDBError;
