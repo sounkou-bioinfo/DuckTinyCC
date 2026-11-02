@@ -2,6 +2,7 @@
 
 ## ducktinycc 0.3.0.9000 (2026-09-29)
 
+- **performance (LIST/ARRAY results)**: a returned LIST or ARRAY whose child is a fixed-width scalar (`bool`, integers, `f32`, `f64`) is copied into the DuckDB child vector with one `memcpy` per row; its validity is written only when the source or the child vector has a mask. The previous path made several DuckDB C API calls per element. On duckseq's LDZip dense-matrix query (5,000 `DOUBLE[]` columns of 5,000 values, `CREATE TEMP TABLE` plus a full scan, DuckDB R 1.5.5, five warm repetitions in one process) the mean fell from 921 to 440 ms on one thread and from 591 to 496 ms on four threads. Other child types keep the per-element path. New round-trip tests cover 10,000 rows of `BIGINT[]`, `DOUBLE[]` and `BIGINT[3]` with NULL elements across chunks.
 - **0.4.0 release target**: make callbacks from compiled C into DuckDB scalar functions a managed public API and reach full transferable feature parity with Rtinycc. Release requires an audited parity matrix and regressions for callback signatures, NULL/errors, lifetime, invalidation, reentrancy, and threading; R-specific facilities must be marked not applicable rather than silently omitted.
 
 ## ducktinycc 0.3.0 (2026-09-29)

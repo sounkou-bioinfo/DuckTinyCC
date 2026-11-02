@@ -311,3 +311,38 @@ FROM (VALUES ([1,2]::BIGINT[2]), ([3,4]::BIGINT[2])) t(v);
 ----
 3
 7
+
+# Fixed-width LIST/ARRAY returns are copied as one block per row. Round trips over
+# several 2048-row chunks must keep every value and NULL element, including rows
+# without NULLs that follow rows with NULLs in the same chunk.
+query TTT
+SELECT ok, mode, code
+FROM tcc_module(
+  mode := 'quick_compile',
+  source := 'ducktinycc_list_t batch_echo_f64_list(ducktinycc_list_t a){ return a; }',
+  symbol := 'batch_echo_f64_list',
+  sql_name := 'batch_echo_f64_list',
+  return_type := 'f64[]',
+  arg_types := ['f64[]'],
+  wrapper_mode := 'chunk_scalar_loop'
+);
+----
+true	quick_compile	OK
+
+query IIIIII
+WITH rows AS (
+  SELECT i,
+         CASE WHEN i % 3 = 0 THEN [i, NULL, i + 1] ELSE [i, i + 1] END::BIGINT[] AS every_chunk,
+         CASE WHEN i < 100 AND i % 2 = 0 THEN [NULL, i] ELSE [i, i] END::BIGINT[] AS first_chunk,
+         CASE WHEN i % 5 = 0 THEN [i, NULL, -i] ELSE [i, i, -i] END::BIGINT[3] AS arrays
+  FROM range(10000) r(i)
+)
+SELECT count(*) FILTER (WHERE batch_echo_list(every_chunk) IS DISTINCT FROM every_chunk),
+       count(*) FILTER (WHERE batch_echo_list(first_chunk) IS DISTINCT FROM first_chunk),
+       count(*) FILTER (WHERE batch_echo_f64_list(every_chunk::DOUBLE[]) IS DISTINCT FROM every_chunk::DOUBLE[]),
+       count(*) FILTER (WHERE batch_echo_f64_list(first_chunk::DOUBLE[]) IS DISTINCT FROM first_chunk::DOUBLE[]),
+       count(*) FILTER (WHERE batch_echo_array3(arrays) IS DISTINCT FROM arrays),
+       count(*)
+FROM rows;
+----
+0	0	0	0	0	10000

@@ -1676,6 +1676,64 @@ static bool tcc_set_vector_row_validity(duckdb_vector vector, idx_t row, bool va
 	return true;
 }
 
+/* tcc_ffi_type_is_fixed_width: true when the C bytes of a value equal its DuckDB vector bytes. */
+static bool tcc_ffi_type_is_fixed_width(tcc_ffi_type_t type) {
+	switch (type) {
+#define TCC_FFI_FIXED_WIDTH_CASE(type_id, token_str, c_type_name, duckdb_type_id, width_bytes)                              \
+	case type_id:                                                                                                          \
+		return true;
+		TCC_FFI_SCALAR_ROWS(TCC_FFI_FIXED_WIDTH_CASE)
+#undef TCC_FFI_FIXED_WIDTH_CASE
+	default:
+		return false;
+	}
+}
+
+/*
+ * tcc_copy_fixed_width_children: copy `len` fixed-width child values of one LIST or
+ * ARRAY row into child slots [dst_row, dst_row + len) with one memcpy, then carry
+ * their validity. Element i is read at src + i * width; its validity bit is
+ * src_offset + i in src_validity (NULL means all valid). A child vector without a
+ * validity mask is all valid, so it is left alone when every element is valid.
+ * When a mask exists, every copied slot's bit is written: DuckDB starts newly
+ * reserved slots as valid, so setting valid bits is defensive, and clearing
+ * bits for NULL elements is required. Borrows all inputs; no ownership transfer.
+ */
+static bool tcc_copy_fixed_width_children(duckdb_vector child, size_t width, idx_t dst_row, const void *src,
+                                          const uint64_t *src_validity, uint64_t src_offset, uint64_t len) {
+	uint8_t *dst;
+	uint64_t *validity;
+	uint64_t i;
+
+	if (len == 0) {
+		return true;
+	}
+	dst = (uint8_t *)duckdb_vector_get_data(child);
+	if (!dst || !src) {
+		return false;
+	}
+	memcpy(dst + (size_t)dst_row * width, src, (size_t)len * width);
+	if (src_validity) {
+		duckdb_vector_ensure_validity_writable(child);
+	}
+	validity = duckdb_vector_get_validity(child);
+	if (!validity) {
+		return true;
+	}
+	for (i = 0; i < len; i++) {
+		uint64_t s = src_offset + i;
+		uint64_t d = (uint64_t)dst_row + i;
+		uint64_t bit = 1ULL << (d & 63);
+
+		if (!src_validity || ((src_validity[s >> 6] >> (s & 63)) & 1ULL)) {
+			validity[d >> 6] |= bit;
+		} else {
+			validity[d >> 6] &= ~bit;
+		}
+	}
+	return true;
+}
+
 /*
  * DuckDB reads STRUCT fields (struct_extract, s.field) and UNION members from
  * the child vectors' own validity, so every child of a NULL STRUCT/UNION row
@@ -1821,6 +1879,19 @@ static bool tcc_write_value_to_vector_row(duckdb_vector vector, const tcc_typede
 			}
 			return false;
 		}
+		if (desc->as.list_like.child->kind == TCC_TYPEDESC_PRIMITIVE &&
+		    tcc_ffi_type_is_fixed_width(desc->as.list_like.child->ffi_type)) {
+			if (!tcc_copy_fixed_width_children(child_vector, tcc_ffi_type_size(desc->as.list_like.child->ffi_type),
+			                                   child_offset, list->ptr, list->validity, list->offset, list->len)) {
+				if (out_error) {
+					*out_error = "ducktinycc list return copy failed";
+				}
+				return false;
+			}
+			entries[row].offset = child_offset;
+			entries[row].length = (idx_t)list->len;
+			return true;
+		}
 		for (i = 0; i < (idx_t)list->len; i++) {
 			uint64_t src_idx = list->offset + (uint64_t)i;
 			bool child_valid = true;
@@ -1864,6 +1935,18 @@ static bool tcc_write_value_to_vector_row(duckdb_vector vector, const tcc_typede
 		}
 		if ((size_t)arr->len != array_len || (arr->len > 0 && !arr->ptr)) {
 			return tcc_set_vector_row_validity(vector, row, false);
+		}
+		if (desc->as.list_like.child->kind == TCC_TYPEDESC_PRIMITIVE &&
+		    tcc_ffi_type_is_fixed_width(desc->as.list_like.child->ffi_type)) {
+			if (!tcc_copy_fixed_width_children(child_vector, tcc_ffi_type_size(desc->as.list_like.child->ffi_type),
+			                                   (idx_t)((size_t)row * array_len), arr->ptr, arr->validity,
+			                                   arr->offset, (uint64_t)array_len)) {
+				if (out_error) {
+					*out_error = "ducktinycc array return copy failed";
+				}
+				return false;
+			}
+			return true;
 		}
 		for (i = 0; i < (idx_t)array_len; i++) {
 			uint64_t src_idx = arr->offset + (uint64_t)i;
